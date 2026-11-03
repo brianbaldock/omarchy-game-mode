@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="64" height="64" shape-rendering="crispEdges">
+  <title>Omarchy Game Mode</title>
+  <rect width="16" height="16" fill="#0e0e14"/>
+  <path fill="#9ece6a" d="M2 3h12v1h-12zM1 4h3v1h-3zM12 4h3v1h-3zM1 5h3v1h-3zM6 5h2v1h-2zM12 5h3v1h-3zM1 6h3v1h-3zM6 6h2v1h-2zM12 6h1v1h-1zM14 6h1v1h-1zM1 7h1v1h-1zM3 7h1v1h-1zM6 7h2v1h-2zM12 7h3v1h-3zM1 8h3v1h-3zM6 8h2v1h-2zM12 8h1v1h-1zM14 8h1v1h-1zM1 9h3v1h-3zM12 9h3v1h-3zM1 10h14v1h-14zM1 11h4v1h-4zM11 11h4v1h-4zM1 12h3v1h-3zM12 12h3v1h-3z"/>
+</svg>

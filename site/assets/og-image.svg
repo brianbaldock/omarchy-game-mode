@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <title>Omarchy Game Mode: Make the handheld feel at home.</title>
+  <defs>
+    <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+      <circle cx="11" cy="11" r="1.2" fill="#678549"/>
+    </pattern>
+    <radialGradient id="fade" cx="50%" cy="38%" r="62%">
+      <stop offset="0" stop-color="#fff" stop-opacity=".55"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <mask id="fieldmask"><rect width="1200" height="630" fill="url(#fade)"/></mask>
+    <linearGradient id="bands" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="19">
+      <stop offset="0" stop-color="#daecc6"/><stop offset=".263" stop-color="#daecc6"/>
+      <stop offset=".263" stop-color="#bbdd97"/><stop offset=".368" stop-color="#bbdd97"/>
+      <stop offset=".368" stop-color="#9ece6a"/><stop offset=".579" stop-color="#9ece6a"/>
+      <stop offset=".579" stop-color="#678549"/><stop offset=".737" stop-color="#678549"/>
+      <stop offset=".737" stop-color="#39482e"/><stop offset="1" stop-color="#39482e"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#0e0e14"/>
+  <rect width="1200" height="630" fill="url(#dots)" mask="url(#fieldmask)"/>
+  <g transform="translate(384 64) scale(9)" shape-rendering="crispEdges">
+    <path fill="url(#bands)" d="M4 0h7v1h-7zM37 0h7v1h-7zM2 1h44v1h-44zM1 2h12v1h-12zM35 2h12v1h-12zM0 3h5v1h-5zM8 3h5v1h-5zM15 3h12v1h-12zM35 3h6v1h-6zM42 3h6v1h-6zM0 4h4v1h-4zM6 4h1v1h-1zM9 4h4v1h-4zM35 4h4v1h-4zM40 4h3v1h-3zM44 4h4v1h-4zM0 5h4v1h-4zM6 5h1v1h-1zM9 5h4v1h-4zM15 5h6v1h-6zM35 5h6v1h-6zM42 5h6v1h-6zM0 6h5v1h-5zM8 6h5v1h-5zM35 6h13v1h-13zM0 7h13v1h-13zM15 7h4v1h-4zM20 7h4v1h-4zM25 7h4v1h-4zM30 7h4v1h-4zM35 7h13v1h-13zM0 8h6v1h-6zM7 8h6v1h-6zM15 8h1v1h-1zM18 8h1v1h-1zM20 8h4v1h-4zM25 8h4v1h-4zM30 8h4v1h-4zM35 8h5v1h-5zM43 8h5v1h-5zM0 9h5v1h-5zM8 9h5v1h-5zM15 9h1v1h-1zM18 9h1v1h-1zM20 9h4v1h-4zM25 9h4v1h-4zM30 9h4v1h-4zM35 9h4v1h-4zM41 9h1v1h-1zM44 9h4v1h-4zM0 10h6v1h-6zM7 10h6v1h-6zM15 10h4v1h-4zM20 10h4v1h-4zM25 10h4v1h-4zM30 10h4v1h-4zM35 10h4v1h-4zM41 10h1v1h-1zM44 10h4v1h-4zM0 11h13v1h-13zM15 11h3v1h-3zM19 11h3v1h-3zM35 11h5v1h-5zM43 11h5v1h-5zM0 12h10v1h-10zM11 12h2v1h-2zM35 12h2v1h-2zM38 12h10v1h-10zM0 13h48v1h-48zM0 14h13v1h-13zM35 14h13v1h-13zM0 15h12v1h-12zM36 15h12v1h-12zM1 16h10v1h-10zM37 16h10v1h-10zM1 17h9v1h-9zM38 17h9v1h-9zM2 18h6v1h-6zM40 18h6v1h-6z"/>
+  </g>
+  <text x="600" y="320" text-anchor="middle" fill="#c0caf5" font-family="'JetBrains Mono','JetBrainsMono Nerd Font',ui-monospace,monospace" font-size="44" font-weight="500" letter-spacing="-1">Make the handheld feel at home.<tspan fill="#9ece6a">&#x2588;</tspan></text>
+  <text x="600" y="380" text-anchor="middle" fill="#9ece6a" font-family="'Geist','Inter',system-ui,sans-serif" font-size="28" font-weight="600">Omarchy Game Mode</text>
+  <text x="600" y="422" text-anchor="middle" fill="#a9b1d6" font-family="'Geist','Inter',system-ui,sans-serif" font-size="22">A controller-first, full-screen home for handheld gaming on Omarchy.</text>
+  <path d="M60 520H1140" stroke="#24283b" stroke-width="2"/>
+  <text x="60" y="566" fill="#8b93b8" font-family="'JetBrains Mono','JetBrainsMono Nerd Font',ui-monospace,monospace" font-size="17">Independent community project · Not an official Omarchy release</text>
+  <text x="1140" y="566" text-anchor="end" fill="#9ece6a" font-family="'JetBrains Mono','JetBrainsMono Nerd Font',ui-monospace,monospace" font-size="17">Pre-release preview</text>
+</svg>
