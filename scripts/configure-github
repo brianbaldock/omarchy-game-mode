@@ -1,0 +1,75 @@
+#!/bin/bash
+set -euo pipefail
+
+repo=${1:-brianbaldock/omarchy-game-mode}
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+if [[ ! $repo =~ ^[[:alnum:]_.-]+/[[:alnum:]_.-]+$ ]]; then
+  printf 'Expected a GitHub repository in owner/name form.\n' >&2
+  exit 1
+fi
+
+if ! gh auth status >/dev/null 2>&1; then
+  printf 'GitHub authentication required: gh auth login\n' >&2
+  exit 1
+fi
+
+gh api "repos/$repo" --jq .full_name >/dev/null
+gh api --method PATCH "repos/$repo" \
+  --input "$root/.github/repository-settings.json" >/dev/null
+gh api --method PUT "repos/$repo/private-vulnerability-reporting" >/dev/null
+gh api --method PUT "repos/$repo/vulnerability-alerts" >/dev/null
+gh api --method PUT "repos/$repo/automated-security-fixes" >/dev/null
+
+gh api --method PUT "repos/$repo/actions/permissions" --input - >/dev/null <<'JSON'
+{"enabled":true,"allowed_actions":"selected","sha_pinning_required":true}
+JSON
+gh api --method PUT "repos/$repo/actions/permissions/selected-actions" --input - >/dev/null <<'JSON'
+{"github_owned_allowed":true,"verified_allowed":false,"patterns_allowed":[]}
+JSON
+gh api --method PUT "repos/$repo/actions/permissions/workflow" --input - >/dev/null <<'JSON'
+{"default_workflow_permissions":"read","can_approve_pull_request_reviews":false}
+JSON
+gh api --method PUT "repos/$repo/actions/permissions/fork-pr-contributor-approval" --input - >/dev/null <<'JSON'
+{"approval_policy":"all_external_contributors"}
+JSON
+
+default_setup=$(gh api "repos/$repo/code-scanning/default-setup" --jq .state)
+if [[ $default_setup == "configured" ]]; then
+  gh api --method PATCH "repos/$repo/code-scanning/default-setup" \
+    -f state=not-configured >/dev/null
+fi
+
+ruleset_id=$(gh api "repos/$repo/rulesets" --paginate \
+  --jq '.[] | select(.name == "Protect main" and .source_type == "Repository") | .id')
+
+if [[ $ruleset_id == *$'\n'* ]]; then
+  printf 'Multiple Protect main rulesets exist; reconcile them before rerunning.\n' >&2
+  exit 1
+fi
+
+if [[ -n $ruleset_id ]]; then
+  gh api --method PUT "repos/$repo/rulesets/$ruleset_id" \
+    --input "$root/.github/main-ruleset.json" >/dev/null
+else
+  gh api --method POST "repos/$repo/rulesets" \
+    --input "$root/.github/main-ruleset.json" >/dev/null
+fi
+
+if gh api "repos/$repo/pages" >/dev/null 2>&1; then
+  gh api --method PUT "repos/$repo/pages" -f build_type=workflow >/dev/null
+else
+  gh api --method POST "repos/$repo/pages" -f build_type=workflow >/dev/null
+fi
+
+gh api --method PUT "repos/$repo/environments/github-pages" --input - >/dev/null <<'JSON'
+{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
+JSON
+page_policy=$(gh api "repos/$repo/environments/github-pages/deployment-branch-policies" \
+  --jq '.branch_policies[] | select(.name == "main" and .type == "branch") | .id')
+if [[ -z $page_policy ]]; then
+  gh api --method POST "repos/$repo/environments/github-pages/deployment-branch-policies" \
+    -f name=main -f type=branch >/dev/null
+fi
+
+printf 'Configured repository security, main protection, and GitHub Pages for %s.\n' "$repo"

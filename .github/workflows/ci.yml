@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install test runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends python3-gi gir1.2-gtk-4.0 desktop-file-utils
+      - name: Run tests
+        run: make test PYTHON=python3
+      - name: Verify install staging
+        run: |
+          make install PREFIX=/usr DESTDIR="$RUNNER_TEMP/game-mode"
+          desktop-file-validate "$RUNNER_TEMP/game-mode/usr/share/applications/"*.desktop
