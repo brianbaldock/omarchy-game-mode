@@ -1,0 +1,6 @@
+__pycache__/
+*.tar.gz
+pkg/
+src/
+*.pkg.tar.*
+tests/scratch/

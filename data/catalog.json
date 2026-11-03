@@ -1,0 +1,338 @@
+{
+  "schemaVersion": 1,
+  "apps": [
+    {
+      "id": "steam",
+      "name": "Steam",
+      "descriptionKey": "app.steam.description",
+      "icon": "steam",
+      "category": "stores",
+      "architectures": [
+        "x86_64",
+        "aarch64"
+      ],
+      "launch": [
+        "uwsm-app",
+        "--",
+        "steam",
+        "steam://open/bigpicture"
+      ],
+      "install": [
+        "omarchy",
+        "install",
+        "gaming",
+        "steam"
+      ],
+      "availability": {
+        "command": "steam"
+      },
+      "match": {
+        "classes": [
+          "steam"
+        ],
+        "prefixes": [
+          "steam_app_"
+        ],
+        "titleContains": []
+      },
+      "defaultPinned": true
+    },
+    {
+      "id": "remote",
+      "name": "Xbox Remote Play",
+      "descriptionKey": "app.remote.description",
+      "icon": "remote",
+      "category": "streaming",
+      "architectures": [
+        "x86_64"
+      ],
+      "launch": [
+        "gtk-launch",
+        "greenlight-desktop"
+      ],
+      "install": [
+        "omarchy",
+        "pkg",
+        "aur",
+        "add",
+        "greenlight-bin"
+      ],
+      "availability": {
+        "desktop": "greenlight-desktop"
+      },
+      "match": {
+        "classes": [
+          "greenlight-desktop",
+          "Greenlight"
+        ],
+        "prefixes": [],
+        "titleContains": [
+          "Greenlight"
+        ]
+      },
+      "defaultPinned": true
+    },
+    {
+      "id": "cloud",
+      "name": "Xbox Cloud Gaming",
+      "descriptionKey": "app.cloud.description",
+      "icon": "cloud",
+      "category": "streaming",
+      "architectures": [
+        "x86_64",
+        "aarch64"
+      ],
+      "launch": [
+        "gtk-launch",
+        "Xbox Cloud Gaming"
+      ],
+      "install": [
+        "omarchy",
+        "install",
+        "gaming",
+        "xbox-cloud"
+      ],
+      "availability": {
+        "desktop": "Xbox Cloud Gaming"
+      },
+      "match": {
+        "classes": [
+          "chrome-www.xbox.com__en-US_play-Default"
+        ],
+        "prefixes": [],
+        "titleContains": [
+          "Xbox Cloud Gaming"
+        ]
+      },
+      "defaultPinned": true
+    },
+    {
+      "id": "geforce-now",
+      "name": "NVIDIA GeForce NOW",
+      "descriptionKey": "app.geforce-now.description",
+      "icon": "geforce-now",
+      "category": "streaming",
+      "architectures": [
+        "x86_64"
+      ],
+      "launch": [
+        "flatpak",
+        "run",
+        "com.nvidia.geforcenow"
+      ],
+      "install": [
+        "omarchy",
+        "install",
+        "gaming",
+        "geforce-now"
+      ],
+      "availability": {
+        "flatpak": "com.nvidia.geforcenow"
+      },
+      "match": {
+        "classes": [
+          "GeForceNOW"
+        ],
+        "prefixes": [],
+        "titleContains": [
+          "GeForce NOW"
+        ]
+      },
+      "defaultPinned": false
+    },
+    {
+      "id": "moonlight",
+      "name": "Moonlight",
+      "descriptionKey": "app.moonlight.description",
+      "icon": "moonlight",
+      "category": "streaming",
+      "architectures": [
+        "x86_64",
+        "aarch64"
+      ],
+      "launch": [
+        "moonlight"
+      ],
+      "install": null,
+      "informationUrl": "https://moonlight-stream.org",
+      "availability": {
+        "command": "moonlight"
+      },
+      "match": {
+        "classes": [
+          "com.moonlight_stream.Moonlight"
+        ],
+        "prefixes": [],
+        "titleContains": [
+          "Moonlight"
+        ]
+      },
+      "defaultPinned": true
+    },
+    {
+      "id": "retroarch",
+      "name": "RetroArch",
+      "descriptionKey": "app.retroarch.description",
+      "icon": "retroarch",
+      "category": "retro",
+      "architectures": [
+        "x86_64",
+        "aarch64"
+      ],
+      "launch": [
+        "retroarch"
+      ],
+      "install": [
+        "omarchy",
+        "install",
+        "gaming",
+        "retroarch"
+      ],
+      "availability": {
+        "command": "retroarch"
+      },
+      "match": {
+        "classes": [
+          "com.libretro.RetroArch"
+        ],
+        "prefixes": [],
+        "titleContains": [
+          "RetroArch"
+        ]
+      },
+      "defaultPinned": false
+    },
+    {
+      "id": "heroic",
+      "name": "Heroic Games Launcher",
+      "descriptionKey": "app.heroic.description",
+      "icon": "heroic",
+      "category": "stores",
+      "architectures": [
+        "x86_64"
+      ],
+      "launch": [
+        "gtk-launch",
+        "heroic"
+      ],
+      "install": [
+        "omarchy",
+        "install",
+        "gaming",
+        "heroic"
+      ],
+      "availability": {
+        "desktop": "heroic"
+      },
+      "match": {
+        "classes": [
+          "heroic"
+        ],
+        "prefixes": [],
+        "titleContains": [
+          "Heroic"
+        ]
+      },
+      "defaultPinned": false
+    },
+    {
+      "id": "lutris",
+      "name": "Lutris",
+      "descriptionKey": "app.lutris.description",
+      "icon": "lutris",
+      "category": "stores",
+      "architectures": [
+        "x86_64"
+      ],
+      "launch": [
+        "lutris"
+      ],
+      "install": [
+        "omarchy",
+        "install",
+        "gaming",
+        "lutris"
+      ],
+      "availability": {
+        "command": "lutris"
+      },
+      "match": {
+        "classes": [
+          "net.lutris.Lutris"
+        ],
+        "prefixes": [],
+        "titleContains": [
+          "Lutris"
+        ]
+      },
+      "defaultPinned": false
+    },
+    {
+      "id": "battlenet",
+      "name": "Battle.net",
+      "descriptionKey": "app.battlenet.description",
+      "icon": "battlenet",
+      "category": "stores",
+      "architectures": [
+        "x86_64"
+      ],
+      "launch": [
+        "omarchy-launch-battlenet"
+      ],
+      "install": [
+        "omarchy",
+        "install",
+        "gaming",
+        "battlenet"
+      ],
+      "availability": {
+        "desktop": "battlenet"
+      },
+      "match": {
+        "classes": [
+          "steam_app_battlenet",
+          "battle.net.exe"
+        ],
+        "prefixes": [],
+        "titleContains": [
+          "Battle.net"
+        ]
+      },
+      "defaultPinned": false
+    },
+    {
+      "id": "minecraft",
+      "name": "Minecraft",
+      "descriptionKey": "app.minecraft.description",
+      "icon": "minecraft",
+      "category": "native",
+      "architectures": [
+        "x86_64"
+      ],
+      "launch": [
+        "gtk-launch",
+        "minecraft-launcher"
+      ],
+      "install": [
+        "omarchy",
+        "install",
+        "and",
+        "launch",
+        "Minecraft",
+        "minecraft-launcher",
+        "minecraft-launcher"
+      ],
+      "availability": {
+        "desktop": "minecraft-launcher"
+      },
+      "match": {
+        "classes": [],
+        "prefixes": [],
+        "titleContains": [
+          "Minecraft"
+        ]
+      },
+      "defaultPinned": false
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Omarchy Game Mode
+GenericName=Gaming Home
+Comment=Controller-first home for your games and streaming services
+Exec=omarchy-game-mode show
+Icon=io.github.omarchy.GameMode
+Terminal=false
+Categories=Game;
+Keywords=game;controller;steam;xbox;gamepad;
+StartupNotify=false
+SingleMainWindow=true
