@@ -8,6 +8,16 @@ Hyprland and gets out of the way when you go back to the desktop.
 It is a GTK4 / python-gobject app that uses only the Python standard library. It is
 not a device driver: it does not remap firmware, grab devices, or inject input.
 
+## Build with us
+
+We need handheld testers, native-language reviewers, Python/GTK builders and
+accessibility feedback. Start with the [contribution guide](CONTRIBUTING.md) and
+[scoped help wanted issues](https://github.com/brianbaldock/omarchy-game-mode/issues?q=is%3Aissue%20is%3Aopen%20label%3A%22help%20wanted%22).
+Small fixes and reproducible reports are welcome; you do not need a handheld to help.
+This is an independent preview, not an official Omarchy component.
+
+[Watch the 56-second silent guided tour](https://brianbaldock.github.io/omarchy-game-mode/#preview), or [download the MP4](site/assets/omarchy-game-mode-demo.mp4). It shows the actual GTK UI with simulated session/controller state, not gameplay footage. [Recording details and chapters](media/README.md).
+
 ## Features
 
 - **Library**: pinned services (Steam Big Picture, Xbox Remote Play via Greenlight,
@@ -156,12 +166,13 @@ them gone. Game Mode never edits AntiMicroX profiles or any other app's configur
 - Needs Hyprland for window tracking and handoff. Without it, the app still opens and
   shows the IPC status.
 - Firmware "hold" gestures and hidraw-only buttons are not supported.
+- Virtual controllers are currently skipped. HHD and InputPlumber configurations may hide or exclusively own the physical controller, leaving Game Mode without native navigation. Compatibility with those input stacks is unverified; do not disable hardware protections to work around it.
 - Game recognition is a heuristic. A windowed game that wasn't started by a supported
   launcher counts as desktop until you choose **Game input** for it.
 - Nothing in the automated tests can show that the physical Guide button still reaches
   Steam. The tests only check that Game Mode ignores Guide; confirm the rest by hand on
   your device.
-- CI workflows exist in the repository but are not yet enabled on GitHub.
+- CI and CodeQL run on GitHub; passing them does not establish hardware compatibility.
 
 ## Credits and provenance
 
@@ -196,7 +207,7 @@ does not integrate with them (not even HHD or InputPlumber):
 - [OpenGamepadUI](https://github.com/ShadowBlip/OpenGamepadUI): Godot controller-native
   launcher and overlay.
 - [Handheld Daemon (hhd)](https://github.com/hhd-dev/hhd): handheld controller,
-  gyro and TDP support. It complements Game Mode and is a good choice for Ally hardware.
+  gyro and TDP support. Not yet validated together: Game Mode currently skips virtual controllers, so some HHD configurations may not provide navigation to this app.
 - [omarchy-rog-ally-codex-plugin](https://github.com/richelle-belle/omarchy-rog-ally-codex-plugin):
   ROG Ally setup automation.
 - [omarchy-launcher](https://github.com/headband42/omarchy-launcher): Quickshell
