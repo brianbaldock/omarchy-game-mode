@@ -1,0 +1,63 @@
+name: Hardware validation
+description: Record controller, game handoff or handheld compatibility results.
+title: "[Hardware] "
+labels: [hardware]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is a development preview. Report only what you physically tested.
+        Redact private window titles, account information and serial numbers.
+        Never include passwords, tokens or full process environments.
+  - type: textarea
+    id: setup
+    attributes:
+      label: Device and software
+      description: Device/controller model, Omarchy/Hyprland versions, Game Mode commit, and mapper/HHD setup. No serial numbers.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps and expected behavior
+      description: Include the game/platform and whether it is fullscreen or windowed.
+    validations:
+      required: true
+  - type: dropdown
+    id: input_stack
+    attributes:
+      label: Input stack
+      description: Choose the main stack. Mention combinations in the setup field; HHD/InputPlumber compatibility is unverified.
+      options:
+        - None / direct physical controller
+        - HHD
+        - InputPlumber
+        - Steam Input
+        - AntiMicroX
+        - Other / not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Controller connection
+      options:
+        - Built-in
+        - USB
+        - Bluetooth
+        - Wireless dongle
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Observed results
+      description: Mark relevant cases pass, fail or not tested. Include Guide, Home chord, focus/Resume and reconnect when relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Optional redacted evidence
+      description: Short logs or a recording showing only the relevant app. Review status output for private window titles first.

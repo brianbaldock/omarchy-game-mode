@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ideas and contributor coordination
+    url: https://github.com/brianbaldock/omarchy-game-mode/discussions
+    about: Discuss a larger change before implementing it.
+  - name: Report a security vulnerability privately
+    url: https://github.com/brianbaldock/omarchy-game-mode/security/advisories/new
+    about: Do not disclose exploitable security issues in public tickets.

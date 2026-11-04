@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; media-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="strict-origin-when-cross-origin">
   <title>Omarchy Game Mode — Make the handheld feel at home</title>
   <meta name="description" content="A controller-first, full-screen gaming home for Omarchy. An independent community project in pre-release preview, not an official Omarchy release.">
@@ -217,6 +217,16 @@
             </svg>
           </div>
           <figcaption><strong>Illustration, not a screenshot.</strong> A stylized Home layout. The theme picker recolors this illustration without changing your desktop.</figcaption>
+        </figure>
+        <figure class="mockup">
+          <div class="mockup-frame">
+            <video class="mockup-art" controls playsinline muted preload="none" poster="assets/demo-poster.jpg" width="1280" height="900" aria-label="Silent guided walkthrough of Omarchy Game Mode">
+              <source src="assets/omarchy-game-mode-demo.mp4" type="video/mp4">
+              <track kind="captions" src="assets/demo-captions.vtt" srclang="en" label="English guidance">
+              <a href="assets/omarchy-game-mode-demo.mp4">Download the silent walkthrough</a>.
+            </video>
+          </div>
+          <figcaption><strong>56-second silent guided tour.</strong> Actual GTK UI with a simulated Steam session and controller state, not gameplay footage. Text guidance covers Home, Discover, pinning, modes and Arabic RTL. <a href="https://github.com/brianbaldock/omarchy-game-mode/blob/main/media/README.md">Chapters and recording details</a>.</figcaption>
         </figure>
         <figure class="mockup">
           <div class="mockup-frame">
@@ -471,11 +481,12 @@
           <ul class="status-list">
             <li><span>Home, Discover and Settings</span><span class="badge is-done">In the preview</span></li>
             <li><span>Ten-platform catalog</span><span class="badge is-done">In the preview</span></li>
-            <li><span>Seven languages, including Arabic</span><span class="badge is-done">In the preview</span></li>
+            <li><span>Seven draft languages, including Arabic</span><span class="badge is-progress">Native review welcome</span></li>
             <li><span>Validation on handheld hardware</span><span class="badge is-progress">In progress</span></li>
             <li><span>Packaged release and stable version</span><span class="badge is-later">Not yet</span></li>
             <li><span>List of tested devices</span><span class="badge is-later">After validation</span></li>
           </ul>
+          <p>Help with <a href="https://github.com/brianbaldock/omarchy-game-mode/issues?q=is%3Aissue%20is%3Aopen%20label%3A%22help%20wanted%22">one small testing or review task</a>. Read the <a href="https://github.com/brianbaldock/omarchy-game-mode/blob/main/CONTRIBUTING.md">contribution guide</a>; hardware is not required for every task.</p>
         </div>
       </div>
     </section>
@@ -502,7 +513,7 @@
               <li>Platforms install only when you choose Install in Discover.</li>
               <li>Login start stays off until you turn it on in Settings.</li>
               <li>The repository is the source of truth for setup, packaging and removal.</li>
-              <li>Hit a problem? <a href="https://github.com/brianbaldock/omarchy-game-mode/issues">Open an issue</a> with your device and what happened.</li>
+              <li>Hit a problem? <a href="https://github.com/brianbaldock/omarchy-game-mode/issues/new?template=hardware-validation.yml">Open a hardware report</a> with your device and what happened. Virtual-controller stacks such as HHD/InputPlumber are not yet validated.</li>
             </ul>
           </div>
         </div>
@@ -567,7 +578,7 @@
           </details>
           <details>
             <summary>How can I help?</summary>
-            <p>Try the preview, <a href="https://github.com/brianbaldock/omarchy-game-mode/issues">report issues</a> with your device and what happened, or propose a platform for the catalog. The code is MIT-licensed.</p>
+            <p>Help test a handheld, review a translation, or improve Python/GTK interactions and accessibility. Read the <a href="https://github.com/brianbaldock/omarchy-game-mode/blob/main/CONTRIBUTING.md">contribution guide</a>, then pick a <a href="https://github.com/brianbaldock/omarchy-game-mode/issues?q=is%3Aissue%20is%3Aopen%20label%3A%22help%20wanted%22">scoped help wanted issue</a>. Small contributions and reproducible reports are welcome. The code is MIT-licensed.</p>
           </details>
         </div>
       </div>

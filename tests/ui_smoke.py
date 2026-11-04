@@ -67,7 +67,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     language = sys.argv[2] if len(sys.argv) > 2 else "en"
     width, height = (int(v) for v in (sys.argv[3] if len(sys.argv) > 3 else "1280x720").split("x"))
-    app = Gtk.Application(application_id="io.github.omarchy.GameModeSmoke")
+    app = Gtk.Application(application_id="io.github.brianbaldock.OmarchyGameModeSmoke")
 
     def shoot(window, name):
         paintable = Gtk.WidgetPaintable.new(window)
