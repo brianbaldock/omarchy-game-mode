@@ -9,7 +9,7 @@ import shutil
 import tomllib
 from pathlib import Path
 
-from . import APP_ID
+from . import APP_ID, LEGACY_APP_IDS
 
 SETTINGS_VERSION = 1
 AUTOSTART_MARKER = "X-Omarchy-Game-Mode-Owned=true"
@@ -99,6 +99,24 @@ def autostart_path(env=os.environ) -> Path:
     return config_home(env) / "autostart" / f"{APP_ID}.desktop"
 
 
+def legacy_autostart_paths(env=os.environ) -> list[Path]:
+    return [config_home(env) / "autostart" / f"{app_id}.desktop" for app_id in LEGACY_APP_IDS]
+
+
+def _owned_autostart(path: Path) -> bool:
+    try:
+        return AUTOSTART_MARKER in path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+
+
+def _remove_owned_legacy_autostart(env) -> list[Path]:
+    removed = [path for path in legacy_autostart_paths(env) if _owned_autostart(path)]
+    for path in removed:
+        path.unlink(missing_ok=True)
+    return removed
+
+
 def launcher_executable(env=os.environ) -> str | None:
     """Absolute path of the installed launcher (never a dev checkout)."""
     exe = env.get("OMARCHY_GAME_MODE_EXEC")
@@ -132,10 +150,7 @@ def autostart_entry(executable: str) -> str:
 
 
 def autostart_enabled(env=os.environ) -> bool:
-    try:
-        return AUTOSTART_MARKER in autostart_path(env).read_text(encoding="utf-8")
-    except OSError:
-        return False
+    return any(_owned_autostart(path) for path in (autostart_path(env), *legacy_autostart_paths(env)))
 
 
 def set_autostart(enabled: bool, env=os.environ) -> tuple[bool, str]:
@@ -145,9 +160,11 @@ def set_autostart(enabled: bool, env=os.environ) -> tuple[bool, str]:
         if not executable:
             return False, "omarchy-game-mode is not installed on PATH; install it before enabling login start"
         atomic_write(path, autostart_entry(executable))
+        _remove_owned_legacy_autostart(env)
         return True, str(path)
+    removed = _remove_owned_legacy_autostart(env)
     if not path.exists():
-        return True, "already off"
+        return True, ", ".join(map(str, removed)) or "already off"
     try:
         owned = AUTOSTART_MARKER in path.read_text(encoding="utf-8")
     except OSError as error:

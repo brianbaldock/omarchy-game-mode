@@ -69,7 +69,7 @@ Do not grant extra device permissions or bypass a lock screen for a report.
 Keep changes focused and explain the user-visible problem. Include reproduction
 steps, relevant checks and screenshots for UI changes. Add focused regression tests
 for behavior fixes; run `make test`. Validate desktop-entry changes with
-`desktop-file-validate data/io.github.omarchy.GameMode.desktop`.
+`desktop-file-validate data/*.desktop`.
 
 For translations, edit `data/locales/<locale>.json`, keep every key and placeholder,
 and run `make test`. Review visible UI as well as strings, especially Arabic RTL.

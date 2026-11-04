@@ -3,7 +3,7 @@ import shutil
 import unittest
 from pathlib import Path
 
-from gaminghome import core, settings
+from gaminghome import APP_ID, core, settings
 from gaminghome.catalog import CatalogError, load_catalog, parse_entry
 from gaminghome.core import (ACTIVATE, BTN_EAST, BTN_SELECT, BTN_SOUTH, BTN_START, DESKTOP, DOWN, EV_ABS, EV_KEY,
                              EV_SYN, GAME, HOME, MENU, SYN_DROPPED, SYN_REPORT, Window)
@@ -22,7 +22,7 @@ STEAM = W("0x10", "steam", "Steam Big Picture Mode")
 STEAM_CLIENT = W("0x11", "steam", "Steam")
 GREENLIGHT = W("0x20", "Greenlight", "Greenlight - Streaming Xbox")
 TERM = W("0x30", "Alacritty", "shell")
-HOME_WIN = W("0x40", "io.github.omarchy.GameMode", "Omarchy Game Mode")
+HOME_WIN = W("0x40", APP_ID, "Omarchy Game Mode")
 HEROIC = W("0x50", "heroic", "Heroic Games Launcher", pid=500)
 
 
@@ -449,7 +449,7 @@ class ApplicationTest(unittest.TestCase):
                              hypr=SimpleNamespace(focus=focused.append))
         Runtime._focus_home_if_needed(rt)  # not mapped yet: keep waiting
         self.assertEqual(focused, [])
-        own = W("0x41", "io.github.omarchy.GameMode", "Omarchy Game Mode", pid=os.getpid())
+        own = W("0x41", APP_ID, "Omarchy Game Mode", pid=os.getpid())
         model.update_windows([GREENLIGHT, HOME_WIN, own], None)
         Runtime._focus_home_if_needed(rt)
         Runtime._focus_home_if_needed(rt)
@@ -527,6 +527,30 @@ class SettingsTest(unittest.TestCase):
         path.write_text("[Desktop Entry]\nExec=other\n")
         self.assertFalse(settings.set_autostart(False, self.env)[0])
         self.assertTrue(path.exists())
+
+    def test_autostart_migrates_owned_legacy_entry_and_removes_both(self):
+        legacy = settings.legacy_autostart_paths(self.env)[0]
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(settings.autostart_entry("/bin/true"))
+        self.assertTrue(settings.autostart_enabled(self.env))
+        self.assertTrue(settings.set_autostart(True, self.env)[0])
+        self.assertFalse(legacy.exists())
+        self.assertTrue(settings.autostart_path(self.env).exists())
+        legacy.write_text(settings.autostart_entry("/bin/true"))
+        self.assertTrue(settings.set_autostart(False, self.env)[0])
+        self.assertFalse(legacy.exists())
+        self.assertFalse(settings.autostart_path(self.env).exists())
+        self.assertFalse(settings.autostart_enabled(self.env))
+
+    def test_autostart_preserves_unowned_legacy_entry(self):
+        legacy = settings.legacy_autostart_paths(self.env)[0]
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        foreign = "[Desktop Entry]\nExec=other\n"
+        legacy.write_text(foreign)
+        self.assertFalse(settings.autostart_enabled(self.env))
+        self.assertTrue(settings.set_autostart(True, self.env)[0])
+        self.assertTrue(settings.set_autostart(False, self.env)[0])
+        self.assertEqual(legacy.read_text(), foreign)
 
     def test_pins_persist_and_keep_unknown_ids(self):
         catalog = load_catalog(DATA / "catalog.json")

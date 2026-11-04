@@ -143,12 +143,16 @@ omarchy-game-mode quit               Restore the original AntiMicroX sets and ex
 ```
 
 Autostart is **off** by default. `autostart on` writes
-`~/.config/autostart/io.github.omarchy.GameMode.desktop`, which runs the installed
+`~/.config/autostart/io.github.brianbaldock.OmarchyGameMode.desktop`, which runs the installed
 launcher by its absolute path with `--autostart`, so Gaming Home appears at login.
 `background` starts the app without showing a window. `autostart off` removes only
 the autostart file Game Mode created.
 
 `omarchy-game-mode mapper on|off|status` turns AntiMicroX set switching on or off.
+
+### Upgrading from an earlier preview
+
+Quit the old running version with `omarchy-game-mode quit` before installing this update: its application ID changed to `io.github.brianbaldock.OmarchyGameMode`, so a new instance cannot quit the old one. Reinstall at the same prefix; old launcher/icon filenames are removed. A login entry owned by Game Mode remains recognized and is migrated by `autostart on` or removed by `autostart off`. Unowned legacy entries are left alone. Update any custom window rules or favorites that refer to the old ID.
 
 ## Uninstall
 

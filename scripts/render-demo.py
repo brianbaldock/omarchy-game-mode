@@ -57,7 +57,7 @@ def main():
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    app = Gtk.Application(application_id="io.github.omarchy.GameModeDemo")
+    app = Gtk.Application(application_id="io.github.brianbaldock.OmarchyGameModeDemo")
 
     with tempfile.TemporaryDirectory(prefix="game-mode-demo-") as directory:
         work = Path(directory)
