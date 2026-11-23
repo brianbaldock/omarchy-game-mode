@@ -45,5 +45,5 @@ dist:
 	mv -- "$$archive" omarchy-game-mode-$(VERSION).tar.gz
 
 clean:
-	rm -rf -- __pycache__ gaminghome/__pycache__ tests/__pycache__
+	rm -rf -- __pycache__ gaminghome/__pycache__ tests/__pycache__ tests/fakes/__pycache__
 	rm -f -- omarchy-game-mode-$(VERSION).tar.gz

@@ -2,6 +2,17 @@
 
 No EVIOCGRAB, no uinput, no synthetic events: other apps (Steam, games,
 AntiMicroX) keep receiving the same controller events.
+
+Virtual devices are skipped, with one exception: an input stack that hides
+the physical controller and re-emits it through a virtual gamepad (see
+``gaminghome.inputplumber``) can announce that gamepad through an injected
+allowlist. Recognition is a heuristic, not proof of origin: a virtual node is
+used only when its kernel identity is announced and no more look-alikes
+exist than were announced. An ambiguous group is rejected as a whole.
+
+While such a virtual gamepad is in use, the physical nodes that stack reads
+are its duplicates: they are not opened, not kept open and not reported.
+Without one, a hidden node is a controller that is present but unreadable.
 """
 
 from __future__ import annotations
@@ -11,8 +22,9 @@ import errno
 import fcntl
 import os
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Mapping
 
 from gi.repository import Gio, GLib
 
@@ -26,9 +38,11 @@ except (ImportError, AttributeError):  # older GLib
     _fd_add = GLib.unix_fd_add_full
 
 EVENT = struct.Struct("llHHi")
+INPUT_ID = struct.Struct("HHHH")
 LONG_BITS = struct.calcsize("l") * 8
 BUS_VIRTUAL = 0x06
 KEY_BYTES = 0x2FF // 8 + 1
+NAME_BYTES = 256
 
 
 def _ioc(direction, nr, size):
@@ -41,6 +55,14 @@ def EVIOCGKEY(length):
 
 def EVIOCGABS(code):
     return _ioc(2, 0x40 + code, 24)
+
+
+def EVIOCGID():
+    return _ioc(2, 0x02, INPUT_ID.size)
+
+
+def EVIOCGNAME(length):
+    return _ioc(2, 0x06, length)
 
 
 def parse_bitmap(text: str) -> set[int]:
@@ -70,12 +92,35 @@ def is_virtual(device_path: str, bustype: int, name: str) -> bool:
     return "/devices/virtual/" in device_path or bustype == BUS_VIRTUAL or "antimicrox" in lowered or "uinput" in lowered
 
 
+@dataclass(frozen=True)
+class GamepadIdentity:
+    """How the kernel describes an input device."""
+    name: str
+    bustype: int
+    vendor: int
+    product: int
+
+
+@dataclass(frozen=True)
+class VirtualGamepads:
+    """Virtual gamepads an input stack currently announces.
+
+    ``expected`` counts the announced devices per kernel identity.
+    ``owned_nodes`` are the physical event nodes that stack reads itself, and
+    normally hides from users.
+    """
+    expected: Mapping[GamepadIdentity, int] = field(default_factory=dict)
+    owned_nodes: frozenset = frozenset()
+
+
 @dataclass
 class Probe:
     node: str
     name: str
     gamepad: bool
     virtual: bool
+    identity: GamepadIdentity | None = None
+    uinput: bool = False
 
 
 def probe(node: str, sysfs_root: str = "/sys/class/input") -> Probe | None:
@@ -87,34 +132,69 @@ def probe(node: str, sysfs_root: str = "/sys/class/input") -> Probe | None:
         except OSError:
             return ""
 
+    def read_hex(rel):
+        try:
+            return int(read(rel) or "0", 16)
+        except ValueError:
+            return 0
+
     name = read("name")
     if not name and not base.exists():
         return None
-    try:
-        bustype = int(read("id/bustype") or "0", 16)
-    except ValueError:
-        bustype = 0
+    bustype = read_hex("id/bustype")
     keys = parse_bitmap(read("capabilities/key"))
     axes = parse_bitmap(read("capabilities/abs"))
-    return Probe(node, name or os.path.basename(node), is_gamepad(keys, axes), is_virtual(os.path.realpath(base), bustype, name))
+    device_path = os.path.realpath(base)
+    identity = GamepadIdentity(name, bustype, read_hex("id/vendor"), read_hex("id/product"))
+    return Probe(node, name or os.path.basename(node), is_gamepad(keys, axes), is_virtual(device_path, bustype, name),
+                 identity, "/devices/virtual/input/" in device_path)
+
+
+def evdev_identity(fd: int) -> GamepadIdentity | None:
+    """Identity of an open event node as the kernel reports it; None when it cannot be read."""
+    try:
+        ids = bytearray(INPUT_ID.size)
+        fcntl.ioctl(fd, EVIOCGID(), ids, True)
+        name = bytearray(NAME_BYTES)
+        fcntl.ioctl(fd, EVIOCGNAME(NAME_BYTES), name, True)
+    except OSError:
+        return None
+    bustype, vendor, product, _version = INPUT_ID.unpack(ids)
+    return GamepadIdentity(bytes(name).split(b"\0", 1)[0].decode("utf-8", "replace"), bustype, vendor, product)
 
 
 class _Device:
-    def __init__(self, node, name, fd, source):
-        self.node, self.name, self.fd, self.source = node, name, fd, source
+    def __init__(self, node, name, fd, source, virtual=False):
+        self.node, self.name, self.fd, self.source, self.virtual = node, name, fd, source, virtual
 
 
 class ControllerMonitor:
-    """Discovers physical gamepads and feeds their events to the interpreter."""
+    """Discovers gamepads and feeds their events to the interpreter.
 
-    def __init__(self, interpreter: core.ControllerInterpreter, on_change, dev_dir="/dev/input", sysfs_root="/sys/class/input"):
+    ``extra_gamepads`` returns the current :class:`VirtualGamepads` allowlist;
+    ``on_candidate`` is told when a virtual gamepad came or went, so the
+    provider of that allowlist can look again. Both are optional. ``identify``
+    reads the identity of an opened node and exists so tests need no evdev.
+    """
+
+    def __init__(self, interpreter: core.ControllerInterpreter, on_change, dev_dir="/dev/input",
+                 sysfs_root="/sys/class/input", extra_gamepads: Callable[[], VirtualGamepads] | None = None,
+                 on_candidate: Callable[[], None] | None = None,
+                 identify: Callable[[int], GamepadIdentity | None] = evdev_identity):
         self.interpreter = interpreter
         self.interpreter.on_resync = self.resync
         self.on_change = on_change
         self.dev_dir = dev_dir
         self.sysfs_root = sysfs_root
+        self.extra_gamepads = extra_gamepads
+        self.on_candidate = on_candidate
+        self.identify = identify
         self.devices: dict[str, _Device] = {}
         self.errors: dict[str, str] = {}
+        self.hidden: dict[str, str] = {}
+        self.ambiguous: tuple[str, ...] = ()
+        self._lookalikes: set[str] = set()
+        self._list_error: str | None = None
         self._monitor = None
 
     def start(self):
@@ -123,14 +203,13 @@ class ControllerMonitor:
             self._monitor.connect("changed", self._on_dir_changed)
         except GLib.Error as error:
             self.errors[self.dev_dir] = f"hotplug unavailable: {error.message}"
-        try:
-            nodes = sorted(n for n in os.listdir(self.dev_dir) if n.startswith("event"))
-        except OSError as error:
-            self.errors[self.dev_dir] = str(error)
-            nodes = []
-        for name in nodes:
-            self._try_add(os.path.join(self.dev_dir, name))
+        self._scan()
         self.on_change()
+
+    def rescan(self):
+        """Judge every node again after the virtual-gamepad allowlist changed."""
+        if self._scan():
+            self.on_change()
 
     def stop(self):
         if self._monitor:
@@ -141,8 +220,11 @@ class ControllerMonitor:
 
     def status(self) -> dict:
         return {
-            "devices": [{"path": d.node, "name": d.name} for d in self.devices.values()],
+            "devices": [{"path": d.node, "name": d.name, **({"virtual": True} if d.virtual else {})}
+                        for d in self.devices.values()],
             "errors": [{"path": p, "error": e} for p, e in self.errors.items()],
+            "ambiguous": list(self.ambiguous),
+            "unreadable": [{"path": p, "name": n} for p, n in self.hidden.items()],
         }
 
     def _on_dir_changed(self, _monitor, file, _other, event):
@@ -150,31 +232,144 @@ class ControllerMonitor:
         if not node or not os.path.basename(node).startswith("event"):
             return
         if event == Gio.FileMonitorEvent.DELETED:
-            changed = node in self.devices or node in self.errors
+            changed = node in self.devices or node in self.errors or node in self.hidden
+            lookalike = node in self._lookalikes
             self._remove(node, notify=False)
             self.errors.pop(node, None)
+            self.hidden.pop(node, None)
+            if lookalike:
+                # One look-alike fewer can settle an ambiguous group.
+                changed = self._scan() or changed
+                self._candidate()
             if changed:
                 self.on_change()
         elif event in (Gio.FileMonitorEvent.CREATED, Gio.FileMonitorEvent.ATTRIBUTE_CHANGED):
             # udev applies ACLs after the node appears: retry on attribute change.
-            if node not in self.devices and self._try_add(node):
-                self.on_change()
+            if node in self.devices:
+                # It also changes them when a stack hides a node that is already open.
+                if node in self._allowlist().owned_nodes and self._scan():
+                    self.on_change()
+                return
+            info = probe(node, self.sysfs_root)
+            if info is None or not info.gamepad:
+                return
+            if info.virtual:
+                # A virtual gamepad is never judged alone, only against every look-alike.
+                changed = self._scan()
+                if info.uinput:
+                    self._candidate()
+                if changed:
+                    self.on_change()
+            else:
+                allow = self._allowlist()
+                if not self._duplicate(node, allow) and self._open(node, info, allow):
+                    self.on_change()
 
-    def _try_add(self, node) -> bool:
-        if node in self.devices:
-            return False
-        info = probe(node, self.sysfs_root)
-        if info is None or not info.gamepad or info.virtual:
-            return False
+    def _duplicate(self, node, allow: VirtualGamepads) -> bool:
+        """A source of the stack whose virtual gamepad is in use: the same presses, twice."""
+        return node in allow.owned_nodes and any(device.virtual for device in self.devices.values())
+
+    def _allowlist(self) -> VirtualGamepads:
+        return (self.extra_gamepads() if self.extra_gamepads else None) or VirtualGamepads()
+
+    def _candidate(self):
+        if self.on_candidate:
+            self.on_candidate()
+
+    @staticmethod
+    def _judge_virtual(probes: dict, allow: VirtualGamepads) -> tuple[set[str], tuple[str, ...], set[str]]:
+        """Virtual nodes to use, names of groups rejected as ambiguous, and every look-alike seen."""
+        groups: dict[GamepadIdentity, list[str]] = {}
+        lookalikes = set()
+        for node, info in probes.items():
+            if info is not None and info.gamepad and info.uinput:
+                lookalikes.add(node)
+                if info.identity in allow.expected:
+                    groups.setdefault(info.identity, []).append(node)
+        accepted, ambiguous = set(), set()
+        for identity, nodes in groups.items():
+            # More look-alikes than announced devices: nothing says which one
+            # is the announced gamepad, so none of them is used.
+            if len(nodes) <= allow.expected[identity]:
+                accepted.update(nodes)
+            else:
+                ambiguous.add(identity.name)
+        return accepted, tuple(sorted(ambiguous)), lookalikes
+
+    def _list_nodes(self) -> list[str]:
+        try:
+            names = sorted(n for n in os.listdir(self.dev_dir) if n.startswith("event"))
+        except OSError as error:
+            self._list_error = self.errors[self.dev_dir] = str(error)
+            return []
+        if self._list_error is not None and self.errors.get(self.dev_dir) == self._list_error:
+            del self.errors[self.dev_dir]
+        self._list_error = None
+        return [os.path.join(self.dev_dir, name) for name in names]
+
+    def _scan(self, skip=None) -> bool:
+        """Open every eligible node, except ``skip``, and retire those that stopped qualifying."""
+        nodes = self._list_nodes()
+        allow = self._allowlist()
+        probes = {node: probe(node, self.sysfs_root) for node in nodes}
+        accepted, ambiguous, self._lookalikes = self._judge_virtual(probes, allow)
+        changed = ambiguous != self.ambiguous
+        self.ambiguous = ambiguous
+        for node, device in list(self.devices.items()):
+            if device.virtual and node not in accepted:
+                self._remove(node, notify=False)
+                changed = True
+        # Virtual gamepads first: whether a physical node is a duplicate depends on them.
+        gamepads = {node: info for node, info in probes.items() if info is not None and info.gamepad}
+        for node in sorted(accepted - set(self.devices) - {skip}):
+            changed = self._open(node, gamepads[node], allow) or changed
+        for node, info in gamepads.items():
+            if info.virtual:
+                continue
+            if self._duplicate(node, allow):
+                if node in self.devices:
+                    self._remove(node, notify=False)
+                    changed = True
+                changed = self.errors.pop(node, None) is not None or changed
+            elif node not in self.devices:
+                changed = self._open(node, info, allow) or changed
+            elif node in allow.owned_nodes and not os.access(node, os.R_OK):
+                # Opened before the stack hid it: the descriptor is grabbed and stays silent.
+                self._remove(node, notify=False)
+                self.hidden[node] = info.name
+                changed = True
+        stale = [n for n in self.hidden if n not in gamepads or n in self.devices or self._duplicate(n, allow)
+                 or n not in allow.owned_nodes]
+        for node in stale:
+            del self.hidden[node]
+        return changed or bool(stale)
+
+    def _fail(self, node, message) -> bool:
+        changed = self.errors.get(node) != message
+        self.errors[node] = message
+        return changed
+
+    def _open(self, node, info: Probe, allow: VirtualGamepads) -> bool:
         try:
             fd = os.open(node, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
         except PermissionError:
-            self.errors[node] = f"permission denied reading {info.name}"
-            return True
+            if node in allow.owned_nodes:
+                # Hidden on purpose by the stack that re-emits it: not an error.
+                changed = self.hidden.get(node) != info.name or node in self.errors
+                self.hidden[node] = info.name
+                self.errors.pop(node, None)
+                return changed
+            self.hidden.pop(node, None)
+            return self._fail(node, f"permission denied reading {info.name}")
         except OSError as error:
-            self.errors[node] = f"{info.name}: {error.strerror}"
-            return True
+            self.hidden.pop(node, None)
+            return self._fail(node, f"{info.name}: {error.strerror}")
+        if info.virtual and self.identify(fd) != info.identity:
+            # The node is not the device that was judged in sysfs (replaced in between).
+            os.close(fd)
+            return self.errors.pop(node, None) is not None
         self.errors.pop(node, None)
+        self.hidden.pop(node, None)
         self.interpreter.add_device(node)
         for code in (core.ABS_X, core.ABS_Y):
             try:
@@ -185,7 +380,7 @@ class ControllerMonitor:
                 pass
         condition = GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR
         source = _fd_add(GLib.PRIORITY_DEFAULT, fd, condition, self._on_readable, node)
-        self.devices[node] = _Device(node, info.name, fd, source)
+        self.devices[node] = _Device(node, info.name, fd, source, info.virtual)
         self.resync(node)
         return True
 
@@ -246,4 +441,9 @@ class ControllerMonitor:
             pass
         self.interpreter.remove_device(node)
         if notify:
+            if device.virtual:
+                # Its duplicates are closed; with the virtual gamepad gone they count again.
+                # The node that just failed is left alone until something announces it anew.
+                self._scan(skip=node)
+                self._candidate()
             self.on_change()
