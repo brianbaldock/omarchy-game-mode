@@ -24,6 +24,10 @@ INSTALL_TOKEN_RE = re.compile(r"^-{0,2}[A-Za-z0-9][A-Za-z0-9._=-]*$")
 DESKTOP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$")
 COMMAND_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 MAX_PATTERN_CHARS = 200
+MAX_PATTERN_REPEAT = 64
+MAX_PATTERN_WAYS = 2 ** 20
+# A counted repeat as re reads one ({n}, {m,n}, {m,} or {,n}); any other "{" is a literal.
+COUNTED_REPEAT_RE = re.compile(r"\{([0-9]*)(?:(,)([0-9]*))?\}")
 
 # Launcher UIs that have no controller navigation of their own: they keep
 # desktop (pointer) controls while focused. Everything else that matches a
@@ -112,17 +116,152 @@ def _strings(value, lower=False) -> tuple[str, ...]:
     return tuple(v.lower() if lower else v for v in value)
 
 
-def _patterns(value) -> tuple[re.Pattern, ...]:
-    """Regular expressions for window classes; each has to match a whole class, in any case."""
+def _patterns(value, warnings: list[str]) -> tuple[re.Pattern, ...]:
+    """Regular expressions for window classes; each has to match a whole class, in any case.
+
+    A pattern that does not compile, or whose matching could take very long
+    (see _check_backtracking), is left out with one warning: the entry still loads.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        warnings.append("patterns ignored: expected a list of strings")
+        return ()
     patterns = []
-    for text in _strings(value):
-        if len(text) > MAX_PATTERN_CHARS:
-            raise CatalogError("class pattern is too long")
+    for index, text in enumerate(value):
         try:
-            patterns.append(re.compile(text, re.IGNORECASE))
-        except re.error as error:
-            raise CatalogError(f"invalid class pattern {text!r}: {error}") from None
+            if not isinstance(text, str) or not text:
+                raise CatalogError("expected a non-empty string")
+            if len(text) > MAX_PATTERN_CHARS:
+                raise CatalogError(f"longer than {MAX_PATTERN_CHARS} characters")
+            pattern = re.compile(text, re.IGNORECASE)
+            _check_backtracking(text)
+            patterns.append(pattern)
+        except Exception as error:  # noqa: BLE001 - no pattern may keep the catalog from loading
+            reason = error if isinstance(error, CatalogError) else f"{type(error).__name__}: {error}"
+            warnings.append(f"patterns[{index}] ignored: {reason}")
     return tuple(patterns)
+
+
+@dataclass
+class _Part:
+    """What the backtracking check knows about one part of a pattern."""
+    ways: int = 1            # at most this many ways to match: alternatives times repeat counts
+    unbounded: bool = False  # holds a repeat without an upper bound
+    optional: bool = False   # can match nothing
+
+
+class _Group:
+    """A group of a pattern under check, or the whole pattern."""
+
+    def __init__(self):
+        self.closed_ways, self.closed_optional = 0, False  # the alternatives already ended by "|"
+        self.ways, self.optional = 1, True                 # the current alternative so far
+        self.unbounded = False
+        self.open_end = False  # the current one ends with a repeat without an upper bound and optional parts
+
+    def add(self, part: _Part):
+        if part.unbounded:
+            if self.open_end:
+                raise CatalogError("two repeats without an upper bound follow each other")
+            self.open_end = True
+        elif not part.optional:
+            self.open_end = False
+        self.ways = min(self.ways * part.ways, MAX_PATTERN_WAYS + 1)
+        self.optional = self.optional and part.optional
+        self.unbounded = self.unbounded or part.unbounded
+
+    def alternative(self):
+        self.closed_ways += self.ways
+        self.closed_optional = self.closed_optional or self.optional
+        self.ways, self.optional, self.open_end = 1, True, False
+
+    def close(self) -> _Part:
+        self.alternative()
+        return _Part(ways=self.closed_ways, unbounded=self.unbounded, optional=self.closed_optional)
+
+
+def _repeat(text: str, i: int) -> tuple[int, int | None, int]:
+    """The repeat at text[i] as (minimum, maximum or None, index after it); (1, 1, i) if there is none."""
+    symbol = text[i:i + 1]
+    if symbol in ("*", "+", "?"):
+        low, high = {"*": (0, None), "+": (1, None), "?": (0, 1)}[symbol]
+        i += 1
+    elif (count := COUNTED_REPEAT_RE.match(text, i)) and count.group() != "{}":
+        low = int(count[1] or 0)
+        high = (int(count[3]) if count[3] else None) if count[2] else low
+        i = count.end()
+    else:
+        return 1, 1, i
+    if text[i:i + 1] in ("?", "+"):  # lazy or possessive: the same repeat for this check
+        i += 1
+    return low, high, i
+
+
+def _repeated(part: _Part, low: int, high: int | None) -> _Part:
+    if (low, high) == (1, 1):
+        return part
+    if max(low, high or 0) > MAX_PATTERN_REPEAT:
+        raise CatalogError(f"a repeat count is above {MAX_PATTERN_REPEAT}")
+    if part.ways > 1 and (high is None or high > 1):
+        raise CatalogError("a group with alternatives or a variable repeat is repeated")
+    top = max(low, MAX_PATTERN_REPEAT) if high is None else high
+    return _Part(ways=sum(part.ways ** count for count in range(low, top + 1)),
+                 unbounded=part.unbounded or high is None, optional=part.optional or low == 0)
+
+
+def _class_end(text: str, i: int) -> int:
+    """Index after the character class that starts at text[i]; a "]" first in it is literal."""
+    i += 2 if text.startswith("[^", i) else 1
+    if text[i:i + 1] == "]":
+        i += 1
+    while text[i] != "]":
+        i += 2 if text[i] == "\\" else 1
+    return i + 1
+
+
+def _check_backtracking(text: str):
+    """Refuse a pattern whose matching could take very long on a long window class.
+
+    Backtracking gets slow when a class can be split among repeats in many
+    ways. So no repeat count may be above MAX_PATTERN_REPEAT, a group that
+    repeats may not hold alternatives or a repeat of variable count, two
+    repeats without an upper bound may not follow each other with only
+    optional parts between them, and there may be no more than
+    MAX_PATTERN_WAYS ways to match, a repeat without an upper bound counted
+    as one of up to MAX_PATTERN_REPEAT: no (a+)+, (a|aa)+, .*.* or long runs
+    of a?. Groups are ( ) or (?: ) and escapes stand for one character or a
+    boundary. Runs after re.compile, which has already refused bad syntax.
+    """
+    groups = [_Group()]
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == "(":
+            if text.startswith("(?", i) and not text.startswith("(?:", i):
+                raise CatalogError("only ( ) and (?: ) groups are supported")
+            groups.append(_Group())
+            i += 3 if text.startswith("(?:", i) else 1
+            continue
+        if char == "|":
+            groups[-1].alternative()
+            i += 1
+            continue
+        if char == ")":
+            part, i = groups.pop().close(), i + 1
+        elif char == "[":
+            part, i = _Part(), _class_end(text, i)
+        elif char == "\\":
+            escaped = text[i + 1]
+            if escaped.isdigit() or escaped in "xuUN":
+                raise CatalogError(f"unsupported escape \\{escaped}")
+            part, i = _Part(optional=escaped in "bBAZz"), i + 2
+        else:
+            part, i = _Part(optional=char in "^$"), i + 1
+        low, high, i = _repeat(text, i)
+        groups[-1].add(_repeated(part, low, high))
+    if groups[0].close().ways > MAX_PATTERN_WAYS:
+        raise CatalogError(f"more than {MAX_PATTERN_WAYS} ways to match a class")
 
 
 def _argv(value, what: str) -> tuple[str, ...]:
@@ -164,12 +303,14 @@ def _availability(value) -> tuple[tuple[str, str], ...]:
     return tuple(probes)
 
 
-def parse_entry(raw: dict) -> AppEntry:
+def parse_entry(raw: dict, warnings: list[str] | None = None) -> AppEntry:
+    """Check one app entry. A class pattern left out does not reject the entry: why is added to warnings."""
     if not isinstance(raw, dict):
         raise CatalogError("app entry must be an object")
     app_id = raw.get("id")
     if not isinstance(app_id, str) or not ID_RE.match(app_id):
         raise CatalogError(f"invalid app id {app_id!r}")
+    ignored: list[str] = []
     try:
         category = raw.get("category", "native")
         if category not in CATEGORIES:
@@ -183,7 +324,7 @@ def parse_entry(raw: dict) -> AppEntry:
         url = raw.get("informationUrl")
         if url is not None and not (isinstance(url, str) and url.startswith("https://")):
             raise CatalogError("informationUrl must be https")
-        return AppEntry(
+        entry = AppEntry(
             id=app_id,
             name=name,
             description_key=str(raw.get("descriptionKey") or f"app.{app_id}.description"),
@@ -195,13 +336,16 @@ def parse_entry(raw: dict) -> AppEntry:
             availability=_availability(raw.get("availability")),
             classes=_strings(match.get("classes"), lower=True),
             prefixes=_strings(match.get("prefixes"), lower=True),
-            patterns=_patterns(match.get("patterns")),
+            patterns=_patterns(match.get("patterns"), ignored),
             title_contains=_strings(match.get("titleContains"), lower=True),
             default_pinned=bool(raw.get("defaultPinned", False)),
             information_url=url,
         )
     except CatalogError as error:
         raise CatalogError(f"{app_id}: {error}") from None
+    if warnings is not None:
+        warnings.extend(f"{app_id}: {reason}" for reason in ignored)
+    return entry
 
 
 BUILTIN_CATALOG = {
@@ -282,7 +426,7 @@ def parse_catalog(data, source="inline") -> Catalog:
     apps, errors, seen = [], [], set()
     for raw in raw_apps:
         try:
-            entry = parse_entry(raw)
+            entry = parse_entry(raw, errors)
         except CatalogError as error:
             errors.append(str(error))
             continue

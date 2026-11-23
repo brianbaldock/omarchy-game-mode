@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from gaminghome import APP_ID, core, settings
-from gaminghome.catalog import CatalogError, load_catalog, parse_entry
+from gaminghome.catalog import CatalogError, load_catalog, parse_catalog, parse_entry
 from gaminghome.core import (ACTIVATE, BTN_EAST, BTN_SELECT, BTN_SOUTH, BTN_START, DESKTOP, DOWN, EV_ABS, EV_KEY,
                              EV_SYN, GAME, HOME, MENU, SYN_DROPPED, SYN_REPORT, Window)
 from gaminghome.i18n import Translator
@@ -572,6 +572,8 @@ class CatalogTest(unittest.TestCase):
                     "chrome-www.xbox.com__en-US_playlists-Default",
                     "chrome-www.xbox.com__en-US_remoteplay-Default", "chrome-www.xbox.com__en-US_play-Default\n",
                     "chrome-support.xbox.com__en-US_help_play-Default", "notchrome-www.xbox.com__en-US_play-Default",
+                    "chrome-support.xbox.com__en-US_play-Default", "msedge-support.xbox.com__play-Default",
+                    "chrome-www.xbox.com__en-US_support_play-Default", "chrome-www.xbox.com__en-US_play-",
                     "chrome-www.xbox.com.example.org__en-US_play-Default",
                     "chrome-www.example.com__en-US_play-Default"):
             window = W("0x72", cls, "Forza Horizon 5")
@@ -579,15 +581,42 @@ class CatalogTest(unittest.TestCase):
             model.update_windows([window], window)
             self.assertEqual(model.desired_mode(), DESKTOP, cls)
 
-    def test_class_patterns_match_a_whole_class_in_any_case_and_are_checked_at_load(self):
+    def test_class_patterns_match_a_whole_class_in_any_case(self):
         entry = parse_entry({**self.BASE, "match": {"patterns": ["app-[0-9]+"]}})
         self.assertTrue(entry.matches("APP-42", "", ""))
         self.assertTrue(entry.matches("", "app-7", ""))
         for cls in ("app-42-helper", "my-app-42", "app-", "app-42\n"):
             self.assertFalse(entry.matches(cls, "", ""), cls)
-        for bad in (["app-("], [""], "app-[0-9]+", [7], ["x" * 300]):
-            with self.assertRaises(CatalogError, msg=bad):
-                parse_entry({**self.BASE, "match": {"patterns": bad}})
+
+    def test_class_pattern_that_fails_or_could_match_slowly_is_ignored_with_one_warning(self):
+        # Checked at load: a pattern never keeps the catalog or its entry from loading, nor stalls matching.
+        for text in ("a{99999999999}", "a{65}", "a{2,65}", "a{65,}",      # repeat counts
+                     "(a+)+", "(.*)*", "(?:a|aa)+", "(a{1,9}){2}",       # repeats of a variable group
+                     ".*.*", "a+b?c*", "x(a*)b*",                        # open-ended repeats in a row
+                     "a?" * 21 + "a" * 21, ".*a" * 4 + "!",              # too many ways to split a class
+                     "app-(", "x" * 201, "", 7, "(a)\\1", "(?=a)"):      # invalid or unsupported
+            with self.subTest(pattern=text):
+                catalog = parse_catalog({"schemaVersion": 1, "apps": [
+                    {**self.BASE, "match": {"classes": ["x-app"], "patterns": [text, "app-[0-9]+"]}}]})
+                self.assertEqual(catalog.ids, ["x"])
+                self.assertEqual(len(catalog.errors), 1, catalog.errors)
+                self.assertTrue(catalog.errors[0].startswith("x: patterns[0] ignored: "), catalog.errors)
+                for cls in ("x-app", "APP-7"):
+                    self.assertIs(catalog.match_window(cls, "", ""), catalog.get("x"), cls)
+        catalog = parse_catalog({"schemaVersion": 1, "apps": [{**self.BASE, "match": {"patterns": "app-[0-9]+"}}]})
+        self.assertEqual((catalog.ids, len(catalog.errors)), (["x"], 1))
+        for text in ("(?:ab)+-[a-z]{2,64}", "a*-b+", "(x[a-z]*)?-y+", "[(*+?{]+\\.(?:ab){3}?(c|d)", ".*a" * 3):
+            catalog = parse_catalog({"schemaVersion": 1, "apps": [{**self.BASE, "match": {"patterns": [text]}}]})
+            self.assertEqual(catalog.errors, [], text)
+
+    def test_catalog_file_with_an_oversized_repeat_count_still_loads(self):
+        SCRATCH.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(shutil.rmtree, SCRATCH, ignore_errors=True)
+        path = SCRATCH / "catalog.json"
+        path.write_text(json.dumps({"schemaVersion": 1, "apps": [
+            {**self.BASE, "match": {"classes": ["x-app"], "patterns": ["x{99999999999}"]}}]}), encoding="utf-8")
+        catalog = load_catalog(path)
+        self.assertEqual((catalog.source, catalog.ids, len(catalog.errors)), (str(path), ["x"], 1))
 
 
 class FakeBus:

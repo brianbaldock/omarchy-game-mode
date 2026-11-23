@@ -101,7 +101,7 @@
         ],
         "prefixes": [],
         "patterns": [
-          "(chrome|chromium|msedge)-www\\.xbox\\.com__([a-z]{2,3}(-[a-z0-9]{2,4}){1,2}_)?play(_[a-z0-9.~%-]*)*-[a-z0-9_ ]+"
+          "(chrome|chromium|msedge)-www\\.xbox\\.com__([a-z]{2,3}-[a-z0-9]{2,4}(-[a-z0-9]{2,4})?_)?play(_[a-z0-9_.~%-]*)?-[a-z0-9_ ]+"
         ],
         "titleContains": [
           "Xbox Cloud Gaming"
