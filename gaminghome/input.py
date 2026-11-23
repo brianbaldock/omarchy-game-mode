@@ -8,7 +8,9 @@ the physical controller and re-emits it through a virtual gamepad (see
 ``gaminghome.inputplumber``) can announce that gamepad through an injected
 allowlist. Recognition is a heuristic, not proof of origin: a virtual node is
 used only when its kernel identity is announced and no more look-alikes
-exist than were announced. An ambiguous group is rejected as a whole.
+exist than were announced. An ambiguous group is rejected as a whole. After a
+virtual gamepad went away, another one is used only on an allowlist that was
+read afterwards: the earlier one may still describe the device that is gone.
 
 While such a virtual gamepad is in use, the physical nodes that stack reads
 are its duplicates: they are not opened, not kept open and not reported.
@@ -107,10 +109,12 @@ class VirtualGamepads:
 
     ``expected`` counts the announced devices per kernel identity.
     ``owned_nodes`` are the physical event nodes that stack reads itself, and
-    normally hides from users.
+    normally hides from users. ``serial`` numbers the read of the stack this
+    was learned from; a later read has a higher one.
     """
     expected: Mapping[GamepadIdentity, int] = field(default_factory=dict)
     owned_nodes: frozenset = frozenset()
+    serial: int = field(default=0, compare=False)
 
 
 @dataclass
@@ -173,13 +177,14 @@ class ControllerMonitor:
 
     ``extra_gamepads`` returns the current :class:`VirtualGamepads` allowlist;
     ``on_candidate`` is told when a virtual gamepad came or went, so the
-    provider of that allowlist can look again. Both are optional. ``identify``
-    reads the identity of an opened node and exists so tests need no evdev.
+    provider of that allowlist can look again, and returns the serial of the
+    first read that can answer. Both are optional. ``identify`` reads the
+    identity of an opened node and exists so tests need no evdev.
     """
 
     def __init__(self, interpreter: core.ControllerInterpreter, on_change, dev_dir="/dev/input",
                  sysfs_root="/sys/class/input", extra_gamepads: Callable[[], VirtualGamepads] | None = None,
-                 on_candidate: Callable[[], None] | None = None,
+                 on_candidate: Callable[[], int | None] | None = None,
                  identify: Callable[[int], GamepadIdentity | None] = evdev_identity):
         self.interpreter = interpreter
         self.interpreter.on_resync = self.resync
@@ -194,6 +199,7 @@ class ControllerMonitor:
         self.hidden: dict[str, str] = {}
         self.ambiguous: tuple[str, ...] = ()
         self._lookalikes: set[str] = set()
+        self._fresh_from = 0       # serial the allowlist must have before another virtual gamepad is used
         self._list_error: str | None = None
         self._monitor = None
 
@@ -233,14 +239,16 @@ class ControllerMonitor:
             return
         if event == Gio.FileMonitorEvent.DELETED:
             changed = node in self.devices or node in self.errors or node in self.hidden
-            lookalike = node in self._lookalikes
+            lookalike = node in self._lookalikes or (node in self.devices and self.devices[node].virtual)
             self._remove(node, notify=False)
             self.errors.pop(node, None)
             self.hidden.pop(node, None)
             if lookalike:
-                # One look-alike fewer can settle an ambiguous group.
+                # One look-alike fewer can settle an ambiguous group, once the allowlist was read again.
+                # The name may already belong to a new device, so the listing alone would not show the loss.
+                self._lookalikes.discard(node)
+                self._await_fresh()
                 changed = self._scan() or changed
-                self._candidate()
             if changed:
                 self.on_change()
         elif event in (Gio.FileMonitorEvent.CREATED, Gio.FileMonitorEvent.ATTRIBUTE_CHANGED):
@@ -272,9 +280,14 @@ class ControllerMonitor:
     def _allowlist(self) -> VirtualGamepads:
         return (self.extra_gamepads() if self.extra_gamepads else None) or VirtualGamepads()
 
-    def _candidate(self):
-        if self.on_candidate:
-            self.on_candidate()
+    def _candidate(self) -> int | None:
+        return self.on_candidate() if self.on_candidate else None
+
+    def _await_fresh(self):
+        """A virtual gamepad went away: have the allowlist read again, and trust no older one for a new device."""
+        needed = self._candidate()
+        if needed is not None:
+            self._fresh_from = max(self._fresh_from, needed)
 
     @staticmethod
     def _judge_virtual(probes: dict, allow: VirtualGamepads) -> tuple[set[str], tuple[str, ...], set[str]]:
@@ -312,7 +325,14 @@ class ControllerMonitor:
         nodes = self._list_nodes()
         allow = self._allowlist()
         probes = {node: probe(node, self.sysfs_root) for node in nodes}
-        accepted, ambiguous, self._lookalikes = self._judge_virtual(probes, allow)
+        accepted, ambiguous, lookalikes = self._judge_virtual(probes, allow)
+        if self._lookalikes - lookalikes:
+            self._await_fresh()
+        self._lookalikes = lookalikes
+        if allow.serial < self._fresh_from:
+            # Nothing tells the stack's next gamepad from another program's look-alike,
+            # and this allowlist may still list the one that went away.
+            accepted &= set(self.devices)
         changed = ambiguous != self.ambiguous
         self.ambiguous = ambiguous
         for node, device in list(self.devices.items()):
@@ -444,6 +464,6 @@ class ControllerMonitor:
             if device.virtual:
                 # Its duplicates are closed; with the virtual gamepad gone they count again.
                 # The node that just failed is left alone until something announces it anew.
+                self._await_fresh()
                 self._scan(skip=node)
-                self._candidate()
             self.on_change()

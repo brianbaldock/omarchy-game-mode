@@ -399,6 +399,34 @@ class ClientLogicTest(unittest.TestCase):
         self.assertEqual(len(self.bus.calls), sent)
         self.assertTrue(self.client.idle)
 
+    def test_a_hint_names_the_read_that_answers_it_and_that_read_is_always_reported(self):
+        self.appear()
+        self.settle()
+        changes = len(self.changes)
+        needed = self.client.hint()
+        self.assertGreater(needed, self.client.virtual_gamepads().serial)
+        self.fire()
+        self.bus.answer_all()                              # the same picture as before
+        self.assertEqual(self.client.virtual_gamepads().serial, needed)
+        self.assertEqual(len(self.changes), changes + 1)   # reported although nothing changed
+        self.settle()
+        self.assertEqual(len(self.changes), changes + 1)   # the look that confirms it is not
+
+        self.client.hint()
+        self.fire()                                        # a discovery is in flight...
+        needed = self.client.hint()                        # ...when a node goes away
+        self.bus.answer_all()
+        self.assertLess(self.client.virtual_gamepads().serial, needed)
+        self.fire()
+        self.refuse()                                      # a failed read answers nothing
+        self.assertLess(self.client.virtual_gamepads().serial, needed)
+        self.fire()
+        self.bus.answer_all()
+        self.assertGreaterEqual(self.client.virtual_gamepads().serial, needed)
+        self.settle()
+        self.client._vanished(self.bus, BUS_NAME)
+        self.assertGreater(self.client.hint(), needed)     # no owner: only a later read of a new one can answer
+
     def test_pending_failed_and_empty_are_told_apart(self):
         client = self.client
         self.assertEqual((client.state, client.settled), ("unknown", False))
@@ -734,18 +762,16 @@ class ClientBusTest(unittest.TestCase):
         self.assertEqual(client.virtual_gamepads(),
                          VirtualGamepads({ELITE: 2}, RC73YA_NODES | {"/dev/input/event30"}))
 
-    def test_virtual_pad_is_read_only_while_inputplumber_owns_its_name_and_announces_it(self):
-        # The three conditions together, wired the way the runtime wires them.
+    def wired(self):
+        """A mocked /dev/input, and a monitor and a client wired the way the runtime wires them."""
         shutil.rmtree(SCRATCH, ignore_errors=True)
         self.addCleanup(shutil.rmtree, SCRATCH, True)
         tree = fake_input.FakeInputTree(SCRATCH)
-        pad = tree.add(21, fake_input.ELITE)
-        source = tree.add(6, fake_input.PHYSICAL, where=fake_input.USB)
 
         def allowlist():  # the client speaks of /dev/input, the mocked tree lives elsewhere
             allow = client.virtual_gamepads()
             owned = frozenset(str(tree.dev / os.path.basename(node)) for node in allow.owned_nodes)
-            return VirtualGamepads(allow.expected, owned)
+            return VirtualGamepads(allow.expected, owned, allow.serial)
 
         interpreter = core.ControllerInterpreter(lambda _ms, _callback: 0, lambda _token: None, lambda _action: None)
         client = InputPlumberClient(lambda: monitor.rescan(), connection=self.bus.connect(), settle_ms=5, confirm_ms=10)
@@ -753,7 +779,17 @@ class ClientBusTest(unittest.TestCase):
                                     extra_gamepads=allowlist, on_candidate=client.hint, identify=tree.identify)
         self.clients.append(client)
         self.addCleanup(monitor.stop)
+        return tree, monitor, client
 
+    @staticmethod
+    def node_event(monitor, node, event=Gio.FileMonitorEvent.CREATED):
+        monitor._on_dir_changed(None, Gio.File.new_for_path(node), None, event)
+
+    def test_virtual_pad_is_read_only_while_inputplumber_owns_its_name_and_announces_it(self):
+        # The three conditions together.
+        tree, monitor, client = self.wired()
+        pad = tree.add(21, fake_input.ELITE)
+        source = tree.add(6, fake_input.PHYSICAL, where=fake_input.USB)
         impostor = self.fake(own=False, sources=("/dev/input/event6",))     # same objects, but not the name
         client.start()
         monitor.start()
@@ -774,6 +810,40 @@ class ClientBusTest(unittest.TestCase):
         owner.release()                                                     # the name is gone
         self.assertTrue(pump(lambda: list(monitor.devices) == [source]))
         self.assertEqual(impostor.calls, [])
+
+    def test_another_programs_pad_is_not_taken_for_the_one_inputplumber_lost(self):
+        tree, monitor, client = self.wired()
+        composite, xbox_360 = f"{ROOT}/CompositeDevice0", GAMEPAD_TARGETS["xb360"]
+        pad = tree.add(21, fake_input.XBOX_360)
+        owner = self.fake(targets=("xb360", "keyboard"), sources=())
+        client.start()
+        monitor.start()
+        self.assertTrue(pump(lambda: list(monitor.devices) == [pad]))
+        self.settle(client)
+
+        target = next(target for target in owner.targets(composite) if "gamepad" in target)
+        owner.detach_target(composite, target)             # InputPlumber drops its pad and announces nothing
+        tree.remove(21)
+        self.node_event(monitor, pad, Gio.FileMonitorEvent.DELETED)
+        other = tree.add(22, fake_input.XBOX_360)          # another program's pad: same name, bus and ids
+        self.node_event(monitor, other)
+        self.assertEqual(client.virtual_gamepads().expected, {xbox_360: 1})   # what was read before still lists it
+        self.assertEqual(monitor.devices, {})
+        self.assertTrue(pump(lambda: not client.virtual_gamepads().expected))
+        self.settle(client)
+        self.assertEqual(monitor.devices, {})
+
+        owner.attach_target(composite, "xb360")            # InputPlumber has a pad again
+        mine = tree.add(23, fake_input.XBOX_360)
+        self.node_event(monitor, mine)
+        self.assertTrue(pump(lambda: monitor.ambiguous))   # two look-alikes for one announced pad: neither
+        self.settle(client)
+        self.assertEqual(monitor.devices, {})
+        tree.remove(22)
+        self.node_event(monitor, other, Gio.FileMonitorEvent.DELETED)
+        self.assertEqual(monitor.devices, {})              # not on the old read, although it happens to be right
+        self.assertTrue(pump(lambda: list(monitor.devices) == [mine]))
+        self.settle(client)
 
     def test_the_fake_does_record_writes(self):
         # Without this, "no writes were recorded" would prove nothing.

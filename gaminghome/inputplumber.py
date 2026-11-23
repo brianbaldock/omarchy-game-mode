@@ -302,11 +302,15 @@ class InputPlumberClient:
         """Nothing in flight and no timer armed: the client only waits for hints."""
         return self._discovery is None and self._timer is None
 
-    def hint(self):
-        """Something outside D-Bus (a virtual gamepad node came or went) suggests looking again."""
+    def hint(self) -> int:
+        """Something outside D-Bus (a virtual gamepad node came or went) suggests looking again.
+
+        Returns the serial of the first read that can answer: one that begins after this hint.
+        """
         if self.available:
             self._hinted = True
             self._mark_dirty()
+        return self._pass + 1
 
     # ---- what Game Mode reads ---------------------------------------------
     def virtual_gamepads(self) -> VirtualGamepads:
@@ -319,7 +323,7 @@ class InputPlumberClient:
                 identity = GAMEPAD_TARGETS.get(kind)
                 if identity is not None:
                     expected[identity] = expected.get(identity, 0) + 1
-        return VirtualGamepads(expected, frozenset(owned))
+        return VirtualGamepads(expected, frozenset(owned), self.serial)
 
     def unrecognized_targets(self) -> list[str]:
         """Gamepad target types announced by InputPlumber that Game Mode cannot identify."""
@@ -571,8 +575,10 @@ class InputPlumberClient:
         # A failed discovery keeps the last complete picture instead of a partial one.
         self.error = discovery.error
         changed = before != (self.version, self.composites, self.error, self.state)
+        # A read that answers a hint is reported even when it found nothing new: someone waits for it.
+        answered = self._expecting and discovery.error is None
         self._plan(changed, discovery.error is not None)
-        if changed:
+        if changed or answered:
             self._notify()
 
     def _plan(self, changed, failed):

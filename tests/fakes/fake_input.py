@@ -14,6 +14,7 @@ from pathlib import Path
 from gaminghome.input import GamepadIdentity
 
 ELITE = GamepadIdentity("Microsoft X-Box One Elite 2 pad", 0x03, 0x045E, 0x0B00)
+XBOX_360 = GamepadIdentity("Microsoft X-Box 360 pad", 0x03, 0x045E, 0x028E)   # an identity many programs create
 STEAM_PAD = GamepadIdentity("Microsoft X-Box 360 pad 0", 0x03, 0x28DE, 0x11FF)
 PHYSICAL = GamepadIdentity("ASUSTeK Computer Inc. N-KEY Device", 0x03, 0x0B05, 0x1B4C)
 UINPUT = "devices/virtual/input"
@@ -54,7 +55,9 @@ class FakeInputTree:
 
     def remove(self, number):
         (self.dev / f"event{number}").unlink()
+        device = (self.sys / f"event{number}" / "device").resolve()
         shutil.rmtree(self.sys / f"event{number}")
+        shutil.rmtree(device)
 
     def identify(self, fd):
         return self.kernel.get(os.fstat(fd).st_ino)

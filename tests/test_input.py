@@ -11,7 +11,7 @@ from pathlib import Path
 
 from gi.repository import Gio
 
-from fakes.fake_input import ELITE, PHYSICAL, STEAM_PAD, UHID, USB, FakeInputTree
+from fakes.fake_input import ELITE, PHYSICAL, STEAM_PAD, UHID, USB, XBOX_360, FakeInputTree
 from fakes.loop import pump
 from gaminghome import core
 from gaminghome.input import EVENT, ControllerMonitor, VirtualGamepads, probe
@@ -32,10 +32,20 @@ class MonitorCase(unittest.TestCase):
         interpreter.set_nav_enabled(True)
         monitor = ControllerMonitor(interpreter, lambda: self.changes.append(1), dev_dir=str(self.tree.dev),
                                     sysfs_root=str(self.tree.sys), extra_gamepads=lambda: self.allow,
-                                    on_candidate=lambda: self.hints.append(1), identify=self.tree.identify)
+                                    on_candidate=self.candidate, identify=self.tree.identify)
         self.addCleanup(monitor.stop)
         monitor.start()
         return monitor
+
+    def candidate(self) -> int:
+        """The provider of the allowlist is told to look again and names the read that will answer."""
+        self.hints.append(1)
+        return self.allow.serial + 1
+
+    def announce(self, monitor, expected, owned=frozenset()):
+        """A complete read of the stack that began after the last hint."""
+        self.allow = VirtualGamepads(expected, owned, self.allow.serial + 1)
+        monitor.rescan()
 
     @staticmethod
     def hotplug(monitor, node, event=Gio.FileMonitorEvent.CREATED):
@@ -92,11 +102,11 @@ class VirtualGamepadTest(MonitorCase):
         self.assertEqual(monitor.status()["ambiguous"], [ELITE.name])
         self.tree.remove(23)
         self.hotplug(monitor, second, Gio.FileMonitorEvent.DELETED)
+        self.assertEqual((monitor.devices, monitor.status()["ambiguous"]), ({}, []))
+        self.announce(monitor, {ELITE: 1})           # which of the two went away is only known after a new read
         self.assertEqual(list(monitor.devices), [first])
-        self.assertEqual(monitor.status()["ambiguous"], [])
         third = self.tree.add(24, ELITE)
-        self.allow = VirtualGamepads({ELITE: 2})     # two composites, two announced pads
-        monitor.rescan()
+        self.announce(monitor, {ELITE: 2})           # two composites, two announced pads
         self.assertEqual(sorted(monitor.devices), [first, third])
 
     def test_virtual_pad_is_retired_when_it_is_no_longer_announced(self):
@@ -111,6 +121,49 @@ class VirtualGamepadTest(MonitorCase):
         self.assertEqual(len(self.changes), changes + 1)
         monitor.rescan()
         self.assertEqual(len(self.changes), changes + 1)  # nothing new, nothing reported
+
+    def test_replacement_for_a_vanished_virtual_pad_waits_for_a_new_read_of_the_stack(self):
+        # The stack says nothing when its pad goes away: what it announced earlier still lists the pad.
+        pad = self.tree.add(21, XBOX_360)
+        self.allow = VirtualGamepads({XBOX_360: 1}, serial=4)
+        monitor = self.monitor()
+        self.assertEqual(list(monitor.devices), [pad])
+        self.tree.remove(21)
+        self.hotplug(monitor, pad, Gio.FileMonitorEvent.DELETED)
+        other = self.tree.add(22, XBOX_360)          # another program's pad with the same identity
+        self.hotplug(monitor, other)
+        monitor.rescan()
+        self.assertEqual((monitor.devices, monitor.status()["devices"]), ({}, []))
+        self.assertGreaterEqual(len(self.hints), 1)
+        self.announce(monitor, {})                   # read again: the stack has no such pad any more
+        self.assertEqual(monitor.devices, {})
+        self.announce(monitor, {XBOX_360: 1})        # read again: it does announce one
+        self.assertEqual(list(monitor.devices), [other])
+
+    def test_virtual_pad_that_hangs_up_is_not_replaced_on_the_old_announcement(self):
+        pad = self.tree.add(21, ELITE)
+        self.allow = VirtualGamepads({ELITE: 1})
+        monitor = self.monitor()
+        os.close(os.open(pad, os.O_WRONLY | os.O_NONBLOCK))      # the device behind the node is destroyed
+        self.assertTrue(pump(lambda: pad not in monitor.devices))
+        self.tree.remove(21)
+        other = self.tree.add(22, ELITE)
+        self.hotplug(monitor, other)
+        self.assertEqual(monitor.devices, {})
+        self.announce(monitor, {ELITE: 1})
+        self.assertEqual(list(monitor.devices), [other])
+
+    def test_look_alike_under_the_same_node_name_is_not_taken_for_the_pad_that_went_away(self):
+        pad = self.tree.add(21, ELITE)
+        self.allow = VirtualGamepads({ELITE: 1})
+        monitor = self.monitor()
+        self.tree.remove(21)
+        self.assertEqual(self.tree.add(21, ELITE), pad)          # the kernel hands out the lowest free number
+        self.hotplug(monitor, pad, Gio.FileMonitorEvent.DELETED)  # both events were already waiting
+        self.hotplug(monitor, pad)
+        self.assertEqual(monitor.devices, {})
+        self.announce(monitor, {ELITE: 1})
+        self.assertEqual(list(monitor.devices), [pad])
 
     def test_node_replaced_between_sysfs_and_open_is_rejected(self):
         self.tree.add(21, ELITE, kernel=STEAM_PAD)   # sysfs still describes the announced pad

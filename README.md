@@ -142,12 +142,14 @@ used only when all of this holds:
 - its name, bus type, vendor and product are the ones InputPlumber gives that type,
   for example `Microsoft X-Box One Elite 2 pad`, `045e:0b00`.
 
-If more such nodes exist than InputPlumber announces, none of them is used. Other
-target types (Steam Deck, DualSense and so on) are reported as unrecognized rather
-than guessed, and every other virtual device (AntiMicroX, Steam Input) stays skipped.
-A physical node that InputPlumber hides is not reported as a permission problem. If
-no virtual gamepad can be used either, the header says the controller is not readable
-and the tooltip says why; keyboard and touch keep working.
+If more such nodes exist than InputPlumber announces, none of them is used. After a
+virtual gamepad went away, the next one is used only once InputPlumber's state has
+been read again; if that read fails, none is. Other target types (Steam Deck,
+DualSense and so on) are reported as unrecognized rather than guessed, and every
+other virtual device (AntiMicroX, Steam Input) stays skipped. A physical node that
+InputPlumber hides is not reported as a permission problem. If no virtual gamepad can
+be used either, the header says the controller is not readable and the tooltip says
+why; keyboard and touch keep working.
 
 **Should you run it?** Not for Game Mode's sake, and it is not a mapping upgrade by
 itself. On the ASUS ROG Xbox Ally (RC73YA) with a kernel that lacks the Ally HID
@@ -275,6 +277,10 @@ them gone. Game Mode never edits AntiMicroX profiles or any other app's configur
     reading and would explain scrambled SDL and Steam mappings for this pad, but no
     guided physical test on an RC73YA has confirmed the whole table, so the View +
     Menu chord is unverified there as well.
+- Recognizing InputPlumber's virtual gamepad stays a heuristic, because InputPlumber does
+  not say which event node is its own. If another program creates a virtual pad with the
+  same name and IDs while InputPlumber announces one that does not exist, Game Mode
+  reads that pad instead.
 - Game recognition is a heuristic. A windowed game that wasn't started by a supported
   launcher counts as desktop until you choose **Game input** for it.
 - Nothing in the automated tests can show that the physical Guide button still reaches
