@@ -1459,6 +1459,12 @@ class PingTest(NetCase):
             self.assertEqual(net.check_pmtu(self.ctx(commands=commands, getaddrinfo=fake_dns())).status, status)
         self.assertEqual(net.check_pmtu(self.ctx(getaddrinfo=fake_dns())).status, Status.SKIP)
 
+    def test_a_full_size_probe_without_a_result_is_unknown_not_a_warning(self):
+        for large in (CommandResult(("ping",), None, "", "", "timeout"), CommandResult(("ping",), 2, "ping: bad")):
+            commands = {pmtu_argv(1200): ping_reply(2), pmtu_argv(1472): large}
+            outcome = net.check_pmtu(self.ctx(commands=commands, getaddrinfo=fake_dns()))
+            self.assertEqual((outcome.status, outcome.evidence), (Status.SKIP, {"passes_1228": True}))
+
     def test_path_mtu_is_probed_at_a_stun_server_the_udp_checks_already_contact(self):
         self.assertIn(net.PMTU_HOST, [server.host for server in udp.STUN_SERVERS])
         commands = FakeCommands({pmtu_argv(1200): ping_reply(2), pmtu_argv(1472): ping_reply(2)})

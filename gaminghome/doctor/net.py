@@ -767,12 +767,11 @@ def check_mtu_interface(ctx: Context) -> Outcome:
 
 
 def _ping_size(ctx: Context, address: str, size: int) -> bool | None:
+    """Whether `size`-byte pings got through unfragmented; None when the probe produced no result."""
     result = ctx.command(["ping", "-4", "-n", "-q", "-c", "2", "-i", "0.2", "-W", "1", "-w", "3", "-M", "do",
                           "-s", str(size), address], 5)
-    if result.error:
-        return None
-    stats = parse_ping(result.stdout)
-    return bool(stats and stats["received"])
+    stats = None if result.error else parse_ping(result.stdout)
+    return None if stats is None else bool(stats["received"])
 
 
 def check_pmtu(ctx: Context) -> Outcome:
@@ -785,7 +784,11 @@ def check_pmtu(ctx: Context) -> Outcome:
         return skip("The ping tool is not installed or did not run.")
     if not small:
         return skip(f"{PMTU_HOST} does not answer ping from here, so the path MTU could not be probed.")
-    if _ping_size(ctx, address, 1472):
+    large = _ping_size(ctx, address, 1472)
+    if large is None:
+        return skip("The full-size probe did not produce a result, so the path MTU could not be judged.",
+                    passes_1228=True)
+    if large:
         return ok("Full-size 1500-byte packets pass without fragmentation.", passes_1228=True, passes_1500=True)
     return warn("1228-byte packets pass but full-size 1500-byte packets do not: something on the path has a "
                 "smaller MTU and may silently drop large stream packets.",
