@@ -55,10 +55,14 @@ Keyboard (arrows, Enter, Escape), mouse and touch work everywhere.
 **About the Home chord.** The global gesture is holding **View (Back) and Menu (Start)
 together for at least 0.8 seconds**. A single or brief press does nothing. The native
 Guide/Xbox button is deliberately left alone, so Steam and other apps keep using it.
+A button pressed while Guide is held is ignored too: such a chord belongs to Steam, or
+to an input stack that sends vendor buttons as Guide chords.
 Vendor-specific buttons (for example ROG Ally's dedicated keys) are not mapped.
 
 Controller input is read **read-only and non-exclusively** from evdev. Devices that
-report gamepad buttons or a hat are used, and virtual devices are skipped. Your user
+report gamepad buttons or a hat are used. Virtual devices are skipped, except the
+virtual gamepad that a running InputPlumber announces (see
+[InputPlumber](#inputplumber-read-only)). Your user
 needs read access to `/dev/input/event*` (usually the `input` group, or a uaccess rule).
 If access is denied, Game Mode says so on screen and keeps working with keyboard and
 touch.
@@ -110,6 +114,73 @@ alone. It also stops reading controller buttons for its own menus, so no button 
 twice. The header says the controller is paused; keyboard and touch keep working. Game
 Mode also uses the controller directly when AntiMicroX isn't running.
 
+### InputPlumber (read-only)
+
+[InputPlumber](https://github.com/ShadowBlip/InputPlumber) is a system daemon for
+handhelds. While it runs, it hides the physical controller nodes from your user and
+re-emits the controller through virtual devices. Game Mode does not need it, does not
+install or start it, and never changes it: it loads no profile, sets no property and
+sends no event. It only reads InputPlumber's state over D-Bus, so that
+
+- its own menus are navigated with InputPlumber's virtual gamepad instead of the
+  hidden physical one, and
+- Settings and `omarchy-game-mode status` (section `inputplumber`) describe what
+  InputPlumber manages: device name, profile name, target types, number of sources,
+  whether any source is hidraw, and notes such as `evdev-only` or `no-r3`. No serial
+  or persistent identifier is read into that report.
+
+**How the virtual gamepad is recognized.** This is a heuristic, not proof of origin:
+InputPlumber does not say which event node belongs to which target. A virtual node is
+used only when all of this holds:
+
+- InputPlumber owns its bus name, and one of its composite devices lists a gamepad
+  target of a known type (`xb360`, `gamepad`, `xbox-elite`, `xbox-series`);
+- the node is a uinput device (`/devices/virtual/input`);
+- its name, bus type, vendor and product are the ones InputPlumber gives that type,
+  for example `Microsoft X-Box One Elite 2 pad`, `045e:0b00`.
+
+If more such nodes exist than InputPlumber announces, none of them is used. Other
+target types (Steam Deck, DualSense and so on) are reported as unrecognized rather
+than guessed, and every other virtual device (AntiMicroX, Steam Input) stays skipped.
+A physical node that InputPlumber hides is not reported as a permission problem. If
+no virtual gamepad can be used either, the header says the controller is not readable
+and the tooltip says why; keyboard and touch keep working.
+
+**Should you run it?** Not for Game Mode's sake, and it is not a mapping upgrade by
+itself. On the ASUS ROG Xbox Ally (RC73YA) with a kernel that lacks the Ally HID
+driver, InputPlumber 0.82.0 rejects its hidraw sources ("Device is not using the
+asus_rog_ally driver") and runs on evdev sources only. In that state:
+
+- the right stick click (R3) stays missing;
+- all of the controller's hidraw nodes become root-only, so tools that read the vendor
+  buttons from hidraw stop working;
+- going by InputPlumber's own device configuration, stock profile and target code, the
+  Armoury button is sent as a Guide + X chord, Library as Guide + A, a long Library
+  press as Screenshot, and the back paddles as paddle buttons of the virtual Elite pad.
+  A desktop mapper such as AntiMicroX sees the X or A of such a chord and acts on it.
+
+It only becomes worthwhile there once the kernel has the Ally HID driver; a fuller
+upstream driver series has been posted for kernels after 7.2. Game Mode itself ignores
+buttons pressed while Guide is held, so these chords select nothing in Gaming Home.
+AntiMicroX set switching (above) is unchanged and remains the only desktop-pointer
+route, with or without InputPlumber.
+
+The commands below try InputPlumber and go back; Game Mode runs none of them. On a
+board InputPlumber knows, a udev rule of its package starts the daemon when the package
+is installed and again at every boot, so disabling the unit does not keep it off: mask
+it.
+
+```bash
+omarchy pkg add inputplumber
+sudo systemctl enable --now inputplumber.service inputplumber-suspend.service
+
+sudo systemctl disable --now inputplumber.service inputplumber-suspend.service
+sudo systemctl mask inputplumber.service        # undo with: systemctl unmask
+```
+
+Other programs that had the controller open, such as Steam or AntiMicroX, may need a
+restart after either change.
+
 ## Install
 
 From source (needs `python`, `python-gobject` and `gtk4`):
@@ -150,6 +221,10 @@ the autostart file Game Mode created.
 
 `omarchy-game-mode mapper on|off|status` turns AntiMicroX set switching on or off.
 
+`omarchy-game-mode status` reports what Game Mode sees, including the controllers it
+reads and, under `inputplumber`, what a running InputPlumber manages. Review it before
+posting: window titles can contain private information.
+
 ### Upgrading from an earlier preview
 
 Quit the old running version with `omarchy-game-mode quit` before installing this update: its application ID changed to `io.github.brianbaldock.OmarchyGameMode`, so a new instance cannot quit the old one. Reinstall at the same prefix; old launcher/icon filenames are removed. A login entry owned by Game Mode remains recognized and is migrated by `autostart on` or removed by `autostart off`. Unowned legacy entries are left alone. Update any custom window rules or favorites that refer to the old ID.
@@ -170,7 +245,27 @@ them gone. Game Mode never edits AntiMicroX profiles or any other app's configur
 - Needs Hyprland for window tracking and handoff. Without it, the app still opens and
   shows the IPC status.
 - Firmware "hold" gestures and hidraw-only buttons are not supported.
-- Virtual controllers are currently skipped. HHD and InputPlumber configurations may hide or exclusively own the physical controller, leaving Game Mode without native navigation. Compatibility with those input stacks is unverified; do not disable hardware protections to work around it.
+- Virtual controllers are skipped, except the gamepad a running InputPlumber announces. HHD configurations may hide or exclusively own the physical controller, leaving Game Mode without native navigation; compatibility with HHD is unverified. Do not disable hardware protections to work around it.
+- InputPlumber support is read-only recognition, and how far it has been checked differs by level:
+  - **Verified by automated tests:** the D-Bus client against a fake InputPlumber on a
+    private bus (owner changes, renumbered devices, targets removed and added again,
+    signal floods, late replies, and proof that nothing but reads is ever sent);
+    recognition and rejection of virtual gamepads against a mocked sysfs; that buttons
+    pressed while Guide is held do nothing. The Settings text was also rendered
+    headless with GTK Broadway in English and Arabic, which is a manual smoke script.
+  - **Verified live on an ASUS ROG Xbox Ally (RC73YA), without physical input:**
+    InputPlumber 0.82.0 active; Game Mode's client and controller reader run against
+    it read-only: its state read, the virtual `Microsoft X-Box One Elite 2 pad`
+    (`045e:0b00`) recognized and opened, the hidden physical node not reported as an
+    error. The controller's hidraw nodes were root-only. No button was pressed.
+  - **Pending physical validation, and known limits:** presses of the Xbox, View, Menu,
+    Library and Armoury buttons; Guide behavior in Steam; suspend and resume; a real
+    game session. On this device the right stick click produces no evdev code, and on
+    the raw pad the Xbox button has been seen as `BTN_SELECT` (314). What the other
+    codes mean on this pad is unverified until a guided physical test runs, so the
+    View + Menu chord is unverified there as well. R3 is expected to need the Ally HID
+    driver, which this kernel does not have; that the driver restores it is not
+    verified either.
 - Game recognition is a heuristic. A windowed game that wasn't started by a supported
   launcher counts as desktop until you choose **Game input** for it.
 - Nothing in the automated tests can show that the physical Guide button still reaches
@@ -183,7 +278,8 @@ them gone. Game Mode never edits AntiMicroX profiles or any other app's configur
 All code, CSS and SVG icons in this repository were written for this project and are
 MIT licensed. Nothing was copied from other projects, icon sets (such as Font Awesome
 or Material) or fonts, and no font files are bundled. The UI uses your system font
-through GTK.
+through GTK. The only material taken from another project is a set of D-Bus interface
+descriptions used as test fixtures, noted below.
 
 The service icons are simple original glyphs that only suggest each service. Steam,
 Xbox, GeForce NOW, Moonlight, RetroArch, Heroic, Lutris, Battle.net, Minecraft and
@@ -200,18 +296,27 @@ Built on, but not bundling:
   exists.
 - [Hyprland](https://hyprland.org) IPC sockets, and the optional
   [AntiMicroX](https://github.com/AntiMicroX/antimicrox) D-Bus interface.
+- The D-Bus interface of [InputPlumber](https://github.com/ShadowBlip/InputPlumber),
+  read-only and only when it is running. The interface descriptions in
+  `tests/fixtures/inputplumber` were captured from a running InputPlumber 0.82.0
+  (GPL-3.0) with `busctl introspect`, and their documentation comments were removed.
+  They are used only by tests; none of its code, profiles or schemas are included.
 
 Translations come from `data/locales` and were drafted for this project.
 
 ## Related projects
 
 These are references and inspiration only. No code is copied from them, and Game Mode
-does not integrate with them (not even HHD or InputPlumber):
+does not integrate with them. The one exception is reading InputPlumber's state, as
+described under [InputPlumber](#inputplumber-read-only):
 
 - [OpenGamepadUI](https://github.com/ShadowBlip/OpenGamepadUI): Godot controller-native
   launcher and overlay.
 - [Handheld Daemon (hhd)](https://github.com/hhd-dev/hhd): handheld controller,
-  gyro and TDP support. Not yet validated together: Game Mode currently skips virtual controllers, so some HHD configurations may not provide navigation to this app.
+  gyro and TDP support. Not yet validated together: Game Mode skips HHD's virtual controllers, so some HHD configurations may not provide navigation to this app.
+- [InputPlumber](https://github.com/ShadowBlip/InputPlumber): input routing daemon
+  that turns handheld controls into virtual controllers. Game Mode reads it, never
+  changes it.
 - [omarchy-rog-ally-codex-plugin](https://github.com/richelle-belle/omarchy-rog-ally-codex-plugin):
   ROG Ally setup automation.
 - [omarchy-launcher](https://github.com/headband42/omarchy-launcher): Quickshell
