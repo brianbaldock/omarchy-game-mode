@@ -1090,9 +1090,17 @@ class RouteTest(NetCase):
                  (IF_INET6_GLOBAL, IPV6_ROUTE_NO_DEFAULT, Status.WARN, "half-configured"),
                  (IF_INET6_LOCAL, IPV6_ROUTE_DEFAULT, Status.WARN, "half-configured")]
         for addresses, routes, status, state in cases:
-            outcome = net.check_ipv6(self.ctx({"/proc/net/if_inet6": addresses, "/proc/net/ipv6_route": routes}))
+            outcome = net.check_ipv6(self.ctx({"/proc/net/if_inet6": addresses, "/proc/net/ipv6_route": routes,
+                                               "/proc/net/route": WIFI_ROUTES}))
             self.assertEqual((outcome.status, outcome.evidence["ipv6_state"]), (status, state))
         self.assertIn("ipv6.method disabled", outcome.remediation)
+
+    def test_a_host_without_ipv4_is_ipv6_only_not_dual_stack(self):
+        for routes in ("", route_table(("wlp3s0", "192.168.77.0", "0.0.0.0", "0001", 600, "255.255.255.0"))):
+            outcome = net.check_ipv6(self.ctx({"/proc/net/if_inet6": IF_INET6_GLOBAL, "/proc/net/route": routes,
+                                               "/proc/net/ipv6_route": IPV6_ROUTE_DEFAULT}))
+            self.assertEqual((outcome.status, outcome.evidence["ipv6_state"]), (Status.PASS, "ipv6-only"))
+            self.assertNotIn("Dual-stack", outcome.detail)
 
     def test_mtu_of_the_default_interface(self):
         files = {"/proc/net/route": WIFI_ROUTES, "/sys/class/net/wlp3s0/mtu": "1500\n"}

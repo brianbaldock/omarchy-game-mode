@@ -257,7 +257,8 @@ def ipv6_state(ctx: Context) -> dict[str, Any]:
         if is_default and flags & RTF_UP and not flags & RTF_REJECT:
             default_route = True
     if global_count and default_route:
-        state = "dual-stack"
+        # Without an IPv4 way out, a host with working IPv6 is IPv6-only, not dual-stack.
+        state = "dual-stack" if default_routes(ctx) else "ipv6-only"
     elif not global_count and not default_route:
         state = "local-only" if local_count else "absent"
     else:
@@ -271,6 +272,9 @@ def check_ipv6(ctx: Context) -> Outcome:
     name = state["ipv6_state"]
     if name == "dual-stack":
         return ok("Dual-stack: a global IPv6 address and an IPv6 default route are both present.", **state)
+    if name == "ipv6-only":
+        return ok("IPv6-only: a global IPv6 address and an IPv6 default route, but no IPv4 default route (see the "
+                  "IPv4 default route check).", **state)
     if name == "absent":
         return ok("IPv4-only: no global IPv6 address and no IPv6 default route, which is a consistent setup.", **state)
     if name == "local-only":
