@@ -4,7 +4,9 @@ the browser flag files change, and whether VA-API offers hardware H.264 decode.
 Browsers are only asked for `--version`. Greenlight is an Electron app that would
 open its window, so it is never executed; its version comes from the package
 database. Flag files are summarised by flag name: values that can hold a path, a
-URL or anything personal are not printed. No browser profile is opened.
+URL or anything personal are not printed. No browser profile is opened. `vainfo`
+is pointed at a local GPU render node: through a display it could reach whatever
+X11 server DISPLAY names, possibly on another machine.
 """
 
 from __future__ import annotations
@@ -25,7 +27,8 @@ APPLICATION_DIRS = ("/usr/share/applications", "/usr/local/share/applications",
                     "/var/lib/flatpak/exports/share/applications")
 USER_APPLICATION_DIRS = (".local/share/applications", ".local/share/flatpak/exports/share/applications")
 DRI_DIRS = ("/usr/lib/dri", "/usr/lib64/dri", "/usr/lib/x86_64-linux-gnu/dri", "/usr/lib/aarch64-linux-gnu/dri")
-RENDER_NODE = "/dev/dri/renderD128"
+RENDER_NODES = "/dev/dri"
+RENDER_NODE = re.compile(r"renderD\d{1,4}")
 VERSION = re.compile(r"\d+(?:\.\d+){1,3}")
 # Flags whose value is a plain setting worth showing. Every other value is withheld.
 VALUE_FLAGS = frozenset({
@@ -168,10 +171,20 @@ def parse_vainfo(text: str) -> dict[str, Any]:
             "decode_profiles": len(decode)}
 
 
+def render_node(ctx: Context) -> str:
+    """The first local GPU render node, as in `/dev/dri/renderD128`, or empty."""
+    nodes = [name for name in ctx.fs.listdir(RENDER_NODES) if RENDER_NODE.fullmatch(name)]
+    return f"{RENDER_NODES}/{min(nodes, key=lambda name: int(name[7:]))}" if nodes else ""
+
+
 def check_vaapi(ctx: Context) -> Outcome:
     drivers = sorted({name[:-len("_drv_video.so")] for directory in DRI_DIRS for name in ctx.fs.listdir(directory)
                       if name.endswith("_drv_video.so")})
-    result = ctx.command(["vainfo"], 5)
+    node = render_node(ctx)
+    if not node:
+        return skip("No GPU render node (/dev/dri/renderD*) was found, so hardware video decode could not be "
+                    "checked.", drivers=drivers)
+    result = ctx.command(["vainfo", "--display", "drm", "--device", node], 5)
     if result.error == "not-found":
         if not drivers:
             return skip("No VA-API driver and no `vainfo` tool were found, so hardware video decode could not "
@@ -179,10 +192,6 @@ def check_vaapi(ctx: Context) -> Outcome:
         return skip(f"VA-API drivers are installed ({', '.join(drivers)}), but `vainfo` is not, so H.264 decode "
                     "could not be confirmed.", "Install libva-utils to let the doctor confirm it.", drivers=drivers)
     parsed = parse_vainfo(result.stdout + result.stderr)
-    if not parsed["decode_profiles"] and ctx.fs.exists(RENDER_NODE):
-        # No display in this session (SSH, CI): ask the render node directly.
-        fallback = ctx.command(["vainfo", "--display", "drm", "--device", RENDER_NODE], 5)
-        parsed = parse_vainfo(fallback.stdout + fallback.stderr)
     evidence = dict(drivers=drivers, **parsed)
     if not parsed["decode_profiles"]:
         return skip("`vainfo` did not report any decode profile, so hardware video decode could not be checked.",

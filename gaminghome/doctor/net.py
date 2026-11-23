@@ -387,13 +387,18 @@ class Resolution:
 
 
 def resolve(ctx: Context, host: str, family: int = socket.AF_INET, timeout: float = 2.0) -> Resolution:
-    """Look a name up with a deadline. getaddrinfo has none, so it runs on an abandonable thread."""
+    """Look a name up with a deadline. getaddrinfo has none, so it runs on an abandonable thread.
+
+    The name is asked for as an absolute name (`www.xbox.com.`): a failed lookup must not be
+    retried with the search domains appended, which would send other names to the resolver.
+    """
     box: list[Any] = []
     started = ctx.monotonic()
+    absolute = host if host.endswith(".") else f"{host}."
 
     def lookup() -> None:
         try:
-            infos = ctx.getaddrinfo(host, None, family, socket.SOCK_DGRAM)
+            infos = ctx.getaddrinfo(absolute, None, family, socket.SOCK_DGRAM)
             box.append(tuple(dict.fromkeys(str(entry[4][0]) for entry in infos)))
         except socket.gaierror as exc:
             box.append("not-found" if exc.errno in (socket.EAI_NONAME, getattr(socket, "EAI_NODATA", -5)) else "failed")

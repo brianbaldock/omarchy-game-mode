@@ -605,6 +605,15 @@ class ContextTest(ScratchCase):
             time.sleep(0.01)
         self.assertFalse(running())
 
+    def test_tools_get_no_variable_that_could_send_them_to_another_machine(self):
+        inherited = {"PATH": "/usr/bin", "HOME": CANARY_HOME, "DISPLAY": "x11.example:0",
+                     "WAYLAND_DISPLAY": "wayland-1", "XAUTHORITY": f"{CANARY_HOME}/.Xauthority",
+                     "DBUS_SYSTEM_BUS_ADDRESS": "tcp:host=bus.example",
+                     "https_proxy": "http://proxy.example:3128", "ALL_PROXY": "socks5://proxy.example",
+                     "LOCALDOMAIN": CANARY_DOMAIN, "HOSTALIASES": f"{CANARY_HOME}/aliases"}
+        env = context._command_env(inherited)
+        self.assertEqual(env, {"PATH": "/usr/bin", "HOME": CANARY_HOME, "LC_ALL": "C", "LANG": "C"})
+
     def test_commands_run_in_the_c_locale_without_a_shell(self):
         result = context.run_command([sys.executable, "-c", "import os; print(os.environ['LC_ALL'], '$HOME;id')"],
                                      env={"PATH": "/usr/bin"})
@@ -648,13 +657,17 @@ DNS_TABLE = {
 
 
 def fake_dns(table=None, ipv6=None):
+    """A resolver answering from `table`; the names it was asked for, as asked, are kept in `.asked`."""
     table = DNS_TABLE if table is None else table
 
     def getaddrinfo(host, _port, family=socket.AF_INET, kind=0):
-        answers = (ipv6 or {}).get(host, []) if family == socket.AF_INET6 else table.get(host, [])
+        getaddrinfo.asked.append(host)
+        name = host.removesuffix(".")
+        answers = (ipv6 or {}).get(name, []) if family == socket.AF_INET6 else table.get(name, [])
         if not answers:
             raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
         return [(family, kind, 17, "", (address, 0)) for address in answers]
+    getaddrinfo.asked = []
     return getaddrinfo
 
 
@@ -1252,6 +1265,15 @@ class DnsTest(NetCase):
         table = {"a.example": [SERVICE_IP, SERVICE_IP, "0.0.0.0"]}
         found = net.resolve(make_context(getaddrinfo=fake_dns(table)), "a.example")
         self.assertEqual((found.addresses, found.usable), ((SERVICE_IP, "0.0.0.0"), (SERVICE_IP,)))
+
+    def test_names_are_looked_up_as_absolute_names(self):
+        dns = fake_dns(ipv6={"www.xbox.com": [CANARY_PUBLIC_IP6]})
+        ctx = make_context(getaddrinfo=dns, tcp_connect=lambda address, timeout: FakeTcp(), tls_context=FakeTls())
+        net.check_dns_required(ctx)
+        net.check_tls(ctx)
+        self.assertEqual(net.resolve(ctx, "stun.cloudflare.com").host, "stun.cloudflare.com")
+        self.assertGreater(len(dns.asked), 10)
+        self.assertEqual([name for name in dns.asked if not name.endswith(".")], [])
 
     def test_required_names_all_resolve(self):
         outcome = net.check_dns_required(make_context(getaddrinfo=fake_dns(ipv6={"www.xbox.com": [CANARY_PUBLIC_IP6]})))
@@ -1863,16 +1885,18 @@ CHROMIUM_FLAGS = (f"# flags\n--ozone-platform=wayland\n--password-store=gnome-li
 OS_RELEASE = 'NAME="Omarchy"\nPRETTY_NAME="Omarchy"\nID=omarchy\nVERSION_ID="4.0.6"\n'
 HYPRCTL_VERSION = "Hyprland 0.56.2 built from branch v0.56.2 at commit efb5099 clean.\nDate: Wed Aug 5 2026\n"
 CLIENT_ENV = {"HOME": CANARY_HOME, "XDG_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": "Hyprland"}
+VAINFO_DRM = ("vainfo", "--display", "drm", "--device", "/dev/dri/renderD128")
 CLIENT_COMMANDS = {
     ("chromium", "--version"): "Chromium 155.0.8059.84 Arch Linux\n",
     ("pacman", "-Q", "greenlight-bin", "greenlight"): CommandResult(
         ("pacman",), 1, "greenlight-bin 2.4.2-1\n", "error: package 'greenlight' was not found\n"),
     ("pacman", "-Q", "mesa"): "mesa 1:26.2.5-1\n",
-    ("vainfo",): VAINFO,
+    VAINFO_DRM: VAINFO,
     ("omarchy", "version"): "4.0.6-1\n",
     ("hyprctl", "version"): HYPRCTL_VERSION,
 }
 CLIENT_FILES = {
+    "/dev/dri/renderD128": "", "/dev/dri/card1": "",
     "/usr/share/applications/chromium.desktop": "", "/usr/share/applications/greenlight-desktop.desktop": "",
     f"{CANARY_HOME}/.config/chromium-flags.conf": CHROMIUM_FLAGS,
     "/usr/lib/dri/radeonsi_drv_video.so": "", "/usr/lib/dri/radeonsi_dri.so": "",
@@ -1959,21 +1983,25 @@ class ClientsTest(NetCase):
         no_high = VAINFO.replace("      VAProfileH264High               :	VAEntrypointVLD\n", "")
         encode_only = "\n".join(line for line in VAINFO.splitlines() if "H264" not in line or "EncSlice" in line)
         for output, phrase in ((no_high, "only below the High profile"), (encode_only, "not at all")):
-            outcome = browser.check_vaapi(self.client_ctx(commands={("vainfo",): output}))
+            outcome = browser.check_vaapi(self.client_ctx(commands={VAINFO_DRM: output}))
             self.assertEqual(outcome.status, Status.WARN)
             self.assertIn(phrase, outcome.detail)
         no_tool = browser.check_vaapi(self.client_ctx(commands={}))
         self.assertEqual(no_tool.status, Status.SKIP)
         self.assertIn("radeonsi", no_tool.detail)
-        self.assertEqual(browser.check_vaapi(self.client_ctx({}, {})).status, Status.SKIP)
+        self.assertEqual(browser.check_vaapi(self.client_ctx({"/dev/dri/renderD128": ""}, {})).status, Status.SKIP)
 
-    def test_vaapi_falls_back_to_the_render_node_without_a_display(self):
-        commands = {("vainfo",): CommandResult(("vainfo",), 3, "", "error: can't connect to X server!\n"),
-                    ("vainfo", "--display", "drm", "--device", "/dev/dri/renderD128"): VAINFO}
-        outcome = browser.check_vaapi(self.client_ctx({"/dev/dri/renderD128": ""}, commands))
-        self.assertEqual(outcome.status, Status.PASS)
-        failed = browser.check_vaapi(self.client_ctx({}, {("vainfo",): commands[("vainfo",)]}))
-        self.assertEqual(failed.status, Status.SKIP)
+    def test_vaapi_only_ever_asks_a_local_render_node(self):
+        files = {**CLIENT_FILES, "/dev/dri/renderD129": ""}
+        commands = FakeCommands({VAINFO_DRM: VAINFO})
+        outcome = browser.check_vaapi(make_context(root=self.tree(files), commands=commands,
+                                                   env={**CLIENT_ENV, "DISPLAY": "x11.example:0"}))
+        self.assertEqual((outcome.status, commands.calls), (Status.PASS, [VAINFO_DRM]))
+        without = FakeCommands({VAINFO_DRM: VAINFO})
+        no_node = browser.check_vaapi(make_context(root=self.tree({"/usr/lib/dri/radeonsi_drv_video.so": ""}),
+                                                   commands=without))
+        self.assertEqual((no_node.status, without.calls), (Status.SKIP, []))
+        self.assertIn("No GPU render node", no_node.detail)
 
 
 class SystemTest(NetCase):
@@ -2465,7 +2493,7 @@ class PlanTest(World):
         runner.run_checks(checks.plan(options), ctx, workers=1)
         names = {*(host.name for host in net.REQUIRED_HOSTS), *(server.host for server in udp.STUN_SERVERS),
                  net.NTP_HOST}
-        self.assertEqual(set(looked_up), names)
+        self.assertEqual(set(looked_up), {f"{name}." for name in names})
         self.assertEqual({destination for _data, destination in self.udp.sent()},
                          {(RELAY_IP, 3478), (CLOUDFLARE_IP, 3478), (GOOGLE_IP, 19302), (NTP_IP, 123),
                           (CONSOLE_IP, 9002)})

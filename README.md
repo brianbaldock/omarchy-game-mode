@@ -209,9 +209,12 @@ What it sends, only while you run it: DNS lookups for the names below, and TLS h
 `stun.cloudflare.com` and `stun.l.google.com`; one unauthenticated TURN request to
 Microsoft's relay (its answer, usually a redirect to a regional relay, is reported; the
 regional relay is never contacted); one time query to `time.cloudflare.com`; and a few
-pings to your router and to `stun.cloudflare.com`. Names are only probed at public
-unicast addresses, whatever the resolver answers. With `--console-ip`, the console
-probes described above go to that one address.
+pings to your router and to `stun.cloudflare.com`. Names are looked up as absolute names,
+so no search domain is ever appended, and only probed at public unicast addresses, whatever
+the resolver answers. The tools it runs get no display, D-Bus address, proxy or resolver
+setting from your environment, and hardware video decode is read from the local GPU render
+node (`vainfo --display drm`). With `--console-ip`, the console probes described above go
+to that one address.
 
 Reading the result:
 

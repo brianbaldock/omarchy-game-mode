@@ -33,6 +33,14 @@ LIST_LIMIT = 4096
 # Python's `ssl.create_default_context` (and Chromium) append TLS session secrets to the file this
 # variable names: a read-only diagnostic must never create or extend it.
 KEY_LOG_VARIABLE = "SSLKEYLOGFILE"
+# Variables that can send a tool somewhere else: an X11 or Wayland display or a D-Bus bus on another
+# machine, an HTTP proxy, or resolver search domains and host aliases. No tool the doctor runs gets them.
+ENDPOINT_VARIABLES = frozenset({
+    "DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS",
+    "DBUS_SYSTEM_BUS_ADDRESS", "LOCALDOMAIN", "RES_OPTIONS", "HOSTALIASES",
+    *(name for proxy in ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy", "no_proxy")
+      for name in (proxy, proxy.upper())),
+})
 
 
 @dataclass(frozen=True)
@@ -114,8 +122,8 @@ class FileSystem:
 
 
 def _command_env(env: Mapping[str, str] | None) -> dict[str, str]:
-    merged = dict(os.environ if env is None else env)
-    merged.pop(KEY_LOG_VARIABLE, None)
+    merged = {name: value for name, value in (os.environ if env is None else env).items()
+              if name != KEY_LOG_VARIABLE and name not in ENDPOINT_VARIABLES}
     merged.update(LC_ALL="C", LANG="C")
     return merged
 
