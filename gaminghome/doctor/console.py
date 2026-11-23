@@ -15,6 +15,7 @@ import ipaddress
 from .context import Context
 from .model import Outcome, ok, skip, warn
 from .net import default_routes, describe_os_error, ipv4_routes, local_ipv4, route_for, shown_interface
+from .runner import check_cancelled, time_left
 from .udp import binding
 
 # RFC 1918 only: not CGNAT, not link-local, never a public address.
@@ -88,10 +89,12 @@ def neighbour_state(ctx: Context, address: str) -> str:
 
 def _tcp_answer(ctx: Context, address: str, port: int, timeout: float = 1.5) -> str:
     """`accepted` or `refused` both mean a live host answered; anything else is silence."""
+    check_cancelled()
     try:
-        ctx.tcp_connect((address, port), timeout).close()
+        ctx.tcp_connect((address, port), time_left(timeout)).close()
         return "accepted"
     except OSError as exc:
+        check_cancelled()
         return describe_os_error(exc)
 
 

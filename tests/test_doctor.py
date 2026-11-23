@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import ssl
 import struct
@@ -444,6 +445,55 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("timed out after 0.05 s", results[0].detail)
         self.assertEqual(results[0].evidence, {"reason": "timeout"})
 
+    def test_an_abandoned_check_is_told_to_stop_and_starts_nothing_new(self):
+        finished = {name: threading.Event() for name in ("loop", "probes", "late")}
+        commands = FakeCommands({("iw", "dev"): "x"})
+        ctx = make_context(commands=commands, parallel=runner.parallel_map)
+
+        def until_cancelled(_item=None):
+            while True:
+                runner.check_cancelled()
+                time.sleep(0.002)
+
+        def loop(_ctx):
+            try:
+                until_cancelled()
+            finally:
+                finished["loop"].set()
+
+        def probes(ctx):
+            try:
+                ctx.parallel(until_cancelled, range(3), workers=3)
+            finally:
+                finished["probes"].set()
+
+        def late(ctx):
+            try:
+                time.sleep(0.06)
+                ctx.command(["iw", "dev"])
+            finally:
+                finished["late"].set()
+        checks_ = [self.check(name, run, timeout=0.02) for name, run in (("loop", loop), ("probes", probes),
+                                                                          ("late", late))]
+        results = runner.run_checks(checks_, ctx, workers=3, timeout=5)
+        self.assertEqual([result.evidence for result in results], [{"reason": "timeout"}] * 3)
+        for name, event in finished.items():
+            self.assertTrue(event.wait(1), name)
+        self.assertEqual(commands.calls, [])
+
+    def test_tools_get_no_more_time_than_their_check_has_left(self):
+        limits = []
+
+        def run(argv, timeout):
+            limits.append(timeout)
+            return CommandResult(tuple(argv), 0, "")
+        ctx = make_context(run=run, which=lambda name: f"/usr/bin/{name}")
+        runner.run_checks([self.check("a", lambda c: c.command(["iw", "dev"], 30) and model.ok("d"), timeout=0.5)],
+                          ctx)
+        ctx.command(["iw", "dev"], 30)
+        self.assertLessEqual(limits[0], 0.5)
+        self.assertEqual(limits[1], 30)
+
     def test_global_deadline_marks_unstarted_checks_as_not_run(self):
         release = threading.Event()
         self.addCleanup(release.set)
@@ -506,6 +556,32 @@ class ContextTest(ScratchCase):
         result = context.run_command([sys.executable, "-c", "import time; print('a', flush=True); time.sleep(30)"], 0.3)
         self.assertLess(time.monotonic() - started, 3)
         self.assertEqual((result.error, result.returncode, result.ok), ("timeout", None, False))
+
+    def test_what_a_command_leaves_behind_is_killed_even_after_it_exited(self):
+        sleeper = "import time; time.sleep(30)"
+        script = ("import subprocess, sys\n"
+                  f"child = subprocess.Popen([sys.executable, '-c', {sleeper!r}], stdin=subprocess.DEVNULL, "
+                  "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\nprint(child.pid)\n")
+        result = context.run_command([sys.executable, "-c", script], 10)
+        child = int(result.stdout)
+
+        def running():
+            try:
+                stat = Path(f"/proc/{child}/stat").read_text()
+                command = Path(f"/proc/{child}/cmdline").read_bytes()
+            except OSError:
+                return False
+            return stat.rpartition(")")[2].split()[0] not in "ZX" and sleeper.encode() in command
+
+        def cleanup():
+            if running():
+                os.kill(child, signal.SIGKILL)
+        self.addCleanup(cleanup)
+        self.assertEqual((result.returncode, result.error), (0, ""))
+        deadline = time.monotonic() + 2
+        while running() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(running())
 
     def test_commands_run_in_the_c_locale_without_a_shell(self):
         result = context.run_command([sys.executable, "-c", "import os; print(os.environ['LC_ALL'], '$HOME;id')"],

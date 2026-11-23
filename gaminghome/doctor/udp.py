@@ -18,6 +18,7 @@ from . import stun
 from .context import Context
 from .model import Outcome, fail, ok, skip, warn
 from .net import local_ipv4, public_unicast, resolve_cached
+from .runner import check_cancelled, time_left
 
 
 @dataclass(frozen=True)
@@ -48,15 +49,20 @@ class StunReply:
 
 def stun_exchange(ctx: Context, sock: Any, destination: tuple[str, int], request: bytes, transaction_id: bytes,
                   *, timeout: float = 1.2, attempts: int = 2) -> StunReply | None:
-    """Send one request (retransmitting once) and wait for the reply to this exact transaction."""
+    """Send one request (retransmitting once) and wait for the reply to this exact transaction.
+
+    Silence only counts as silence when the wait was not cut short by the check's own deadline.
+    """
     for attempt in range(1, attempts + 1):
+        check_cancelled()
+        wait = time_left(timeout)
         sent = ctx.monotonic()
         try:
             sock.sendto(request, destination)
         except OSError:
             return None
         while True:
-            remaining = sent + timeout - ctx.monotonic()
+            remaining = sent + wait - ctx.monotonic()
             if remaining <= 0:
                 break
             try:
@@ -72,6 +78,7 @@ def stun_exchange(ctx: Context, sock: Any, destination: tuple[str, int], request
                 continue
             if message.transaction_id == transaction_id:
                 return StunReply(message, round((ctx.monotonic() - sent) * 1000), attempt)
+    check_cancelled()
     return None
 
 

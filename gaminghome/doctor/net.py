@@ -24,6 +24,7 @@ from typing import Any
 
 from .context import Context
 from .model import Outcome, fail, info, ok, skip, warn
+from .runner import check_cancelled, time_left
 
 RTF_UP, RTF_REJECT = 0x0001, 0x0200
 IFF_UP = 0x1
@@ -382,9 +383,12 @@ def resolve(ctx: Context, host: str, family: int = socket.AF_INET, timeout: floa
         except OSError:
             box.append("failed")
 
+    check_cancelled()
     thread = threading.Thread(target=lookup, name="doctor-dns", daemon=True)
     thread.start()
     thread.join(timeout)
+    # Lookups are shared between checks: one that was given up on mid-way is not an answer to keep.
+    check_cancelled()
     elapsed = round((ctx.monotonic() - started) * 1000)
     if not box:
         return Resolution(host, error="timeout", milliseconds=elapsed)
@@ -563,10 +567,13 @@ def tls_probe(ctx: Context, host: str, address: str, port: int = 443, timeout: f
     """TCP connect then a verified TLS handshake for `host`; no request is sent."""
     row: dict[str, Any] = {"host": host, "ok": False, "stage": "connect", "error": "", "connect_ms": None,
                            "handshake_ms": None, "tls_version": ""}
+    check_cancelled()
+    timeout = time_left(timeout)
     started = ctx.monotonic()
     try:
         sock = ctx.tcp_connect((address, port), timeout)
     except OSError as exc:
+        check_cancelled()
         row["error"] = describe_os_error(exc)
         return row
     connected = ctx.monotonic()
@@ -580,6 +587,7 @@ def tls_probe(ctx: Context, host: str, address: str, port: int = 443, timeout: f
         return row
     except (ssl.SSLError, OSError) as exc:
         sock.close()
+        check_cancelled()
         row.update(stage="tls", error=describe_os_error(exc))
         return row
     try:
@@ -631,6 +639,7 @@ def _from_ntp(data: bytes) -> float:
 
 def sntp_offset(ctx: Context, address: str, timeout: float = 2.0) -> float | None:
     """Seconds this clock is behind (+) or ahead (-) of an NTP server, from one SNTP exchange."""
+    check_cancelled()
     try:
         sock = ctx.udp_socket()
     except OSError:
@@ -638,11 +647,12 @@ def sntp_offset(ctx: Context, address: str, timeout: float = 2.0) -> float | Non
     try:
         sent = ctx.wall_time()
         transmit = _ntp_timestamp(sent)
-        sock.settimeout(timeout)
+        sock.settimeout(time_left(timeout))
         sock.sendto(b"\x23" + bytes(39) + transmit, (address, 123))
         data, _source = sock.recvfrom(512)
         received = ctx.wall_time()
     except OSError:
+        check_cancelled()
         return None
     finally:
         sock.close()

@@ -5,6 +5,12 @@ joins its workers when the interpreter exits, so a single check stuck past its
 timeout would hang the command on the way out. An overrunning daemon worker is
 abandoned instead, and a replacement keeps the queue moving.
 
+An abandoned check is also told to stop. Each check runs with a `Budget`: its deadline
+and a flag the runner sets when it gives up. Commands, lookups, probes and loops ask
+`check_cancelled()` before starting more work, which ends the check with `Cancelled`,
+and cut their own time limits to `time_left()`, so nothing a check started outlives
+its deadline by more than one short step.
+
 A check that raises or overruns becomes `skip` ("result unknown"), never `fail`:
 a doctor bug or a stalled tool is not evidence about the user's system. The report
 names the exception class and the line that raised it, never its message, which can
@@ -18,6 +24,7 @@ dropped, so a parser that picks up too much cannot leak it.
 from __future__ import annotations
 
 import collections
+import contextvars
 import errno
 import os
 import threading
@@ -34,6 +41,50 @@ _PENDING, _RUNNING, _DONE = "pending", "running", "done"
 _PACKAGE, _THIS_FILE = os.path.split(os.path.abspath(__file__))
 BASE_FIELDS = ("reason",)
 REPORT_HINT = "Please report this with the output of `omarchy-game-mode doctor --json`."
+
+
+class Cancelled(Exception):
+    """The check running in this thread is past its deadline, or the runner gave up on it."""
+
+
+class Budget:
+    """When the check running in a thread has to stop."""
+
+    __slots__ = ("deadline", "monotonic", "_stopped")
+
+    def __init__(self, deadline: float, monotonic: Callable[[], float] = time.monotonic):
+        self.deadline, self.monotonic = deadline, monotonic
+        self._stopped = threading.Event()
+
+    def stop(self) -> None:
+        self._stopped.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._stopped.is_set() or self.monotonic() >= self.deadline
+
+    def remaining(self) -> float:
+        return 0.0 if self._stopped.is_set() else max(0.0, self.deadline - self.monotonic())
+
+
+_BUDGET: contextvars.ContextVar[Budget | None] = contextvars.ContextVar("doctor_budget", default=None)
+
+
+def cancelled() -> bool:
+    budget = _BUDGET.get()
+    return budget is not None and budget.cancelled
+
+
+def check_cancelled() -> None:
+    """Raise `Cancelled` when the check running in this thread has to stop."""
+    if cancelled():
+        raise Cancelled
+
+
+def time_left(limit: float) -> float:
+    """`limit`, cut to what is left of the current check's time (never below 50 ms)."""
+    budget = _BUDGET.get()
+    return limit if budget is None else max(0.05, min(limit, budget.remaining()))
 
 
 @dataclass(frozen=True)
@@ -71,13 +122,14 @@ def allowlisted(evidence: Any, fields: Iterable[str], dropped: list[str] | None 
 
 
 class _Task:
-    __slots__ = ("check", "state", "started", "result")
+    __slots__ = ("check", "state", "started", "result", "budget")
 
     def __init__(self, check: Check):
         self.check = check
         self.state = _PENDING
         self.started = 0.0
         self.result: CheckResult | None = None
+        self.budget: Budget | None = None
 
 
 def _result(check: Check, outcome: Outcome, seconds: float) -> CheckResult:
@@ -105,15 +157,20 @@ def describe_exception(exc: BaseException) -> str:
     return " ".join(filter(None, (*parts, own or innermost)))
 
 
-def _execute(check: Check, ctx: Any) -> Outcome:
+def _execute(check: Check, ctx: Any, budget: Budget | None = None) -> Outcome:
+    token = _BUDGET.set(budget)
     try:
         outcome = check.run(ctx)
         if not isinstance(outcome, Outcome):
             raise TypeError(f"check returned {type(outcome).__name__}, not an Outcome")
         return outcome
+    except Cancelled:
+        return skip("stopped at its time limit; result unknown", reason="timeout")
     except Exception as exc:  # noqa: BLE001 - isolation is the point
         return skip(f"internal error in this check ({describe_exception(exc)}); result unknown",
                     REPORT_HINT, reason="internal-error")
+    finally:
+        _BUDGET.reset(token)
 
 
 def run_checks(checks: Sequence[Check], ctx: Any, *, timeout: float = 6.0, deadline: float = 45.0,
@@ -131,8 +188,10 @@ def run_checks(checks: Sequence[Check], ctx: Any, *, timeout: float = 6.0, deadl
                     return
                 task = pending.popleft()
                 task.state, task.started = _RUNNING, monotonic()
+                limit = task.check.timeout if task.check.timeout is not None else timeout
+                task.budget = Budget(min(task.started + limit, overall), monotonic)
                 changed.notify_all()
-            outcome = _execute(task.check, ctx)
+            outcome = _execute(task.check, ctx, task.budget)
             with changed:
                 if task.state == _RUNNING:
                     task.result = _result(task.check, outcome, monotonic() - task.started)
@@ -146,6 +205,8 @@ def run_checks(checks: Sequence[Check], ctx: Any, *, timeout: float = 6.0, deadl
         started = task.started if task.state == _RUNNING else now
         task.result = _result(task.check, skip(detail, reason="timeout"), now - started)
         task.state = _DONE
+        if task.budget is not None:
+            task.budget.stop()
 
     for _ in range(max(1, min(workers, len(tasks)))):
         spawn()
@@ -175,15 +236,20 @@ def run_checks(checks: Sequence[Check], ctx: Any, *, timeout: float = 6.0, deadl
 
 
 def parallel_map(function: Callable[[T], R], items: Iterable[T], workers: int = 8) -> list[R]:
-    """Run short, internally bounded probes side by side; results keep the input order."""
+    """Run short, internally bounded probes side by side; results keep the input order.
+
+    The probes share the calling check's budget: none starts after it ran out.
+    """
     work = list(items)
     results: list[Any] = [None] * len(work)
     errors: list[BaseException] = []
     queue = collections.deque(enumerate(work))
     lock = threading.Lock()
+    budget = _BUDGET.get()
 
     def worker() -> None:
-        while True:
+        _BUDGET.set(budget)
+        while not cancelled():
             with lock:
                 if not queue:
                     return
@@ -200,6 +266,7 @@ def parallel_map(function: Callable[[T], R], items: Iterable[T], workers: int = 
         thread.start()
     for thread in threads:
         thread.join()
+    check_cancelled()
     if errors:
         raise errors[0]
     return results

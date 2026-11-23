@@ -10,6 +10,7 @@ file reads are bounded and read-only.
 from __future__ import annotations
 
 import os
+import select
 import selectors
 import shutil
 import signal
@@ -24,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .redact import Redactor
-from .runner import parallel_map
+from .runner import check_cancelled, parallel_map, time_left
 
 READ_LIMIT = 65536
 OUTPUT_LIMIT = 262144
@@ -134,7 +135,7 @@ def tls_client_context() -> ssl.SSLContext:
 
 
 def _drain(proc: subprocess.Popen[bytes], deadline: float, limit: int) -> tuple[bytes, bytes, bool]:
-    """Collect at most `limit` bytes per stream until both close or the deadline passes."""
+    """Collect at most `limit` bytes per stream until both close; True as well when the deadline passed."""
     buffers = {proc.stdout: bytearray(), proc.stderr: bytearray()}
     timed_out = False
     with selectors.DefaultSelector() as selector:
@@ -152,24 +153,45 @@ def _drain(proc: subprocess.Popen[bytes], deadline: float, limit: int) -> tuple[
                     continue
                 buffer = buffers[key.fileobj]
                 buffer += chunk[:max(0, limit - len(buffer))]
-    if not timed_out:
-        try:
-            proc.wait(max(0.05, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            timed_out = True
     return bytes(buffers[proc.stdout]), bytes(buffers[proc.stderr]), timed_out
 
 
-def _reap(proc: subprocess.Popen[bytes]) -> None:
-    if proc.poll() is None:
+def _exited(proc: subprocess.Popen[bytes], deadline: float) -> bool:
+    """Wait until the command itself exits, without collecting it.
+
+    A process that has not been collected keeps its pid, so `_reap` can still name its
+    process group without any risk of the pid having been reused.
+    """
+    try:
+        handle = os.pidfd_open(proc.pid)
+    except (AttributeError, OSError):
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            proc.kill()
-        try:
-            proc.wait(2)
+            proc.wait(max(0.05, deadline - time.monotonic()))
+            return True
         except subprocess.TimeoutExpired:
-            pass
+            return False
+    try:
+        return bool(select.select([handle], [], [], max(0.05, deadline - time.monotonic()))[0])
+    finally:
+        os.close(handle)
+
+
+def _reap(proc: subprocess.Popen[bytes]) -> None:
+    """Kill the command's whole process group, then collect the command.
+
+    The group goes whether or not the command is still running: a child it started stays in
+    its group and can outlive it, still running or still holding a pipe open.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        proc.kill()
+    try:
+        proc.wait(2)
+    except subprocess.TimeoutExpired:
+        pass
     for stream in (proc.stdout, proc.stderr):
         if stream is not None:
             stream.close()
@@ -190,6 +212,7 @@ def run_command(argv: Sequence[str], timeout: float = 5.0, *, env: Mapping[str, 
         return CommandResult(argv, error=f"os-error: {reason}")
     try:
         out, err, timed_out = _drain(proc, deadline, limit)
+        timed_out = timed_out or not _exited(proc, deadline)
     finally:
         _reap(proc)
     return CommandResult(argv, None if timed_out else proc.returncode, out.decode("utf-8", "replace"),
@@ -239,11 +262,18 @@ class Context:
         self._memo_lock = threading.Lock()
 
     def command(self, argv: Sequence[str], timeout: float = 5.0) -> CommandResult:
-        """Run a tool found on PATH; a missing tool is a result, not an exception."""
+        """Run a tool found on PATH; a missing tool is a result, not an exception.
+
+        Inside a check the time limit is cut to what is left of the check's own, and nothing
+        new starts once the runner has given up on the check.
+        """
+        check_cancelled()
         path = self.which(argv[0])
         if not path:
             return CommandResult(tuple(argv), error="not-found")
-        return self.run((path, *argv[1:]), timeout)
+        result = self.run((path, *argv[1:]), time_left(timeout))
+        check_cancelled()  # a command cut short by the check's deadline has no result to report
+        return result
 
     def once(self, key: str, producer: Callable[[], Any]) -> Any:
         """Share one probe between checks that run in parallel."""
