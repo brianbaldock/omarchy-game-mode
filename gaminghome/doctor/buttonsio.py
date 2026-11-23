@@ -8,8 +8,9 @@ Everything that was opened is closed, and the terminal mode restored, on exit, o
 Ctrl-C and when the test is ended by SIGTERM or a hang-up: those signals are turned
 into an exception for the duration of the test, so the clean-up always runs.
 
-Everything this command prints, prompts included, goes through the redactor: a
-controller's name is free text and can hold a serial number or an address.
+Everything this command prints, prompts included, goes through the redactor, and a
+controller's name, free text that can hold a serial number or an address, is only
+printed when it is a known model name (see `evdev.KNOWN_NAMES`).
 """
 
 from __future__ import annotations
@@ -45,7 +46,6 @@ EVENT = struct.Struct("llHHi")
 ABSINFO = struct.Struct("6i")
 KEY_BYTES = 0x2FF // 8 + 1
 EVENT_NODE = re.compile(r"/dev/input/event\d+")
-DAEMON_KEYBOARD = re.compile(r"^(InputPlumber|Handheld Daemon)\b|hotkeys$", re.I)
 SKIP_KEYS, QUIT_KEYS = b"\n\r", b"qQ\x04"
 UNREADABLE = {"hidden": "an input daemon hides it (mode 000)",
               "no-permission": "this user may not read it (key devices are normally readable only by root and "
@@ -181,7 +181,7 @@ def _related_keyboards(devices: Sequence[InputDevice], pads: Sequence[InputDevic
     """Keyboard-type nodes of the same physical controller, of an input daemon, or of the platform hotkeys."""
     identities = {pad.vendor_product for pad in pads if not pad.virtual}
     return [device for device in devices if device.is_keyboard
-            and (device.vendor_product in identities and not device.virtual or DAEMON_KEYBOARD.search(device.name))]
+            and (device.vendor_product in identities and not device.virtual or device.daemon_keys)]
 
 
 def select_devices(ctx: Context, device: str = "") -> Selection:

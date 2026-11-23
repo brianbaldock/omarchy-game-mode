@@ -244,10 +244,14 @@ whatever the network looks like. Greenlight is the client to compare against.
 tokens such as `<public-ip-1>` (the same address gets the same token within one report),
 private addresses keep only their first two numbers (`192.168.x.x`), and the Wi-Fi network
 name, access-point and device MAC addresses, host name, user name, home directory, DNS
-search domains and serial numbers are never included. Values are scrubbed wherever they
-appear, not only in known fields: a controller named after its serial number or an
-address shows up as `<id>` or `<mac>`, and a private path as `<home-path>`. `--no-redact`
-shows IP addresses in full for your own debugging; it cannot be combined with `--markdown`.
+search domains and serial numbers are never included. A controller or key device is
+named only when its name is a model name the doctor knows (such as `Microsoft X-Box One
+Elite 2 pad` or `ASUSTeK Computer Inc. N-KEY Device`); any other name was chosen by the
+firmware or by whoever paired it, and is shown as `<controller>` or `<device>`. Values
+are scrubbed wherever they appear, not only in known fields: serial-like tokens and
+joined hex groups (`AB12-CD34-EF56`) show up as `<id>`, MAC addresses as `<mac>`, and a
+private path as `<home-path>`. `--no-redact` shows IP addresses in full for your own
+debugging; it cannot be combined with `--markdown`.
 
 **Sharing a report.** Run `omarchy-game-mode doctor --markdown`, read it once, and paste
 it into the "Optional redacted evidence" field of the

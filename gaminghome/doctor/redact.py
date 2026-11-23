@@ -11,6 +11,9 @@ Never printed, whatever the options:
 - MAC addresses in any notation (so BSSIDs), UUIDs, and tokens that look like a serial
   number (eight or more letters and digits with at least one digit), unless the doctor
   vouched for them itself with `trust` (model names, versions, its own run id);
+- three or more groups of two to four hex digits joined by `-`, `_`, `:` or `.`, even
+  glued to a word (`Controller-02-AA-BB-CC-DD-EE`, `AB12_CD34_EF56`), apart from IP
+  addresses, times, dates and short version numbers;
 - the home directory, other users' homes and the per-user runtime and media
   directories, each together with everything below them;
 - user and host names, e-mail addresses, and the user info, query and fragment of URLs;
@@ -111,6 +114,11 @@ _IPV4 = re.compile(r"(?<!\d)(?<!\d\.)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(
 # zone id, or an IPv4 address. No valid IPv6 address has a longer group or more colons.
 _ADDRESS = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f.]{0,16}(?::[0-9A-Fa-f.]{0,16}){2,8}(?![0-9A-Za-z])"
                       r"(?:%(?:25)?[0-9A-Za-z_.~-]{1,32})?|" + _IPV4.pattern)
+# Hex groups joined into one token: a MAC address or an asset tag. The MAC rule above wants a clean
+# start, so it misses one glued to a word by a joiner; this one only refuses to start inside a word.
+_JOINED_HEX = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f]{2,4}(?:[-_:.][0-9A-Fa-f]{2,4}){2,15}(?![0-9A-Za-z])")
+_JOINER = re.compile(r"[-_:.]")
+_ADDRESS_CHARS = frozenset("0123456789abcdefABCDEF:.")
 _SERIAL = re.compile(r"(?<![A-Za-z0-9])(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{8,}(?![A-Za-z0-9])")
 # Kernel device nodes are numbered, not named after anything: `event100` is not a serial number.
 _DEVICE_NODE = re.compile(r"(?:event|hidraw|input|js|mouse|card|renderD|controlD)\d{1,6}")
@@ -127,6 +135,35 @@ def _word(literal: str) -> re.Pattern[str]:
 
 def _identifying(name: str) -> bool:
     return len(name) >= 3 and name.lower() not in _COMMON_WORDS
+
+
+def _inside_address(match: re.Match[str]) -> bool:
+    """Whether the run of address characters around a match is an IP address (with a port, perhaps)."""
+    text, start, end = match.string, match.start(), match.end()
+    while start > 0 and text[start - 1] in _ADDRESS_CHARS and match.start() - start < 48:
+        start -= 1
+    while end < len(text) and text[end] in _ADDRESS_CHARS and end - match.end() < 48:
+        end += 1
+    run = text[start:end].strip(".")
+    host, colon, port = run.rpartition(":")
+    for candidate in (run, host if colon and port.isdigit() and "." in host else ""):
+        try:
+            ipaddress.ip_address(candidate)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _joined_hex(match: re.Match[str]) -> str:
+    token = match.group(0)
+    groups = _JOINER.split(token)
+    if len(groups) in (6, 8) and all(len(group) == 2 for group in groups):
+        return MASKED_MAC
+    # Times (`00:46:05`), dates and short version numbers: three groups of decimal digits.
+    if len(groups) == 3 and "".join(groups).isdigit():
+        return token
+    return token if _inside_address(match) else MASKED_ID
 
 
 def _url(match: re.Match[str]) -> str:
@@ -214,6 +251,7 @@ class Redactor:
         value = _UUID.sub(MASKED_UUID, value)
         value = _MAC.sub(MASKED_MAC, value)
         value = _ADDRESS.sub(self._address, value)
+        value = _JOINED_HEX.sub(_joined_hex, value)
         if self._user:
             value = self._user.sub("<user>", value)
         if self._host:

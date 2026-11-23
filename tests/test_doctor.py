@@ -55,9 +55,14 @@ CANARY_FRAGMENT = "canaryfragment"
 CANARY_SUFFIX = "canary-private-dir"
 CANARY_REALM = "canary-tenant.example"
 CANARY_UUID = "0b1c2d3e-4f50-4a61-8b72-c0ffee0dcafe"
+# A MAC address and asset tags glued to a word by the same characters that join their groups.
+CANARY_GLUED_MAC = "02-AA-BB-CC-DD-EE"
+CANARY_TAG, CANARY_TAG_UNDERSCORE = "AB12-CD34-EF56", "AB12_CD34_EF56"
 VALUE_CANARIES = (CANARY_PAD_SERIAL, CANARY_DOTTED_MAC, CANARY_CISCO_MAC, CANARY_BARE_MAC, CANARY_ZONE, CANARY_QUERY,
-                  CANARY_FRAGMENT, CANARY_SUFFIX, CANARY_REALM, CANARY_UUID)
-ROGUE_PAD_NAME = f"Pad {CANARY_PAD_SERIAL} {CANARY_DOTTED_MAC} fe80::c0de:1%{CANARY_ZONE}"
+                  CANARY_FRAGMENT, CANARY_SUFFIX, CANARY_REALM, CANARY_UUID, CANARY_GLUED_MAC, CANARY_TAG,
+                  CANARY_TAG_UNDERSCORE)
+ROGUE_PAD_NAME = (f"Xbox Controller-{CANARY_GLUED_MAC} {CANARY_TAG_UNDERSCORE} {CANARY_PAD_SERIAL} {CANARY_DOTTED_MAC} "
+                  f"fe80::c0de:1%{CANARY_ZONE}")
 ROGUE_URL = (f"https://{CANARY_USER}:pw@xbox.example/play?console={CANARY_QUERY}&gamertag={CANARY_QUERY}"
              f"#server={CANARY_FRAGMENT}")
 
@@ -283,6 +288,20 @@ class ValueScrubTest(unittest.TestCase):
                 self.assertNotIn(form, scrubbed, text)
                 self.assertIn("<mac>", scrubbed, text)
         self.assertEqual(self.r.text(f"a {CANARY_DOTTED_MAC} b"), "a <mac> b")
+
+    def test_hex_groups_glued_to_a_word_are_masked_but_addresses_times_and_dates_stay(self):
+        cases = {f"Xbox Controller-{CANARY_GLUED_MAC}": "Xbox Controller-<mac>", f"tag {CANARY_TAG}": "tag <id>",
+                 f"pad_{CANARY_TAG_UNDERSCORE}.": "pad_<id>.", "id ab12:cd34:ef56:0a": "id <id>",
+                 "Pad-02-11-22-33-44-55": "Pad-<mac>", "box 12-34-56-78": "box <id>"}
+        for text, scrubbed in cases.items():
+            self.assertEqual(self.r.text(text), scrubbed, text)
+        for kept in ("at 00:46:05 on 2026-11-23", "2026-11-23T02:34:49Z", "10.20.30", "255.255.255.255",
+                     "USB 0b05:1b4c, AMD 1002:163f", "leftshoulder:b4,dpup:h0.1,"):
+            self.assertEqual(self.r.text(kept), kept)
+        shown = canary_redactor(mask_addresses=False)
+        for address in (f"{CANARY_PUBLIC_IP}:3478", CANARY_PUBLIC_IP6, "[2001:db8:85a3:8d3:1319:8a2e:370:7348]:3478"):
+            self.assertEqual(shown.text(address), address)
+        self.assertEqual(shown.text(f"Controller-{CANARY_GLUED_MAC}"), "Controller-<mac>")
 
     def test_ipv6_zone_ids_leave_with_their_address(self):
         self.assertEqual(self.r.text(f"fe80::c0de:1%{CANARY_ZONE} and [fe80::1%25{CANARY_ZONE}]:3478"),
@@ -2149,12 +2168,13 @@ class InputStackTest(InputCase):
                   "045e", "0b13", usb="3-3", interface=0)
         add_input(SCRATCH, 32, "x" * 74 + " " + CANARY_PAD_SERIAL, ELITE_PAD_KEYS, PAD_AXES, "045e", "0b13",
                   usb="3-4", interface=0)
+        add_input(SCRATCH, 33, "Microsoft X-Box One Elite 2 pad", ELITE_PAD_KEYS, PAD_AXES, "045e", "0b00", True)
+        add_input(SCRATCH, 34, f"Keys {CANARY_TAG}", NKEY_KEYBOARD_KEYS, usb="3-5", interface=1)
         names = {device.node: device.name for device in evdev.input_devices(ctx)}
-        self.assertEqual(names["event30"], "Pad <id> <mac> <lan-ipv6>")
-        self.assertTrue(names["event31"].startswith("<user>'s pad? <mac> xxxx"))
-        self.assertLessEqual(len(names["event31"]), 80)
-        self.assertEqual(names["event32"], "x" * 74 + " <id>")
+        self.assertEqual([names[f"event{number}"] for number in (30, 31, 32, 34)],
+                         ["<controller>", "<controller>", "<controller>", "<device>"])
         self.assertEqual(names["event6"], "ASUSTeK Computer Inc. N-KEY Device")
+        self.assertEqual(names["event33"], "Microsoft X-Box One Elite 2 pad")
         described = inputstack.check_gamepads(ctx)
         for canary in VALUE_CANARIES + (CANARY_USER,):
             self.assertNotIn(canary, described.detail + json.dumps(described.evidence))
@@ -2693,7 +2713,7 @@ class PrivacyTest(CliCase):
     def rogue_checks(self):
         """Two checks no allowlist can save: one raises with private text, one reports it in declared fields."""
         private = (f"console {CANARY_QUERY} at {ROGUE_URL} id {CANARY_UUID} radio {CANARY_CISCO_MAC} {CANARY_BARE_MAC} "
-                   f"zone fe80::7%{CANARY_ZONE} in {CANARY_HOME}/{CANARY_SUFFIX}/My Notes.txt")
+                   f"tag {CANARY_TAG} zone fe80::7%{CANARY_ZONE} in {CANARY_HOME}/{CANARY_SUFFIX}/My Notes.txt")
 
         def raises(_ctx):
             raise RuntimeError(private)
@@ -2716,13 +2736,13 @@ class PrivacyTest(CliCase):
         document = json.loads(outputs[("--json",)])
         by_id = {check["id"]: check for check in document["checks"]}
         names = [row["name"] for row in by_id["input.gamepads"]["evidence"]["gamepads"]]
-        self.assertIn("Pad <id> <mac> <lan-ipv6>", names)
-        self.assertIn("Pad <id> <mac> <lan-ipv6> (physical)", document["environment"]["controllers"]["gamepads"])
+        self.assertIn("<controller>", names)
+        self.assertIn("<controller> (physical)", document["environment"]["controllers"]["gamepads"])
         self.assertRegex(by_id["rogue.raises"]["detail"],
                          r"^internal error in this check \(RuntimeError at test_doctor:\d+\); result unknown$")
         self.assertEqual(by_id["rogue.reports"]["evidence"]["label"], by_id["rogue.reports"]["detail"])
         self.assertIn("console <id> at https://xbox.example/play?<redacted>#<redacted> id <uuid> radio <mac> <mac> "
-                      "zone <lan-ipv6> in <home-path>", by_id["rogue.reports"]["detail"])
+                      "tag <id> zone <lan-ipv6> in <home-path>", by_id["rogue.reports"]["detail"])
         self.assertTrue(by_id["rogue.reports"]["detail"].endswith(" in <home-path>"))
         self.assertNotIn("realm", by_id["turn.challenge"]["evidence"])
         # The planted values really were there to find.
@@ -3618,7 +3638,7 @@ class ButtonCommandTest(InputCase):
         ctx = make_context(fs=FakeDevFS(SCRATCH), commands=self.commands, env=CLIENT_ENV)
         code, out, _err = self.run_buttons(ctx, STANDARD, "--device", "/dev/input/event30", "--json")
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out)["devices"][0]["name"], "<user>'s Controller")
+        self.assertEqual(json.loads(out)["devices"][0]["name"], "<controller>")
         self.assertNotIn(CANARY_USER, out)
 
     def test_prompts_and_every_report_style_scrub_a_controller_named_after_its_serial(self):
@@ -3631,12 +3651,11 @@ class ButtonCommandTest(InputCase):
                 self.assertNotIn(canary, out, style)
                 self.assertNotIn(canary, err, style)
             prompts = err if style else out
-            self.assertIn('read  /dev/input/event30  Pad <id> <mac> <lan-ipv6> (physical controller, USB 045e:0b13)',
-                          prompts)
-            self.assertIn('Judging /dev/input/event30 "Pad <id> <mac> <lan-ipv6>".', prompts)
-            self.assertIn('-> BTN_MODE (316) on /dev/input/event30 "Pad <id> <mac> <lan-ipv6>"', prompts)
+            self.assertIn("read  /dev/input/event30  <controller> (physical controller, USB 045e:0b13)", prompts)
+            self.assertIn('Judging /dev/input/event30 "<controller>".', prompts)
+            self.assertIn('-> BTN_MODE (316) on /dev/input/event30 "<controller>"', prompts)
             self.assertIn("030000005e040000130b000010010000", out)
-        self.assertIn("030000005e040000130b000010010000,Pad <id> <mac> <lan-ipv6>,guide:b", out.replace("&lt;", "<")
+        self.assertIn("030000005e040000130b000010010000,<controller>,guide:b", out.replace("&lt;", "<")
                       .replace("&gt;", ">"))
 
     def test_messages_about_a_rejected_device_never_repeat_the_argument(self):

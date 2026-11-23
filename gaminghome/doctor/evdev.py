@@ -4,14 +4,15 @@ Nothing here opens a device node. Capabilities, names and bus ids come from
 /sys/class/input. The `uniq` and `phys` attributes and the HID `uevent` file (serial
 numbers, Bluetooth and USB addresses) are never read: a raw HID interface is
 identified from its sysfs path alone. A device name is free text chosen by firmware
-or by whoever paired the device, so it is scrubbed the moment it is read.
+or by whoever paired the device, so only a known model name is kept when it is
+read; any other name becomes a neutral label.
 """
 
 from __future__ import annotations
 
 import re
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .context import Context
 
@@ -28,6 +29,18 @@ BUS_NAMES = {0x03: "USB", 0x05: "Bluetooth", 0x06: "virtual", 0x18: "I2C", 0x19:
 BUS_VIRTUAL = 0x06
 LONG_BITS = struct.calcsize("l") * 8
 NAME_LIMIT = 80
+# Names that drivers and input daemons give the controllers and key devices the doctor reports on.
+# Only these are ever printed: any other name was chosen by firmware or by whoever paired the
+# device, and can carry a serial number, an address or the owner's name.
+KNOWN_NAMES = frozenset({
+    "ASUSTeK Computer Inc. N-KEY Device", "Asus WMI hotkeys", "InputPlumber Keyboard", "InputPlumber Mouse",
+    "Microsoft X-Box 360 pad", "Microsoft X-Box One pad", "Microsoft X-Box One S pad", "Microsoft X-Box One Elite pad",
+    "Microsoft X-Box One Elite 2 pad", "Microsoft Xbox Series S|X Controller", "Xbox Wireless Controller",
+    "Generic X-Box pad",
+})
+UNKNOWN_CONTROLLER, UNKNOWN_DEVICE = "<controller>", "<device>"
+# Key devices of an input daemon or of the platform's own buttons, recognised by their raw name.
+DAEMON_KEYS = re.compile(r"^(InputPlumber|Handheld Daemon)\b|hotkeys$", re.I)
 # A HID device directory: bus, vendor, product and instance, as in `0003:0B05:1B4C.0006`.
 HID_DEVICE = re.compile(r"[0-9A-Fa-f]{4}:([0-9A-Fa-f]{4,8}):([0-9A-Fa-f]{4,8})\.[0-9A-Fa-f]{4}")
 # A USB interface directory, as in `3-6:1.5`: its parent is the USB device itself.
@@ -115,6 +128,7 @@ class InputDevice:
     access: str
     bus_type: int = 0
     version: int = 0
+    daemon_keys: bool = False
 
     @property
     def path(self) -> str:
@@ -180,15 +194,16 @@ def _hex(text: str) -> int:
         return 0
 
 
-def device_label(ctx: Context, text: str, fallback: str = "") -> str:
-    """A device name fit to print: printable ASCII, bounded, and already scrubbed.
+def device_label(ctx: Context, text: str, gamepad: bool) -> str:
+    """The name to print for a device: a known model name, or `<controller>` / `<device>`.
 
     Names can carry a serial number, a Bluetooth address or the owner's name, so nothing
     downstream (verdicts, prompts, the SDL mapping line) ever sees the raw text.
     """
-    cleaned = " ".join(re.sub(r"[^\x20-\x7e]", "?", text).split())
-    # Scrub first, then shorten: cut first, a serial number could lose the digits that mark it as one.
-    return ctx.redactor.text(cleaned)[:NAME_LIMIT] or fallback
+    name = " ".join(text.split())
+    if name in KNOWN_NAMES:
+        return ctx.redactor.text(name)[:NAME_LIMIT]
+    return UNKNOWN_CONTROLLER if gamepad else UNKNOWN_DEVICE
 
 
 def input_devices(ctx: Context) -> list[InputDevice]:
@@ -198,15 +213,17 @@ def input_devices(ctx: Context) -> list[InputDevice]:
     for node in sorted(nodes, key=lambda name: int(name[5:])):
         base = f"/sys/class/input/{node}/device"
         bus = _hex(ctx.fs.line(f"{base}/id/bustype"))
-        name = device_label(ctx, ctx.fs.line(f"{base}/name"), node)
+        raw_name = ctx.fs.line(f"{base}/name")
         vendor, product = (_hex(ctx.fs.line(f"{base}/id/{field}")) for field in ("vendor", "product"))
-        devices.append(InputDevice(
-            node=node, name=name, bus=BUS_NAMES.get(bus, f"bus 0x{bus:02x}"),
+        device = InputDevice(
+            node=node, name="", bus=BUS_NAMES.get(bus, f"bus 0x{bus:02x}"),
             vendor_product=f"{vendor:04x}:{product:04x}",
             virtual=bus == BUS_VIRTUAL or "/devices/virtual/" in ctx.fs.resolved(base),
             keys=frozenset(parse_bitmap(ctx.fs.read(f"{base}/capabilities/key") or "")),
             axes=frozenset(parse_bitmap(ctx.fs.read(f"{base}/capabilities/abs") or "")),
-            access=_access(ctx, node), bus_type=bus, version=_hex(ctx.fs.line(f"{base}/id/version"))))
+            access=_access(ctx, node), bus_type=bus, version=_hex(ctx.fs.line(f"{base}/id/version")),
+            daemon_keys=bool(DAEMON_KEYS.search(raw_name)))
+        devices.append(replace(device, name=device_label(ctx, raw_name, device.is_gamepad)))
     return devices
 
 
