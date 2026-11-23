@@ -1164,6 +1164,24 @@ class RouteTest(NetCase):
             self.assertNotIn(name, " ".join(shown))
         self.assertEqual(ctx.redactor.text("wg-lab7b2c9 and office-vpn went down"), "vpn-1 and vpn-2 went down")
 
+    def test_names_that_aliases_are_made_of_leave_every_alias_as_it_is(self):
+        names = ("vpn", "vpn-1", "1", "VPN-3", "wg-lab7b2c9")
+        tunnels = "".join(f"{name}: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n" for name in names)
+        files = {"/proc/net/route": route_table(("vpn", "0.0.0.0", "10.8.0.1", "0003", 50, "0.0.0.0")),
+                 "/proc/net/dev": PROC_NET_DEV + tunnels, "/sys/class/net/1/type": "65534\n",
+                 "/sys/class/net/vpn/mtu": "1420\n"}
+        ctx = self.ctx(files, {("ip", "-4", "rule", "show"): IP_RULES_DEFAULT})
+        outcomes = (net.check_default_route(ctx), net.check_mtu_interface(ctx), net.check_vpn_proxy(ctx))
+        self.assertEqual(outcomes[2].evidence["tunnel_interfaces"], ["vpn-1", "vpn-2", "vpn-3", "vpn-4", "vpn-5"])
+        text = " ".join(outcome.detail + json.dumps(outcome.evidence) for outcome in outcomes)
+        scrubbed = ctx.redactor.text(text)
+        self.assertEqual(ctx.redactor.text(ctx.redactor.text(scrubbed)), scrubbed)
+        for kept in ("via vpn-1 (tunnel)", "MTU on vpn-1 is 1420", '["vpn-1", "vpn-2", "vpn-3", "vpn-4", "vpn-5"]'):
+            self.assertIn(kept, scrubbed)
+        self.assertEqual([ctx.redactor.alias(name, "vpn") for name in names], ["vpn-1", "vpn-2", "vpn-3", "vpn-4",
+                                                                               "vpn-5"])
+        self.assertEqual(ctx.redactor.text("wg-lab7b2c9 went down"), "vpn-5 went down")
+
     def test_ipv6_states(self):
         cases = [(IF_INET6_LOCAL, IPV6_ROUTE_NO_DEFAULT, Status.PASS, "local-only"),
                  ("", "", Status.PASS, "absent"),

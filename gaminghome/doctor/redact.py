@@ -120,6 +120,10 @@ _ADDRESS = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f.]{0,16}(?::[0-9A-Fa-f.]{0,16}
 # start, so it misses one glued to a word by a joiner; this one only refuses to start inside a word.
 _JOINED_HEX = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f]{2,4}(?:[-_:.][0-9A-Fa-f]{2,4}){2,15}(?![0-9A-Za-z])")
 _JOINER = re.compile(r"[-_:.]")
+ALIAS_KINDS = ("vpn", "if")
+# What alias text is made of: a kind, a number or both (`vpn`, `vpn-2`, `12`). A name like that is
+# generic, and replacing it with its alias would rewrite the aliases themselves (`vpn` in `vpn-1`).
+_ALIAS_TEXT = re.compile(rf"(?i)(?:{'|'.join(ALIAS_KINDS)})(?:-\d+)?|\d+")
 _VOUCHED_LIMIT = 64  # values kept for the rule above; a report vouches for a handful
 _ADDRESS_CHARS = frozenset("0123456789abcdefABCDEF:.")
 _SERIAL = re.compile(r"(?<![A-Za-z0-9])(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{8,}(?![A-Za-z0-9])")
@@ -222,14 +226,18 @@ class Redactor:
         """A stand-in such as `vpn-1` for a name someone chose, the same for the same name in one report.
 
         The name itself is registered as a secret with that alias as its label, so a copy of it
-        anywhere else in the report is replaced as well.
+        anywhere else in the report is replaced as well. A name that alias text is made of
+        (`vpn`, `vpn-1`, `1`) is not: it identifies nobody, and replacing it would rewrite every
+        alias that contains it, again on every pass.
         """
+        if kind not in ALIAS_KINDS:
+            raise ValueError(f"unknown alias kind {kind!r}")
         with self._lock:
             shown = self._aliases.get(name)
             if shown is None:
                 taken = sum(1 for value in self._aliases.values() if value.startswith(f"{kind}-"))
                 shown = self._aliases[name] = f"{kind}-{taken + 1}"
-                if _identifying(name):
+                if _identifying(name) and not _ALIAS_TEXT.fullmatch(name):
                     self._secrets[name] = (_word(name), shown)
         return shown
 
