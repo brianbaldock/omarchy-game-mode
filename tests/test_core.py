@@ -395,6 +395,23 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(catalog.errors, [])
         self.assertEqual(catalog.source, str(DATA / "catalog.json"))
 
+    def test_xbox_web_app_is_a_game_in_any_locale_or_chromium_browser(self):
+        # While a stream runs, the window title is the game's name. Only the
+        # en-US class matched, so other locales and Remote Play counted as
+        # desktop and a desktop mapper took the controller away mid-game.
+        model = core.HomeModel(core.Classifier(load_catalog(DATA / "catalog.json")))
+        model.ipc_restored()
+        for cls in ("chrome-www.xbox.com__en-US_play-Default", "chrome-www.xbox.com__de-DE_play-Default",
+                    "msedge-www.xbox.com__en-US_remoteplay-Default", "chromium-www.xbox.com__fr-FR_play-Default"):
+            window = W("0x71", cls, "Forza Horizon 5")
+            self.assertEqual(model.service(window), "cloud", cls)
+            model.update_windows([window], window)
+            self.assertEqual(model.desired_mode(), GAME, cls)
+        other = W("0x72", "chrome-www.example.com__-Default", "Forza Horizon 5")
+        self.assertIsNone(model.service(other))
+        model.update_windows([other], other)
+        self.assertEqual(model.desired_mode(), DESKTOP)
+
 
 class FakeBus:
     """Synchronous stand-in for Gio.DBusConnection used by the mapper."""
