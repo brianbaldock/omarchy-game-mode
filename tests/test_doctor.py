@@ -3003,6 +3003,26 @@ class EntryPointTest(unittest.TestCase):
         result = self.python(script)
         self.assertEqual((result.returncode, result.stdout.strip()), (0, "no-gtk-ok"), result.stderr)
 
+    def test_the_doctor_leaves_no_bytecode_cache_behind(self):
+        scratch = SCRATCH.parent / "bytecode"
+        shutil.rmtree(scratch, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        # `python -m` itself caches the package's __init__ and __main__ before any of their code runs.
+        module_cache = [f"gaminghome/__pycache__/{name}.{sys.implementation.cache_tag}.pyc"
+                        for name in ("__init__", "__main__")]
+        runs = {}
+        for argv, expected in ((["-I", "omarchy-game-mode.py"], []), (["-E", "-s", "-m", "gaminghome"], module_cache)):
+            copy = scratch / str(len(runs))
+            shutil.copytree(ROOT / "gaminghome", copy / "gaminghome", ignore=shutil.ignore_patterns("__pycache__"))
+            shutil.copy2(ROOT / "omarchy-game-mode.py", copy)
+            runs[copy] = (argv, expected, subprocess.Popen([sys.executable, *argv, "doctor", "--help"], cwd=copy,
+                                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        for copy, (argv, expected, process) in runs.items():
+            out, err = process.communicate(timeout=60)
+            self.assertEqual(process.returncode, 0, err)
+            self.assertIn("usage: omarchy-game-mode doctor", out)
+            self.assertEqual(sorted(str(path.relative_to(copy)) for path in copy.rglob("*.pyc")), expected, argv)
+
     def test_launcher_still_needs_gtk_for_everything_else(self):
         script = self.BLOCK_GI + ("import runpy\nsys.path.insert(0, '.')\nsys.argv = ['omarchy-game-mode', 'status']\n"
                                   "runpy.run_path('omarchy-game-mode.py', run_name='__main__')\n")

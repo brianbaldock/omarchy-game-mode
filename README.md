@@ -196,8 +196,9 @@ What it never does:
 
 - **No root.** It never runs `sudo`. Where only root can answer, it prints the command
   for you to run and marks the result "cannot verify without root".
-- **No changes.** Nothing is written, installed, enabled, started or stopped. No
-  controller is grabbed and no input is injected. Advice is text you can act on or ignore.
+- **No changes.** Nothing is written (not even Python bytecode caches), installed,
+  enabled, started or stopped. No controller is grabbed and no input is injected. Advice
+  is text you can act on or ignore.
 - **No account access.** It does not sign in and never reads tokens, cookies, browser
   profiles or keyrings. Greenlight is never started.
 - **No discovery.** Nothing is broadcast and no network is scanned. Your console is
