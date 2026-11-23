@@ -614,6 +614,36 @@ class ControllerTest(unittest.TestCase):
         self.ci.set_nav_enabled(True)
         self.assertEqual(self.clock.timers, {})
 
+    def test_reset_keeps_what_it_cannot_know_about_a_pad_that_sends_guide_chords(self):
+        # Guide is still down after a reset, so a press made then still belongs to its chord.
+        self.ci.add_device("d", guide_chords=True)
+        self.key(core.BTN_MODE, 1)
+        self.ci.reset()
+        self.key(BTN_SOUTH, 1)
+        self.key(core.BTN_MODE, 0)
+        self.key(BTN_SOUTH, 0)
+        self.key(BTN_SOUTH, 1)
+        self.assertEqual(self.actions, [ACTIVATE])
+        self.ci.feed("d", EV_SYN, SYN_DROPPED, 0)
+        self.ci.reset()
+        self.ci.feed("d", EV_SYN, SYN_REPORT, 0)   # the state still has to be read again
+        self.assertEqual(self.resyncs, ["d"])
+
+    def test_reset_forgets_everything_else_as_before(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.ci.add_device("o")
+        self.key(BTN_SELECT, 1, "d")               # held without Guide
+        for code in (core.BTN_MODE, BTN_SELECT):
+            self.key(code, 1, "o")
+        self.ci.feed("o", EV_SYN, SYN_DROPPED, 0)
+        self.ci.reset()
+        self.assertFalse(self.ci.held())
+        self.ci.feed("o", EV_SYN, SYN_REPORT, 0)
+        for dev in ("d", "o"):
+            self.key(BTN_START, 1, dev)
+            self.key(BTN_START, 0, dev)            # View is forgotten: a plain Menu tap
+        self.assertEqual((self.actions, self.resyncs), ([MENU, MENU], []))
+
     def test_unplug_clears_held_state(self):
         self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
         self.key(BTN_SELECT, 1)

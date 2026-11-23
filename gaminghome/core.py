@@ -551,7 +551,15 @@ class ControllerInterpreter:
 
     def reset(self):
         for state in self.devices.values():
+            guide, dropping = BTN_MODE in state.pressed, state.dropping
             self._clear(state)
+            if state.guide_chords:
+                # A reset tells nothing about such a pad: Guide is still down, so what is
+                # pressed with it still belongs to its chord, and a state that has to be
+                # read again still has to be.
+                if guide:
+                    state.pressed.add(BTN_MODE)
+                state.dropping = dropping
 
     def set_range(self, device_id: str, code: int, minimum: int, maximum: int, flat: int = 0):
         """Use the kernel's EVIOCGABS range: sticks may be 0..65535, not signed."""
