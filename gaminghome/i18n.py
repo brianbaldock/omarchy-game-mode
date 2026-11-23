@@ -123,6 +123,15 @@ DEFAULTS = {
     "settings.mapperHelp": "Uses set 1 on the desktop and an empty set 2 in games and Gaming Home. Off leaves AntiMicroX alone.",
     "status.mapperExternal": "Controller paused by AntiMicroX",
     "status.mapperExternalHelp": "AntiMicroX is running and Game Mode is not switching its sets, so use keyboard or touch here, or turn on Switch AntiMicroX sets in Settings.",
+    "inputplumber.device": "InputPlumber {version} manages {name} with the profile {profile}.",
+    "inputplumber.reading": "Game Mode reads its virtual gamepad and changes nothing in InputPlumber.",
+    "inputplumber.noDevice": "InputPlumber is running but manages no controller.",
+    "inputplumber.unrecognized": "Game Mode does not recognize its virtual controller type ({kinds}), so use keyboard or touch here.",
+    "inputplumber.ambiguous": "Several virtual controllers look like the one InputPlumber announces, so Game Mode uses none of them. Use keyboard or touch here.",
+    "inputplumber.hidden": "{name} is present, but InputPlumber hides it and Game Mode cannot read it.",
+    "inputplumber.evdevOnly": "It reads this controller through evdev only.",
+    "inputplumber.noR3": "It reports no right stick click (R3).",
+    "inputplumber.padName": "{name} (InputPlumber)",
 }
 
 

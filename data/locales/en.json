@@ -92,5 +92,14 @@
   "app.battlenet.description": "Battle.net games through Omarchy's launcher, without Steam.",
   "app.minecraft.description": "The official Minecraft Launcher on this desktop.",
   "app.moonlight.installHelp": "Moonlight ships with Omarchy, so there is no separate installer here. If the moonlight command is missing, reinstall the moonlight-qt package from Omarchy's base set.",
-  "app.remote.installHelp": "Choosing Install is the confirmation. Omarchy then adds the verified greenlight-bin package and does not ask again in the terminal."
+  "app.remote.installHelp": "Choosing Install is the confirmation. Omarchy then adds the verified greenlight-bin package and does not ask again in the terminal.",
+  "inputplumber.device": "InputPlumber {version} manages {name} with the profile {profile}.",
+  "inputplumber.reading": "Game Mode reads its virtual gamepad and changes nothing in InputPlumber.",
+  "inputplumber.noDevice": "InputPlumber is running but manages no controller.",
+  "inputplumber.unrecognized": "Game Mode does not recognize its virtual controller type ({kinds}), so use keyboard or touch here.",
+  "inputplumber.ambiguous": "Several virtual controllers look like the one InputPlumber announces, so Game Mode uses none of them. Use keyboard or touch here.",
+  "inputplumber.hidden": "{name} is present, but InputPlumber hides it and Game Mode cannot read it.",
+  "inputplumber.evdevOnly": "It reads this controller through evdev only.",
+  "inputplumber.noR3": "It reports no right stick click (R3).",
+  "inputplumber.padName": "{name} (InputPlumber)"
 }
