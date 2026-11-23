@@ -6,13 +6,13 @@ all subprocesses use fixed argument vectors with bounded timeouts.
 
 from __future__ import annotations
 
-import atexit
 import json
 import math
 import os
 import re
 import shutil
 import subprocess
+import weakref
 from collections.abc import Mapping
 from typing import Any, Callable
 
@@ -1084,7 +1084,7 @@ class QuickSettings:
         self.power_actions = power_actions or PowerActions(shared_bus, runner)
         self.osd = osd or OSD(runner)
         self._closed = False
-        atexit.register(self.close)
+        self._finalizer = weakref.finalize(self, self.power.release_profile)
 
     def snapshot(self) -> dict[str, Any]:
         result = {}
@@ -1163,10 +1163,7 @@ class QuickSettings:
             self.power.release_profile()
         except Exception:
             pass
-        try:
-            atexit.unregister(self.close)
-        except Exception:
-            pass
+        self._finalizer.detach()
 
     def __enter__(self):
         return self

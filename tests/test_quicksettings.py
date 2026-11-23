@@ -601,6 +601,13 @@ class AggregatorTest(unittest.TestCase):
         self.assertTrue(snapshot["audio"]["available"])
         json.dumps(snapshot)
 
+    def test_exit_finalizer_does_not_keep_quick_settings_alive(self):
+        settings = self.settings()
+        reference = weakref.ref(settings)
+        del settings
+        gc.collect()
+        self.assertIsNone(reference())
+
     def test_dispatch_allowlist_and_confirmation_are_strict(self):
         settings = self.settings()
         self.addCleanup(settings.close)
