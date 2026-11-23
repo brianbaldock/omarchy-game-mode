@@ -101,9 +101,12 @@
         ],
         "prefixes": [],
         "globs": [
-          "chrome-www.xbox.com_*_play-*",
-          "chromium-www.xbox.com_*_play-*",
-          "msedge-www.xbox.com_*_play-*"
+          "chrome-www.xbox.com_*_play-Default",
+          "chrome-www.xbox.com_*_play-Profile_*",
+          "chromium-www.xbox.com_*_play-Default",
+          "chromium-www.xbox.com_*_play-Profile_*",
+          "msedge-www.xbox.com_*_play-Default",
+          "msedge-www.xbox.com_*_play-Profile_*"
         ],
         "titleContains": [
           "Xbox Cloud Gaming"

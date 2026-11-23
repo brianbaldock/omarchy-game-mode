@@ -626,6 +626,7 @@ class CatalogTest(unittest.TestCase):
                     "chrome-www.xbox.com__en-US_remoteplay-Default",
                     "chrome-www.xbox.com__en-US_consoles_remote-play-Default",      # a product page
                     "chrome-www.xbox.com__en-US_games_xbox-play-anywhere-Default",
+                    "chrome-www.xbox.com__en-US_play-anywhere-Default",   # a page whose last path part starts with play-
                     "chrome-www.xbox.com__en-US_xbox-game-pass-Default", "chrome-www.xbox.com__-Default",
                     "chrome-www.xbox.com__en-US_playlists-Default", "chrome-www.xbox.com_play-Default",
                     "notchrome-www.xbox.com__en-US_play-Default", "brave-www.xbox.com__en-US_play-Default",
