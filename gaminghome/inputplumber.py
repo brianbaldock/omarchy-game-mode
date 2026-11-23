@@ -40,6 +40,9 @@ COMPOSITE_IFACE = "org.shadowblip.Input.CompositeDevice"
 TARGET_IFACE = "org.shadowblip.Input.Target"
 PROPERTIES_IFACE = "org.freedesktop.DBus.Properties"
 INTROSPECTABLE_IFACE = "org.freedesktop.DBus.Introspectable"
+# Every method this module may call. The one place that sends a call refuses anything else.
+READ_METHODS = frozenset({(INTROSPECTABLE_IFACE, "Introspect"), (PROPERTIES_IFACE, "Get"),
+                          (PROPERTIES_IFACE, "GetAll")})
 # Replies that mean "this object is not there (any more)", not that reading failed.
 GONE_ERRORS = ("org.freedesktop.DBus.Error.UnknownObject", "org.freedesktop.DBus.Error.UnknownInterface",
                "org.freedesktop.DBus.Error.UnknownMethod")
@@ -398,6 +401,8 @@ class InputPlumberClient:
         self._call(MANAGER, PROPERTIES_IFACE, "Get", version, "(v)", self._on_version)
 
     def _call(self, path, interface, method, parameters, reply, callback, *context):
+        if (interface, method) not in READ_METHODS:
+            raise ValueError(f"{interface}.{method} is not a read")
         self._outstanding += 1
         self._bus.call(self.owner, path, interface, method, parameters, GLib.VariantType(reply),
                        Gio.DBusCallFlags.NO_AUTO_START, TIMEOUT_MS, self._cancellable, callback,

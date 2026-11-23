@@ -307,6 +307,17 @@ class ClientLogicTest(unittest.TestCase):
         self.assertIsNone(self.client.error)
         self.assertIn("change handler failed", self.client.status()["error"])
 
+    def test_the_call_helper_refuses_everything_but_reads(self):
+        self.appear()
+        self.settle()
+        sent = len(self.bus.calls)
+        for interface, method in ((COMPOSITE_IFACE, "Stop"), (PROPERTIES_IFACE, "Set"), (MANAGER_IFACE, "HookSleep"),
+                                  (COMPOSITE_IFACE, "GetAll"), (PROPERTIES_IFACE, "Introspect")):
+            with self.assertRaises(ValueError, msg=method):
+                self.client._call(MANAGER, interface, method, None, "()", lambda *_arguments: None)
+        self.assertEqual(len(self.bus.calls), sent)
+        self.assertTrue(self.client.idle)
+
     def test_unowned_name_settles_without_a_single_call(self):
         self.client._vanished(None, BUS_NAME)
         self.client.hint()
