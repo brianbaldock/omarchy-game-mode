@@ -198,12 +198,16 @@ What it never does:
   contacted only when you pass `--console-ip` with its private address, and then with an
   anonymous STUN request on UDP 9002 and one connection attempt on TCP 3074.
 
-What it sends, only while you run it: DNS lookups and TLS handshakes (no request, no
-credentials) for `login.live.com`, `user.auth.xboxlive.com`, `xsts.auth.xboxlive.com`,
-`www.xbox.com`, `xhome.gssv-play-prod.xboxlive.com` and `gssv-play-prod.xboxlive.com`;
-anonymous STUN to `relay.communication.microsoft.com`, `stun.cloudflare.com` and
-`stun.l.google.com`; one unauthenticated TURN request to Microsoft's relay; one time
-query to `time.cloudflare.com`; and a few pings to your router and to `1.1.1.1`.
+What it sends, only while you run it: DNS lookups for the names below, and TLS handshakes
+(no request, no credentials) with `login.live.com`, `user.auth.xboxlive.com`,
+`xsts.auth.xboxlive.com`, `www.xbox.com`, `xhome.gssv-play-prod.xboxlive.com` and
+`gssv-play-prod.xboxlive.com`; anonymous STUN to `relay.communication.microsoft.com`,
+`stun.cloudflare.com` and `stun.l.google.com`; one unauthenticated TURN request to
+Microsoft's relay, plus one to the regional Microsoft relay it redirects to (followed once,
+and only to a public address on UDP 3478); one time query to `time.cloudflare.com`; and a
+few pings to your router and to `stun.cloudflare.com`. Names are only probed at public
+unicast addresses, whatever the resolver answers. With `--console-ip`, the console
+probes described above go to that one address.
 
 Reading the result:
 

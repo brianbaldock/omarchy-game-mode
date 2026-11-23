@@ -3,6 +3,8 @@
 Xbox Remote Play and cloud gaming carry media over UDP negotiated with ICE. These
 checks send the same first packets a WebRTC client would, to Microsoft's relay and
 two public STUN servers, and stop there: no credentials, no allocation, no media.
+Microsoft's relay answers the TURN request with a redirect to a regional relay; that
+one redirect is followed, and only to a public unicast IPv4 address on UDP 3478.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from typing import Any, Sequence
 from . import stun
 from .context import Context
 from .model import Outcome, fail, ok, skip, warn
-from .net import local_ipv4, resolve_cached
+from .net import local_ipv4, public_unicast, resolve_cached
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,8 @@ STUN_SERVERS = (
     StunServer("Cloudflare", "stun.cloudflare.com", 3478),
     StunServer("Google", "stun.l.google.com", 19302),
 )
+# The one port a Microsoft relay redirect may point to: TURN over UDP.
+TURN_PORTS = frozenset({3478})
 UDP_BLOCKED_FIX = ("Look for a VPN, a captive portal, or a router or firewall rule that blocks outbound UDP "
                    "(ports 3478 and 19302 here).")
 
@@ -149,15 +153,20 @@ def _allocate(ctx: Context, address: str, port: int) -> StunReply | None:
 
 
 def _regional_relay(message: stun.Message) -> tuple[str, int] | None:
-    """The alternate server of a 300 answer, accepted only when it is a public IPv4 address."""
+    """The alternate server of a 300 answer, accepted only as a public unicast IPv4 address on the TURN port.
+
+    The redirect comes from the network, so it is not trusted to point anywhere else: never into
+    private, carrier-grade NAT, loopback, link-local, multicast or reserved space.
+    """
     try:
         alternate = stun.alternate_server(message)
     except stun.StunError:
         return None
     if alternate is None:
         return None
-    address = ipaddress.ip_address(alternate[0])
-    return alternate if address.version == 4 and address.is_global and 0 < alternate[1] < 65536 else None
+    address, port = alternate
+    public_ipv4 = ipaddress.ip_address(address).version == 4 and public_unicast(address)
+    return alternate if public_ipv4 and port in TURN_PORTS else None
 
 
 def check_turn_challenge(ctx: Context) -> Outcome:

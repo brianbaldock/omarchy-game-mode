@@ -48,8 +48,8 @@ other commands:
 
 The doctor is read-only: no root, no installs, no configuration changes, no sign-in.
 It sends anonymous probes to Microsoft's relay and service names, two public STUN
-servers, one NTP server and your own gateway. Exit status: 0 no failed check,
-1 at least one failed check, 2 usage error.
+servers, one NTP server, your own gateway and, with --console-ip, that one address.
+Exit status: 0 no failed check, 1 at least one failed check, 2 usage error.
 """
 
 

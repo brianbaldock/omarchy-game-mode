@@ -3,7 +3,10 @@
 Everything is read from /proc and /sys or asked of a tool with a timeout; the only
 packets sent are DNS lookups, TCP+TLS handshakes to Microsoft's public service names
 (no HTTP request, no credentials), one SNTP query and ICMP echo to the default
-gateway and one public anycast address. Nothing here needs root.
+gateway and to the Cloudflare STUN server the UDP checks already contact. Nothing
+here needs root. A name's answers are only ever probed when they are public unicast
+addresses (`public_unicast`), so a resolver cannot point a probe into the local
+network or at a multicast group.
 """
 
 from __future__ import annotations
@@ -37,7 +40,29 @@ TABLE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 
 NTP_HOST = "time.cloudflare.com"
 NTP_EPOCH_OFFSET = 2208988800
-PMTU_TARGET = "1.1.1.1"
+# One of the STUN servers the UDP checks contact anyway (see `udp.STUN_SERVERS`), so the
+# path MTU probe adds no destination of its own.
+PMTU_HOST = "stun.cloudflare.com"
+CGNAT = ipaddress.IPv4Network("100.64.0.0/10")
+
+
+def public_unicast(address: str) -> bool:
+    """True for a globally routable unicast address, the only kind the doctor sends probes to.
+
+    `ipaddress.is_global` alone also admits multicast groups (and site-local IPv6), so every
+    other category is ruled out explicitly: private, carrier-grade NAT, loopback, link-local,
+    multicast, reserved, unspecified and broadcast.
+    """
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if isinstance(parsed, ipaddress.IPv6Address) and (parsed.ipv4_mapped is not None or parsed.is_site_local):
+        return False
+    if isinstance(parsed, ipaddress.IPv4Address) and parsed in CGNAT:
+        return False
+    return parsed.is_global and not (parsed.is_private or parsed.is_loopback or parsed.is_link_local
+                                     or parsed.is_multicast or parsed.is_reserved or parsed.is_unspecified)
 
 
 @dataclass(frozen=True)
@@ -336,8 +361,9 @@ class Resolution:
 
     @property
     def usable(self) -> tuple[str, ...]:
-        """Routable answers only: a sinkhole (0.0.0.0, loopback, private) is not a working lookup."""
-        return tuple(address for address in self.addresses if ipaddress.ip_address(address).is_global)
+        """Public unicast answers only: a sinkhole (0.0.0.0, loopback, private) is not a working lookup,
+        and nothing outside the public internet is ever probed because a resolver said so."""
+        return tuple(address for address in self.addresses if public_unicast(address))
 
 
 def resolve(ctx: Context, host: str, family: int = socket.AF_INET, timeout: float = 2.0) -> Resolution:
@@ -702,9 +728,9 @@ def check_mtu_interface(ctx: Context) -> Outcome:
     return ok(f"MTU on {shown} is {mtu}.", interface=shown, mtu=mtu)
 
 
-def _ping_size(ctx: Context, size: int) -> bool | None:
+def _ping_size(ctx: Context, address: str, size: int) -> bool | None:
     result = ctx.command(["ping", "-4", "-n", "-q", "-c", "2", "-i", "0.2", "-W", "1", "-w", "3", "-M", "do",
-                          "-s", str(size), PMTU_TARGET], 5)
+                          "-s", str(size), address], 5)
     if result.error:
         return None
     stats = parse_ping(result.stdout)
@@ -712,12 +738,16 @@ def _ping_size(ctx: Context, size: int) -> bool | None:
 
 
 def check_pmtu(ctx: Context) -> Outcome:
-    small = _ping_size(ctx, 1200)
+    resolution = resolve_cached(ctx, PMTU_HOST, socket.AF_INET)
+    if not resolution.usable:
+        return skip(f"{PMTU_HOST} did not resolve to a public address, so the path MTU could not be probed.")
+    address = resolution.usable[0]
+    small = _ping_size(ctx, address, 1200)
     if small is None:
         return skip("The ping tool is not installed or did not run.")
     if not small:
-        return skip(f"{PMTU_TARGET} does not answer ping from here, so the path MTU could not be probed.")
-    if _ping_size(ctx, 1472):
+        return skip(f"{PMTU_HOST} does not answer ping from here, so the path MTU could not be probed.")
+    if _ping_size(ctx, address, 1472):
         return ok("Full-size 1500-byte packets pass without fragmentation.", passes_1228=True, passes_1500=True)
     return warn("1228-byte packets pass but full-size 1500-byte packets do not: something on the path has a "
                 "smaller MTU and may silently drop large stream packets.",

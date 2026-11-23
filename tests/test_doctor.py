@@ -754,11 +754,43 @@ class UdpChecksTest(unittest.TestCase):
         silent = udp.check_turn_challenge(self.ctx(self.turn({RELAY_IP: (300, "Try Alternate", alternate)})))
         self.assertEqual(silent.status, Status.WARN)
 
-    def test_turn_never_follows_a_redirect_into_private_address_space(self):
-        alternate = [(stun.ATTR_ALTERNATE_SERVER, stun.encode_plain_address("192.168.77.1", 3478))]
-        outcome = udp.check_turn_challenge(self.ctx(self.turn({RELAY_IP: (300, "Try Alternate", alternate)})))
+    def test_turn_follows_a_redirect_only_to_a_public_unicast_ipv4_address_on_the_turn_port(self):
+        refused = [("192.168.77.1", 3478), ("100.64.1.1", 3478), ("127.0.0.1", 3478), ("169.254.9.9", 3478),
+                   ("224.0.0.1", 3478), ("239.255.255.250", 3478), ("240.0.0.1", 3478), ("0.0.0.0", 3478),
+                   ("255.255.255.255", 3478), (REGIONAL_IP, 443), (REGIONAL_IP, 19302), ("2603:1061:14::1", 3478)]
+        for address, port in refused:
+            alternate = [(stun.ATTR_ALTERNATE_SERVER, stun.encode_plain_address(address, port))]
+            answers = {RELAY_IP: (300, "Try Alternate", alternate), address: (401, "Unauthorized")}
+            outcome = udp.check_turn_challenge(self.ctx(self.turn(answers)))
+            self.assertEqual((outcome.status, outcome.evidence["error_code"]), (Status.WARN, 300), address)
+            self.assertEqual([destination for _data, destination in self.world.sent()], [(RELAY_IP, 3478)], address)
+
+    def test_turn_follows_at_most_one_redirect(self):
+        onward = "20.202.99.8"
+        answers = {RELAY_IP: (300, "Try Alternate",
+                              [(stun.ATTR_ALTERNATE_SERVER, stun.encode_plain_address(REGIONAL_IP, 3478))]),
+                   REGIONAL_IP: (300, "Try Alternate",
+                                 [(stun.ATTR_ALTERNATE_SERVER, stun.encode_plain_address(onward, 3478))]),
+                   onward: (401, "Unauthorized")}
+        outcome = udp.check_turn_challenge(self.ctx(self.turn(answers)))
         self.assertEqual((outcome.status, outcome.evidence["error_code"]), (Status.WARN, 300))
-        self.assertEqual({destination[0] for _data, destination in self.world.sent()}, {RELAY_IP})
+        self.assertEqual([destination for _data, destination in self.world.sent()],
+                         [(RELAY_IP, 3478), (REGIONAL_IP, 3478)])
+
+    def test_dns_answers_outside_the_public_internet_are_never_probed(self):
+        local = ["224.0.0.251", "239.1.2.3", "100.64.0.9", "240.0.0.1", "0.0.0.0", "127.0.0.1", "169.254.1.1",
+                 "10.1.2.3", "192.168.77.1", "255.255.255.255"]
+        self.assertEqual([net.public_unicast(address) for address in local], [False] * len(local))
+        for address in ("ff02::1", "fe80::1", "fd10::1", "fec0::1", "::ffff:93.184.216.34", "::1", "2001:db8::1",
+                        "nonsense"):
+            self.assertFalse(net.public_unicast(address), address)
+        self.assertTrue(all(net.public_unicast(address) for address in (SERVICE_IP, CANARY_PUBLIC_IP6)))
+        table = {host: [*local, *addresses] for host, addresses in DNS_TABLE.items()}
+        self.assertEqual(net.resolve(make_context(getaddrinfo=fake_dns(table)), "www.xbox.com").usable, (SERVICE_IP,))
+        multicast = {host: ["224.0.0.1"] for host in DNS_TABLE}
+        self.assertEqual(udp.check_stun_binding(self.ctx(nat(), dns=fake_dns(multicast))).status, Status.SKIP)
+        self.assertEqual(udp.check_turn_challenge(self.ctx(nat(), dns=fake_dns(multicast))).status, Status.SKIP)
+        self.assertEqual(self.world.sent(), [])
 
     def test_turn_silence_is_a_failure_and_no_name_is_a_skip(self):
         self.assertEqual(udp.check_turn_challenge(self.ctx(self.turn({}))).status, Status.FAIL)
@@ -883,12 +915,12 @@ PING_SILENT = ("PING 192.168.77.1 (192.168.77.1) 56(84) bytes of data.\n\n--- 19
 
 def pmtu_argv(size):
     return ("ping", "-4", "-n", "-q", "-c", "2", "-i", "0.2", "-W", "1", "-w", "3", "-M", "do", "-s", str(size),
-            "1.1.1.1")
+            CLOUDFLARE_IP)
 
 
 def ping_reply(received):
     return CommandResult(("ping",), 0 if received else 1,
-                         f"--- 1.1.1.1 ping statistics ---\n2 packets transmitted, {received} received, "
+                         f"--- {CLOUDFLARE_IP} ping statistics ---\n2 packets transmitted, {received} received, "
                          f"{'+2 errors, ' if not received else ''}{100 - 50 * received}% packet loss, time 201ms\n")
 
 
@@ -1283,8 +1315,18 @@ class PingTest(NetCase):
         cases = [(1, 1, Status.PASS), (1, 0, Status.WARN), (0, 0, Status.SKIP)]
         for small, large, status in cases:
             commands = {pmtu_argv(1200): ping_reply(small), pmtu_argv(1472): ping_reply(large)}
-            self.assertEqual(net.check_pmtu(self.ctx(commands=commands)).status, status)
-        self.assertEqual(net.check_pmtu(self.ctx()).status, Status.SKIP)
+            self.assertEqual(net.check_pmtu(self.ctx(commands=commands, getaddrinfo=fake_dns())).status, status)
+        self.assertEqual(net.check_pmtu(self.ctx(getaddrinfo=fake_dns())).status, Status.SKIP)
+
+    def test_path_mtu_is_probed_at_a_stun_server_the_udp_checks_already_contact(self):
+        self.assertIn(net.PMTU_HOST, [server.host for server in udp.STUN_SERVERS])
+        commands = FakeCommands({pmtu_argv(1200): ping_reply(2), pmtu_argv(1472): ping_reply(2)})
+        outcome = net.check_pmtu(make_context(commands=commands, getaddrinfo=fake_dns()))
+        self.assertEqual((outcome.status, [call[-1] for call in commands.calls]), (Status.PASS, [CLOUDFLARE_IP] * 2))
+        for answers in ({}, {net.PMTU_HOST: ["224.0.0.1", "100.64.0.9"]}):
+            commands = FakeCommands()
+            outcome = net.check_pmtu(make_context(commands=commands, getaddrinfo=fake_dns(answers)))
+            self.assertEqual((outcome.status, commands.calls), (Status.SKIP, []))
 
 
 # ---- Wi-Fi ------------------------------------------------------------------------
@@ -2229,6 +2271,22 @@ class PlanTest(World):
         self.assertEqual(by_status[Status.SKIP], ["firewall.rules", "manual.console_account_region",
                                                   "capture.failed_attempt"])
         self.assertEqual([result.id for result in results], [check.id for check in checks.plan(options)])
+
+    def test_probes_go_only_to_the_documented_destinations(self):
+        options = Options(console_ip=CONSOLE_IP)
+        ctx = self.world(options)
+        connected, looked_up, resolve = [], [], ctx.getaddrinfo
+        ctx.tcp_connect = lambda address, _timeout: connected.append(address) or FakeTcp()
+        ctx.getaddrinfo = lambda host, *rest: looked_up.append(host) or resolve(host, *rest)
+        runner.run_checks(checks.plan(options), ctx, workers=1)
+        names = {*(host.name for host in net.REQUIRED_HOSTS), *(server.host for server in udp.STUN_SERVERS), net.NTP_HOST}
+        self.assertEqual(set(looked_up), names)
+        self.assertEqual({destination for _data, destination in self.udp.sent()},
+                         {(RELAY_IP, 3478), (CLOUDFLARE_IP, 3478), (GOOGLE_IP, 19302), (NTP_IP, 123),
+                          (CONSOLE_IP, 9002)})
+        self.assertEqual(set(connected), {(SERVICE_IP, 443), (CONSOLE_IP, 3074)})
+        self.assertEqual({call[-1] for call in self.commands.calls if call[0] == "ping"},
+                         {"192.168.77.1", CLOUDFLARE_IP})
 
     def test_the_doctor_runs_only_read_only_commands(self):
         options = Options(console_ip=CONSOLE_IP)
