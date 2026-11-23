@@ -508,6 +508,61 @@ class ControllerTest(unittest.TestCase):
         self.clock.fire_all()
         self.assertEqual(self.actions, [HOME])
 
+    def test_what_a_resync_finds_held_without_seeing_it_pressed_is_ignored_until_released(self):
+        # Reading the keys drops the key events still queued: Guide down, View down and Guide up, or the
+        # Guide around a D-pad press, may never be seen. Only what is held afterwards is.
+        self.ci.add_device("d", guide_chords=True)
+        self.ci.on_resync = lambda dev: self.ci.sync_state(dev, {BTN_SELECT}, {core.ABS_HAT0X: 1})
+        self.ci.set_nav_enabled(False)
+        self.ci.set_nav_enabled(True)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.key(BTN_START, 0)
+        self.assertEqual(self.actions, [MENU])
+        self.key(BTN_SELECT, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.assertEqual(self.actions, [MENU, HOME, core.RIGHT])
+
+    def test_hold_seen_without_guide_still_counts_after_a_resync(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(BTN_SELECT, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.ci.on_resync = lambda dev: self.ci.sync_state(dev, {BTN_SELECT}, {core.ABS_HAT0X: 1})
+        self.ci.set_nav_enabled(False)
+        self.ci.set_nav_enabled(True)          # focus went away and came back while View and right stayed down
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [core.RIGHT, core.RIGHT, HOME])
+
+    def test_chord_stick_direction_eased_into_the_hysteresis_band_is_not_released_by_a_resync(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(core.BTN_MODE, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)
+        self.key(core.BTN_MODE, 0)
+        self.ci.on_resync = lambda dev: self.ci.sync_state(dev, set(), {core.ABS_X: 15000})
+        self.ci.set_nav_enabled(False)
+        self.ci.set_nav_enabled(True)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)   # pushed further, never let go
+        self.assertEqual((self.actions, self.clock.timers), ([], {}))
+        self.ci.feed("d", EV_ABS, core.ABS_X, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)
+        self.assertEqual(self.actions, [core.RIGHT])
+
+    def test_ordinary_pad_adopts_what_a_resync_finds_held_as_before(self):
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)
+        self.ci.on_resync = lambda dev: self.ci.sync_state(dev, {BTN_SELECT}, {core.ABS_X: 15000, core.ABS_HAT0X: 1})
+        self.ci.set_nav_enabled(False)
+        self.ci.set_nav_enabled(True)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)   # the band released the stick: this is a new push
+        self.assertEqual(self.actions, [core.RIGHT, core.RIGHT, HOME, core.RIGHT])
+
     def test_reenabled_nav_resumes_held_direction_without_stale_press(self):
         held = {"d": ({BTN_SOUTH}, {core.ABS_HAT0X: 1})}
         self.ci.on_resync = lambda dev: self.ci.sync_state(dev, *held[dev])

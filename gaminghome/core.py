@@ -24,6 +24,7 @@ BTN_TL, BTN_TR = 310, 311
 BTN_SELECT, BTN_START, BTN_MODE = 314, 315, 316
 ABS_X, ABS_Y, ABS_HAT0X, ABS_HAT0Y = 0, 1, 16, 17
 DIRECTION_AXES = (ABS_X, ABS_Y, ABS_HAT0X, ABS_HAT0Y)
+NAV_BUTTONS = frozenset({BTN_SOUTH, BTN_EAST, BTN_TL, BTN_TR, BTN_SELECT, BTN_START, BTN_MODE})
 
 GAME, DESKTOP, AUTO = "game", "desktop", "auto"
 MODES = (AUTO, GAME, DESKTOP)
@@ -519,7 +520,8 @@ class ControllerInterpreter:
       stack that sends a handheld's vendor buttons as Guide chords. On it,
       every button or direction pressed while Guide is held is ignored as
       well, until it is let go, also across a resync, and Guide ends a
-      pending Menu or Home hold.
+      pending Menu or Home hold. A resync ignores the same way what it finds
+      held without having seen it pressed: Guide may have been held then.
     * SYN_DROPPED discards state until the next SYN_REPORT, after which the
       caller resyncs held buttons without generating actions.
     """
@@ -580,20 +582,39 @@ class ControllerInterpreter:
     def sync_state(self, device_id: str, pressed: set[int], axes: dict[int, int]):
         """Adopt the kernel's current state without emitting actions."""
         state = self.devices.setdefault(device_id, _DeviceState())
+        if state.guide_chords:
+            self._sync_guide_chords(state, set(pressed), axes)
+            return
         self._clear(state)
-        state.pressed = set(pressed) & {BTN_SOUTH, BTN_EAST, BTN_TL, BTN_TR, BTN_SELECT, BTN_START, BTN_MODE}
+        state.pressed = set(pressed) & NAV_BUTTONS
         for code, value in axes.items():
             self._set_axis(state, code, value)
-        if state.guide_chords:
-            # What belongs to a Guide chord stays ignored until the state shows it let go.
-            state.suppressed &= set(pressed)
-            state.suppressed_directions = {(code, sign) for code, sign in state.suppressed_directions
-                                           if code not in axes or self._sign(state, code) == sign}
-            if BTN_MODE in state.pressed:
-                # Whatever is down together with Guide may have been pressed for its chord.
-                state.suppressed |= state.pressed - {BTN_MODE}
-                state.suppressed_directions |= self._pushed_directions(state)
-            state.pressed -= state.suppressed
+        state.direction = self._direction(state)
+        state.chord_consumed = {BTN_SELECT, BTN_START} <= state.pressed
+
+    def _sync_guide_chords(self, state, keys, axes):
+        """Adopt the state of a pad that sends Guide chords, ignoring what may belong to one.
+
+        Reading the keys drops the key events still queued, Guide's among
+        them. So a button or direction held now that was not known as a plain
+        hold may have been pressed for a Guide chord: like one that was, it is
+        ignored until it is released. A direction ignored before keeps its
+        side while the stick is in its hysteresis band or the axis is not read.
+        """
+        plain_keys = set(state.pressed)
+        plain_directions = self._pushed_directions(state) - state.suppressed_directions
+        self._clear(state)
+        for code, sign in state.suppressed_directions:
+            values, index = self._slot(state, code)
+            values[index] = sign
+        for code, value in axes.items():
+            self._set_axis(state, code, value)
+        if BTN_MODE in keys:
+            # Whatever is down together with Guide may have been pressed for its chord.
+            plain_keys, plain_directions = {BTN_MODE}, set()
+        state.suppressed = keys - plain_keys - {BTN_MODE}
+        state.suppressed_directions = self._pushed_directions(state) - plain_directions
+        state.pressed = (keys & NAV_BUTTONS) - state.suppressed
         state.direction = self._direction(state)
         state.chord_consumed = {BTN_SELECT, BTN_START} <= state.pressed
 
@@ -713,10 +734,16 @@ class ControllerInterpreter:
                 state.stick[index] = 0
 
     @staticmethod
-    def _sign(state, code):
-        """Which way one axis of the D-pad or stick is pushed: -1, 0 or 1."""
+    def _slot(state, code):
+        """The list that holds one axis of the D-pad or stick, and the index of that axis in it."""
         values = state.hat if code in (ABS_HAT0X, ABS_HAT0Y) else state.stick
-        return values[0 if code in (ABS_HAT0X, ABS_X) else 1]
+        return values, 0 if code in (ABS_HAT0X, ABS_X) else 1
+
+    @classmethod
+    def _sign(cls, state, code):
+        """Which way one axis of the D-pad or stick is pushed: -1, 0 or 1."""
+        values, index = cls._slot(state, code)
+        return values[index]
 
     @classmethod
     def _pushed_directions(cls, state):
