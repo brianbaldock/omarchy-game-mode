@@ -151,7 +151,10 @@ itself. On the ASUS ROG Xbox Ally (RC73YA) with a kernel that lacks the Ally HID
 driver, InputPlumber 0.82.0 rejects its hidraw sources ("Device is not using the
 asus_rog_ally driver") and runs on evdev sources only. In that state:
 
-- the right stick click (R3) stays missing;
+- the virtual pad reports no right stick click (R3). HHD's and InputPlumber's own
+  former Ally X maps for this USB ID deliver R3 as `BTN_TR2`, a code InputPlumber's
+  stock configuration does not turn into a stick click (see below for what is and is
+  not verified on the RC73YA);
 - all of the controller's hidraw nodes become root-only, so tools that read the vendor
   buttons from hidraw stop working;
 - going by InputPlumber's own device configuration, stock profile and target code, the
@@ -260,12 +263,15 @@ them gone. Game Mode never edits AntiMicroX profiles or any other app's configur
     error. The controller's hidraw nodes were root-only. No button was pressed.
   - **Pending physical validation, and known limits:** presses of the Xbox, View, Menu,
     Library and Armoury buttons; Guide behavior in Steam; suspend and resume; a real
-    game session. On this device the right stick click produces no evdev code, and on
-    the raw pad the Xbox button has been seen as `BTN_SELECT` (314). What the other
-    codes mean on this pad is unverified until a guided physical test runs, so the
-    View + Menu chord is unverified there as well. R3 is expected to need the Ally HID
-    driver, which this kernel does not have; that the driver restores it is not
-    verified either.
+    game session. On the raw pad the Xbox button has been seen as `BTN_SELECT` (314).
+    HHD's Ally X button map and InputPlumber's former Ally X fallback map, both for the
+    same USB id (`0b05:1b4c`), describe the pad's buttons as arriving in XInput order
+    but with the kernel's generic codes: X as `BTN_C`, Y as `BTN_NORTH`, LB as
+    `BTN_WEST`, RB as `BTN_Z`, View as `BTN_TL`, Menu as `BTN_TR`, L3 as `BTN_TL2`,
+    R3 as `BTN_TR2` and the Xbox button as `BTN_SELECT`. That fits the Xbox button
+    reading and would explain scrambled SDL and Steam mappings for this pad, but no
+    guided physical test on an RC73YA has confirmed the whole table, so the View +
+    Menu chord is unverified there as well.
 - Game recognition is a heuristic. A windowed game that wasn't started by a supported
   launcher counts as desktop until you choose **Game input** for it.
 - Nothing in the automated tests can show that the physical Guide button still reaches
