@@ -170,6 +170,7 @@ def evdev_identity(fd: int) -> GamepadIdentity | None:
 class _Device:
     def __init__(self, node, name, fd, source, virtual=False):
         self.node, self.name, self.fd, self.source, self.virtual = node, name, fd, source, virtual
+        self.reads = 0  # reads of a virtual gamepad's state; events read before one are stale
 
 
 class ControllerMonitor:
@@ -406,10 +407,17 @@ class ControllerMonitor:
         return True
 
     def resync(self, node):
-        """Adopt held buttons/axes after connect or SYN_DROPPED (no actions)."""
+        """Adopt held buttons/axes on connect and when the interpreter asks for it (no actions).
+
+        A virtual gamepad whose keys cannot be read is not taken for one with
+        nothing held: it is read again at its next report. An axis of it that
+        cannot be read keeps its side.
+        """
         device = self.devices.get(node)
         if device is None:
             return
+        if device.virtual:
+            device.reads += 1
         pressed, axes = set(), {}
         try:
             buf = bytearray(KEY_BYTES)
@@ -417,11 +425,17 @@ class ControllerMonitor:
             pressed = {i for i in range(KEY_BYTES * 8) if buf[i // 8] & (1 << (i % 8))}
             for code in (core.ABS_X, core.ABS_Y, core.ABS_HAT0X, core.ABS_HAT0Y):
                 info = array.array("i", [0] * 6)
-                fcntl.ioctl(device.fd, EVIOCGABS(code), info, True)
+                try:
+                    fcntl.ioctl(device.fd, EVIOCGABS(code), info, True)
+                except OSError:
+                    if device.virtual:
+                        continue
+                    raise
                 axes[code] = info[0]
         except OSError:
             if device.virtual:
-                return  # Unread is not released: what a Guide chord holds must stay ignored.
+                self.interpreter.distrust(node)
+                return
         self.interpreter.sync_state(node, pressed, axes)
 
     def _on_readable(self, fd, condition, node):
@@ -443,9 +457,12 @@ class ControllerMonitor:
                 return False
             for offset in range(0, len(data) - EVENT.size + 1, EVENT.size):
                 _sec, _usec, etype, code, value = EVENT.unpack_from(data, offset)
+                reads = device.reads
                 self.interpreter.feed(node, etype, code, value)
                 if node not in self.devices:
                     return False
+                if device.reads != reads:
+                    break  # the state was just read: the rest of this batch is older than that read
         if condition & (GLib.IOCondition.HUP | GLib.IOCondition.ERR):
             self._remove(node, source_done=True)
             return False

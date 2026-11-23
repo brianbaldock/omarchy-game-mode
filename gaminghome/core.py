@@ -524,7 +524,8 @@ class ControllerInterpreter:
       state is adopted on connect and after dropped events only, and then
       whatever is held other than Guide waits for its release.
     * SYN_DROPPED discards state until the next SYN_REPORT, after which the
-      caller resyncs held buttons without generating actions.
+      caller resyncs held buttons without generating actions. ``distrust``
+      does the same for a device whose state could not be read.
     """
 
     STICK_PRESS = 0.55
@@ -560,6 +561,12 @@ class ControllerInterpreter:
                 if guide:
                     state.pressed.add(BTN_MODE)
                 state.dropping = dropping
+
+    def distrust(self, device_id: str):
+        """Forget a device whose state could not be read, as SYN_DROPPED does: the next SYN_REPORT reads again."""
+        state = self.devices.setdefault(device_id, _DeviceState())
+        self._clear(state)
+        state.dropping = True
 
     def set_range(self, device_id: str, code: int, minimum: int, maximum: int, flat: int = 0):
         """Use the kernel's EVIOCGABS range: sticks may be 0..65535, not signed."""

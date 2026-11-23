@@ -262,6 +262,85 @@ class VirtualGamepadTest(MonitorCase):
         self.assertEqual(self.monitor().status()["devices"], [])
 
 
+class RecoveryTest(MonitorCase):
+    """Reads of the state on connect and after dropped events, answered as evdev does."""
+
+    DROPPED = [(core.EV_SYN, core.SYN_DROPPED, 0), (core.EV_SYN, core.SYN_REPORT, 0)]
+
+    def virtual_pad(self):
+        node = self.tree.add(21, ELITE)
+        self.allow = VirtualGamepads({ELITE: 1})
+        return node, self.monitor()
+
+    def chord(self, node, monitor):
+        """A pressed while Guide is down and read on its own, then Guide let go and B pressed: only B may act."""
+        self.press(node, (core.BTN_SOUTH, 1))
+        self.assertTrue(pump(lambda: self.evdev.unread(monitor.devices[node].fd) == 0))
+        self.press(node, (core.BTN_SOUTH, 0), (core.BTN_MODE, 0), (core.BTN_EAST, 1))
+        self.assertTrue(pump(lambda: core.BACK in self.actions))
+
+    def test_batch_read_with_a_report_of_dropped_events_is_superseded_by_the_read_that_follows(self):
+        elite, monitor = self.virtual_pad()
+        # In one read: events were dropped, then View went down and Guide up. The read of the state
+        # that follows comes after all of them and finds View held.
+        self.evdev.keys[elite] = {core.BTN_SELECT}
+        self.evdev.queue(elite, self.DROPPED + [(core.EV_KEY, core.BTN_SELECT, 1), (core.EV_SYN, core.SYN_REPORT, 0),
+                                                (core.EV_KEY, core.BTN_MODE, 0), (core.EV_SYN, core.SYN_REPORT, 0)])
+        self.assertTrue(pump(lambda: self.evdev.unread(monitor.devices[elite].fd) == 0))
+        self.press(elite, (core.BTN_START, 1))
+        self.assertTrue(pump(lambda: core.BTN_START in monitor.interpreter.devices[elite].pressed))
+        self.fire_timers()
+        self.assertEqual(self.actions, [])
+        # A read taken before View went down: View is pressed during the Guide it found held.
+        self.press(elite, (core.BTN_START, 0), (core.BTN_SELECT, 0))
+        self.assertTrue(pump(lambda: self.actions == [core.MENU]))   # without View: a plain Menu press
+        del self.actions[:]
+        self.evdev.keys[elite] = {core.BTN_MODE}
+        self.evdev.queue(elite, self.DROPPED)
+        self.assertTrue(pump(lambda: core.BTN_MODE in monitor.interpreter.devices[elite].pressed))
+        self.press(elite, (core.BTN_SELECT, 1), (core.BTN_MODE, 0), (core.BTN_START, 1))
+        self.assertTrue(pump(lambda: core.BTN_START in monitor.interpreter.devices[elite].pressed))
+        self.fire_timers()
+        self.assertEqual(self.actions, [])
+
+    def test_only_the_virtual_pad_drops_events_of_a_batch_that_a_read_superseded(self):
+        usb, (elite, monitor) = self.tree.add(7, PHYSICAL, where=USB), self.virtual_pad()
+        for node in (usb, elite):           # A was let go by the time of the read
+            self.evdev.queue(node, self.DROPPED + [(core.EV_KEY, core.BTN_SOUTH, 1), (core.EV_SYN, core.SYN_REPORT, 0)])
+        self.assertTrue(pump(lambda: all(self.evdev.unread(monitor.devices[node].fd) == 0 for node in (usb, elite))))
+        self.assertEqual(self.actions, [core.ACTIVATE])   # the ordinary pad feeds the rest of its batch, as before
+
+    def test_virtual_pad_that_cannot_be_read_on_connect_is_read_again_at_its_next_report(self):
+        elite = self.tree.add(21, ELITE)
+        self.allow = VirtualGamepads({ELITE: 1})
+        self.evdev.keys[elite] = {core.BTN_MODE}           # Guide is already down when the pad appears
+        self.evdev.fail[(elite, EVIOCGKEY(KEY_BYTES))] = errno.EIO
+        monitor = self.monitor()
+        self.chord(elite, monitor)
+        self.assertEqual(self.actions, [core.BACK])
+        self.assertEqual(self.evdev.key_reads[elite], 2)  # the failed read, and the one at the next report
+
+    def test_virtual_pad_that_cannot_be_read_after_dropped_events_is_read_again_at_its_next_report(self):
+        elite, monitor = self.virtual_pad()
+        self.press(elite, (core.BTN_MODE, 1))
+        self.assertTrue(pump(lambda: core.BTN_MODE in monitor.interpreter.devices[elite].pressed))
+        self.evdev.fail[(elite, EVIOCGKEY(KEY_BYTES))] = errno.EIO
+        self.evdev.queue(elite, self.DROPPED)
+        self.assertTrue(pump(lambda: self.evdev.key_reads[elite] == 2))   # on connect, and failed now
+        self.chord(elite, monitor)
+        self.assertEqual(self.actions, [core.BACK])
+        self.assertEqual(self.evdev.key_reads[elite], 3)
+
+    def test_keys_read_after_dropped_events_count_when_an_axis_cannot_be_read(self):
+        elite, monitor = self.virtual_pad()
+        self.evdev.keys[elite] = {core.BTN_MODE}           # Guide went down among the dropped events
+        self.evdev.fail[(elite, EVIOCGABS(core.ABS_X))] = errno.EINTR
+        self.evdev.queue(elite, self.DROPPED)
+        self.assertTrue(pump(lambda: core.BTN_MODE in monitor.interpreter.devices[elite].pressed))
+        self.chord(elite, monitor)
+        self.assertEqual(self.actions, [core.BACK])
+
+
 class EvdevReadTest(MonitorCase):
     def test_reading_held_keys_drops_queued_key_events_but_not_axis_events(self):
         # What evdev does, and what the controller tests rest on.

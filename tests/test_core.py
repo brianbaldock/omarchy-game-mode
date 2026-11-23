@@ -644,6 +644,15 @@ class ControllerTest(unittest.TestCase):
             self.key(BTN_START, 0, dev)            # View is forgotten: a plain Menu tap
         self.assertEqual((self.actions, self.resyncs), ([MENU, MENU], []))
 
+    def test_device_whose_state_could_not_be_read_waits_for_its_next_report_to_be_read_again(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(core.BTN_MODE, 1)
+        self.ci.distrust("d")
+        self.ci.feed("d", EV_KEY, BTN_SOUTH, 1)
+        self.assertEqual((self.actions, self.resyncs, self.ci.held()), ([], [], False))
+        self.ci.feed("d", EV_SYN, SYN_REPORT, 0)
+        self.assertEqual(self.resyncs, ["d"])
+
     def test_unplug_clears_held_state(self):
         self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
         self.key(BTN_SELECT, 1)
