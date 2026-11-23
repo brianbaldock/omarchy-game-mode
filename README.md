@@ -247,7 +247,9 @@ name, access-point and device MAC addresses, host name, user name, home director
 search domains and serial numbers are never included. A controller or key device is
 named only when its name is a model name the doctor knows (such as `Microsoft X-Box One
 Elite 2 pad` or `ASUSTeK Computer Inc. N-KEY Device`); any other name was chosen by the
-firmware or by whoever paired it, and is shown as `<controller>` or `<device>`. Values
+firmware or by whoever paired it, and is shown as `<controller>` or `<device>`. Network
+interfaces keep generic names such as `wlp3s0`, `wg0` or `tailscale0`; a name someone chose
+(`wg-office`) becomes an alias such as `vpn-1`, the same within one report. Values
 are scrubbed wherever they appear, not only in known fields: serial-like tokens and
 joined hex groups (`AB12-CD34-EF56`) show up as `<id>`, MAC addresses as `<mac>`, and a
 private path as `<home-path>`. `--no-redact` shows IP addresses in full for your own

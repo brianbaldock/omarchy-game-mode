@@ -35,6 +35,12 @@ INTERFACE_NAME = re.compile(r"^[A-Za-z0-9_.:@-]{1,15}$")
 # VPN and tunnel interface names: WireGuard, OpenVPN, Tailscale, ZeroTier, PPP and common vendor clients.
 TUNNEL_NAME = re.compile(r"^(tun|tap|wg|tailscale|zt|ppp|nordlynx|proton|pvpn|mullvad|ipsec|vti|vpn|cscotun|gpd)", re.I)
 MAC_NAMED = re.compile(r"^((?:wl|en|ww)x)[0-9A-Fa-f]{12}$")
+# Names that the kernel, udev's predictable naming or a VPN client give an interface by themselves:
+# they describe a driver, a slot or a client, never a person. Any other name was chosen by someone.
+GENERIC_INTERFACE = re.compile(
+    r"(?:eth|wlan|wwan|usb|lo|docker|virbr|br|tun|tap|wg|ppp|tailscale|proton|ipsec|vti|cscotun|gpd)\d{0,4}|nordlynx"
+    r"|(?:en|wl|ww|ib|sl)(?:o\d{1,4}(?:d\d{1,3})?|s\d{1,4}(?:f\d{1,2})?(?:d\d{1,3})?|v\d{1,4}|x<mac>"
+    r"|(?:P\d{1,4})?p\d{1,4}s\d{1,4}(?:f\d{1,2})?(?:d\d{1,3})?(?:u\d{1,3})*(?:c\d{1,3})?(?:i\d{1,3})?)")
 PROXY_VARIABLES = ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy")
 STANDARD_RULES = {(0, "local"), (32766, "main"), (32767, "default")}
 TABLE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
@@ -122,10 +128,17 @@ def display_interface(name: str) -> str:
 
 
 def shown_interface(ctx: Context, name: str) -> str:
-    """`display_interface`, vouched for: a kernel interface name such as `wlp0s20f3` or `tailscale0`
-    names a slot or a driver, not a unit, and must not be masked as a serial number."""
+    """An interface name fit for a report.
+
+    A generic name (`wlp0s20f3`, `wg0`, `tailscale0`) names a slot, a driver or a client and is
+    shown, vouched for so that it is not masked as a serial number. Any other name was chosen by
+    someone (`wg-office`) and is replaced by an alias, `vpn-1` for a tunnel and `if-1` otherwise,
+    the same for the same name throughout one report.
+    """
     shown = display_interface(name)
-    return ctx.trust(shown) if INTERFACE_NAME.match(name) else shown
+    if GENERIC_INTERFACE.fullmatch(shown):
+        return ctx.trust(shown)
+    return ctx.redactor.alias(name, "vpn" if interface_kind(ctx, name) == "tunnel" else "if")
 
 
 # ---- routes -------------------------------------------------------------------

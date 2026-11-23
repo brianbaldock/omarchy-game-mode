@@ -186,6 +186,7 @@ class Redactor:
         self._secrets: dict[str, tuple[re.Pattern[str], str]] = {}
         self._trusted: set[str] = set()
         self._public: dict[str, str] = {}
+        self._aliases: dict[str, str] = {}
         self._lock = threading.Lock()
 
     def add_secret(self, value: str, label: str = REDACTED) -> None:
@@ -194,6 +195,21 @@ class Redactor:
         if _identifying(value):
             with self._lock:
                 self._secrets[value] = (_word(value), label)
+
+    def alias(self, name: str, kind: str) -> str:
+        """A stand-in such as `vpn-1` for a name someone chose, the same for the same name in one report.
+
+        The name itself is registered as a secret with that alias as its label, so a copy of it
+        anywhere else in the report is replaced as well.
+        """
+        with self._lock:
+            shown = self._aliases.get(name)
+            if shown is None:
+                taken = sum(1 for value in self._aliases.values() if value.startswith(f"{kind}-"))
+                shown = self._aliases[name] = f"{kind}-{taken + 1}"
+                if _identifying(name):
+                    self._secrets[name] = (_word(name), shown)
+        return shown
 
     def trust(self, value: str) -> None:
         """Vouch for the long tokens of a value the doctor produced or validated itself.

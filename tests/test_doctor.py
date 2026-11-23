@@ -1103,6 +1103,22 @@ class RouteTest(NetCase):
         self.assertNotIn("0211223344ff", shown)
         self.assertEqual(ctx.redactor.text(CANARY_PAD_SERIAL), "<id>")
 
+    def test_interface_names_someone_chose_are_replaced_by_aliases(self):
+        tunnels = "".join(f"{name}: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
+                          for name in ("wg-lab7b2c9", "wg0", "tailscale0", "office-vpn"))
+        files = {"/proc/net/route": route_table(("wg-lab7b2c9", "0.0.0.0", "10.8.0.1", "0003", 50, "0.0.0.0")),
+                 "/proc/net/dev": PROC_NET_DEV + tunnels, "/sys/class/net/office-vpn/type": "65534\n",
+                 "/sys/class/net/wg-lab7b2c9/mtu": "1420\n"}
+        ctx = self.ctx(files, {("ip", "-4", "rule", "show"): IP_RULES_DEFAULT})
+        route, mtu, vpn = (net.check_default_route(ctx), net.check_mtu_interface(ctx), net.check_vpn_proxy(ctx))
+        shown = [ctx.redactor.text(outcome.detail + json.dumps(outcome.evidence)) for outcome in (route, mtu, vpn)]
+        self.assertIn("via vpn-1 (tunnel)", shown[0])
+        self.assertIn("MTU on vpn-1 is 1420", shown[1])
+        self.assertEqual(vpn.evidence["tunnel_interfaces"], ["vpn-1", "wg0", "tailscale0", "vpn-2"])
+        for name in ("lab7b2c9", "office-vpn"):
+            self.assertNotIn(name, " ".join(shown))
+        self.assertEqual(ctx.redactor.text("wg-lab7b2c9 and office-vpn went down"), "vpn-1 and vpn-2 went down")
+
     def test_ipv6_states(self):
         cases = [(IF_INET6_LOCAL, IPV6_ROUTE_NO_DEFAULT, Status.PASS, "local-only"),
                  ("", "", Status.PASS, "absent"),
