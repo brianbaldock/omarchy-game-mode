@@ -9,6 +9,7 @@ from __future__ import annotations
 import atexit
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -723,6 +724,8 @@ def _command(
     *,
     timeout: float = COMMAND_TIMEOUT_S,
 ) -> tuple[str | None, str | None]:
+    environment = dict(os.environ)
+    environment.update({"LC_ALL": "C", "LANG": "C"})
     try:
         result = runner(
             argv,
@@ -730,6 +733,7 @@ def _command(
             text=True,
             timeout=timeout,
             check=False,
+            env=environment,
         )
     except Exception as error:
         return None, _detail(error)
@@ -817,12 +821,12 @@ def parse_volume_output(output: Any) -> dict[str, Any]:
     if not isinstance(output, str):
         raise ValueError("invalid volume output")
     match = re.fullmatch(
-        r"\s*Volume:\s*(\d+(?:\.\d+)?)((?:\s*\[[^\]\r\n]+\])*)\s*",
+        r"\s*Volume:\s*(\d+(?:[.,]\d+)?)((?:\s*\[[^\]\r\n]+\])*)\s*",
         output.strip(),
     )
     if not match:
         raise ValueError("invalid volume output")
-    volume = float(match.group(1))
+    volume = float(match.group(1).replace(",", "."))
     if not math.isfinite(volume) or volume < 0:
         raise ValueError("invalid volume output")
     flags = re.findall(r"\[([^\]]+)\]", match.group(2))

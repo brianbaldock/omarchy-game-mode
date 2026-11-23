@@ -415,6 +415,8 @@ class AudioTest(unittest.TestCase):
     def test_parse_volume_matrix(self):
         normal = quick.parse_volume_output("Volume: 0.45\n")
         self.assertEqual(normal, {"volume": 0.45, "percent": 45.0, "muted": False})
+        localized = quick.parse_volume_output("Volume: 0,45 [MUTED]\n")
+        self.assertEqual(localized, {"volume": 0.45, "percent": 45.0, "muted": True})
         muted = quick.parse_volume_output(" Volume: 1.50 [MUTED] ")
         self.assertEqual(muted["percent"], 150.0)
         self.assertTrue(muted["muted"])
@@ -433,7 +435,8 @@ class AudioTest(unittest.TestCase):
             stdout=outputs[argv[-1]],
             stderr="",
         ))
-        status = quick.Audio(runner, available).read()
+        with patch.dict(os.environ, {"LC_ALL": "de_DE.UTF-8", "LANG": "de_DE.UTF-8"}):
+            status = quick.Audio(runner, available).read()
         self.assertEqual((status["volume"], status["muted"]), (45.0, True))
         self.assertEqual((status["mic_volume"], status["mic_muted"]), (100.0, False))
         self.assertEqual(
@@ -443,6 +446,9 @@ class AudioTest(unittest.TestCase):
                 ["wpctl", "get-volume", quick.DEFAULT_SOURCE],
             ],
         )
+        for _argv, kwargs in runner.calls:
+            self.assertEqual(kwargs["env"]["LC_ALL"], "C")
+            self.assertEqual(kwargs["env"]["LANG"], "C")
 
     def test_volume_is_clamped_and_mute_argv_is_fixed(self):
         runner = FakeRunner()
