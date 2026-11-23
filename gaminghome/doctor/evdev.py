@@ -36,7 +36,7 @@ KNOWN_NAMES = frozenset({
     "ASUSTeK Computer Inc. N-KEY Device", "Asus WMI hotkeys", "InputPlumber Keyboard", "InputPlumber Mouse",
     "Microsoft X-Box 360 pad", "Microsoft X-Box One pad", "Microsoft X-Box One S pad", "Microsoft X-Box One Elite pad",
     "Microsoft X-Box One Elite 2 pad", "Microsoft Xbox Series S|X Controller", "Xbox Wireless Controller",
-    "Generic X-Box pad",
+    "Generic X-Box pad", "Handheld Daemon Controller",
 })
 UNKNOWN_CONTROLLER, UNKNOWN_DEVICE = "<controller>", "<device>"
 # Key devices of an input daemon or of the platform's own buttons, recognised by their raw name.

@@ -2313,6 +2313,15 @@ class InputStackTest(InputCase):
         for canary in VALUE_CANARIES + (CANARY_USER,):
             self.assertNotIn(canary, described.detail + json.dumps(described.evidence))
 
+    def test_handheld_daemons_virtual_controller_keeps_its_fixed_name(self):
+        ctx = self.ally()
+        add_input(SCRATCH, 40, "Handheld Daemon Controller", ELITE_PAD_KEYS, PAD_AXES, "045e", "028e", True)
+        add_input(SCRATCH, 41, f"Handheld Daemon Controller {CANARY_TAG}", ELITE_PAD_KEYS, PAD_AXES, "045e", "028e",
+                  True)
+        names = {device.node: (device.name, device.virtual) for device in evdev.input_devices(ctx)}
+        self.assertEqual(names["event40"], ("Handheld Daemon Controller", True))
+        self.assertEqual(names["event41"], ("<controller>", True))
+
     def test_raw_pad_without_a_daemon_warns_about_the_missing_r3(self):
         ctx = self.ally()
         pads = inputstack.check_gamepads(ctx)
