@@ -132,8 +132,9 @@ def check_stun_binding(ctx: Context) -> Outcome:
     if not answered:
         if all(row["error"] == "name did not resolve" for row in rows):
             return skip("No STUN server name resolved, so UDP could not be tested (see the DNS checks).", **evidence)
-        return fail("No STUN server answered: outbound UDP looks blocked, so a stream cannot be set up.",
-                    UDP_BLOCKED_FIX, **evidence)
+        return fail("No STUN server answered: outbound UDP looks blocked on this network. Streams carry their "
+                    "media over UDP, so they are likely to fail here; the silence of three servers does not prove "
+                    "that every UDP path is closed.", UDP_BLOCKED_FIX, **evidence)
     timing = ", ".join(f"{row['server']} {row['rtt_ms']} ms" for row in answered)
     public = answered[0]["mapped_address"]
     if len(answered) == len(rows):
@@ -207,8 +208,9 @@ def check_turn_challenge(ctx: Context) -> Outcome:
         answer = f"error {error[0]}" if error else "an unexpected reply"
         return warn(f"Microsoft's {via} is reachable but answered the TURN request with {answer} instead of "
                     "the usual 401 challenge.", "Run the doctor again later; the relay may be busy.", **evidence)
-    return fail("Microsoft's relay did not answer a TURN request on UDP 3478, so relayed streaming cannot work "
-                "from this network.", UDP_BLOCKED_FIX, answered=False)
+    return fail("Microsoft's relay did not answer a TURN request on UDP 3478 from this network. Relayed streams "
+                "use that path, so they are likely to fail; silence alone does not prove that streaming is "
+                "impossible.", UDP_BLOCKED_FIX, answered=False)
 
 
 def classify_mapping(rounds: Sequence[Sequence[tuple[str, int] | None]]) -> str:

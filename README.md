@@ -266,11 +266,13 @@ omarchy-game-mode doctor buttons --raw                  Also watch the raw HID r
 omarchy-game-mode doctor buttons --device /dev/input/event21   Read only this device
 ```
 
-It is read-only. Controllers are opened for reading, never grabbed; nothing is remapped
-and no input is sent, so Steam and your games keep receiving every press, the Xbox
-button included. It tests the controller that games see: the virtual controller of a
-handheld daemon such as InputPlumber when one is running, otherwise the built-in one.
-Devices it is not allowed to read are listed with the reason.
+It is read-only. Controllers are read non-exclusively from evdev and never grabbed;
+nothing is remapped and no input is sent. Every press, the Xbox (Guide) button
+included, therefore still reaches Steam, your games and other apps while the test runs,
+so leave nothing open that a stray press could affect. It tests the controller that
+games see: the virtual controller of a handheld daemon such as InputPlumber when one is
+running, otherwise the built-in one. Devices it is not allowed to read are listed with
+the reason.
 
 Nothing about your controller is assumed. At the end the test lists where it differs
 from an Xbox-style pad on Linux, for example an Xbox button that sends the View code (so

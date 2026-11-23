@@ -5,7 +5,8 @@ no scan. Only the single private IPv4 address given on the command line is probe
 with an anonymous STUN Binding on UDP 9002 (the port Remote Play uses on the
 console) and one TCP connection attempt to 3074 (the Xbox network port), plus a
 look at the kernel's neighbour table. A reply shows the address is alive and
-reachable; it cannot prove that Remote Play works, and silence proves nothing.
+reachable; it cannot prove that Remote Play works. A cached neighbour (ARP) entry
+only shows that a device used the address recently, and silence proves nothing.
 """
 
 from __future__ import annotations
@@ -76,7 +77,11 @@ def check_console_route(ctx: Context) -> Outcome:
 
 
 def neighbour_state(ctx: Context, address: str) -> str:
-    """`resolved` when the kernel holds a link-layer address for `address` (it answered ARP)."""
+    """`resolved` when the kernel's neighbour (ARP) table holds a link-layer address for `address`.
+
+    The kernel keeps such an entry for a while after the device last answered, so it shows that
+    a device used the address on this network recently, not that it is awake now.
+    """
     for line in (ctx.fs.read("/proc/net/arp") or "").splitlines()[1:]:
         fields = line.split()
         if len(fields) >= 3 and fields[0] == address:
@@ -121,20 +126,26 @@ def check_console_reachability(ctx: Context) -> Outcome:
     on_link = route is not None and not route.gateway
     neighbour = neighbour_state(ctx, address) if on_link else "not-on-link"
     evidence = dict(stun_udp_9002=stun_reply, tcp_3074=tcp, neighbour=neighbour)
-    signs = []
+    answers = []
     if stun_reply:
-        signs.append(f"it answered a STUN request on UDP {REMOTE_PLAY_UDP_PORT}, the port Remote Play uses")
+        answers.append(f"it answered a STUN request on UDP {REMOTE_PLAY_UDP_PORT}, the port Remote Play uses")
     if tcp in ("accepted", "refused"):
-        signs.append(f"it answered on TCP {XBOX_NETWORK_TCP_PORT} (connection {tcp})")
-    if neighbour == "resolved":
-        signs.append("it answered ARP, so a powered-on device at that address shares this network segment")
-    if signs:
-        return ok(f"A device is reachable at the console address: {'; '.join(signs)}. {NO_PROOF}", **evidence)
+        answers.append(f"it answered on TCP {XBOX_NETWORK_TCP_PORT} (connection {tcp})")
+    cached = neighbour == "resolved"
+    if answers:
+        note = " The kernel also holds its link-layer (ARP) address." if cached else ""
+        return ok(f"A device answered at the console address: {'; '.join(answers)}.{note} {NO_PROOF}", **evidence)
+    fix = ("Check that the console is on, confirm its address, and try with both devices on the same non-guest "
+           f"network. {FIND_ADDRESS}")
     silence = f"no reply on UDP {REMOTE_PLAY_UDP_PORT} or TCP {XBOX_NETWORK_TCP_PORT}"
+    unproven = "No reply does not prove that streaming from the console is impossible."
+    if cached:
+        return warn(f"No answer from the console address ({silence}), although the kernel still holds a "
+                    "link-layer (ARP) address for it: a device used the address on this network recently. A "
+                    "cached entry does not show that the console is awake now; it may be asleep or off, or not "
+                    f"answer these probes. {unproven}", fix, **evidence)
     if on_link:
-        silence += " and no ARP answer"
-    return warn(f"No sign of a device at the console address: {silence}. The console may be off or in its "
+        silence += ", and the kernel holds no link-layer (ARP) address for it"
+    return warn(f"No answer from the console address: {silence}. The console may be off or in its "
                 "energy-saving power mode, the address may be wrong, or the access point may keep wireless "
-                "devices apart (client isolation). Silence is not proof that Remote Play is broken.",
-                "Check that the console is on, confirm its address, and try with both devices on the same "
-                f"non-guest network. {FIND_ADDRESS}", **evidence)
+                f"devices apart (client isolation). {unproven}", fix, **evidence)

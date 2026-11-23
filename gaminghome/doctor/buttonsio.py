@@ -549,7 +549,9 @@ def build_parser(stdout: IO[str], stderr: IO[str]) -> argparse.ArgumentParser:
         prog="omarchy-game-mode doctor buttons", stdout=stdout, stderr=stderr,
         description="Guided physical button test. Press each control when asked; the test records the codes "
                     "that really arrive and compares them with an Xbox-style pad on Linux. Read-only: nothing "
-                    "is grabbed, written or remapped.")
+                    "is grabbed, written or remapped. Devices are read non-exclusively, so every press, the "
+                    "Xbox (Guide) button included, still reaches Steam, games and other apps while the test "
+                    "runs.")
     parser.add_argument("--device", metavar="/dev/input/eventN", default="",
                         help="read only this node (default: the controller games see, plus its key interfaces)")
     parser.add_argument("--timeout", metavar="SECONDS", type=_timeout, default=12.0,

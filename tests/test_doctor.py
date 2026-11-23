@@ -811,8 +811,10 @@ class UdpChecksTest(unittest.TestCase):
                          {(RELAY_IP, 3478), (CLOUDFLARE_IP, 3478), (GOOGLE_IP, 19302)})
 
     def test_binding_fails_only_on_direct_evidence(self):
-        self.assertEqual(udp.check_stun_binding(self.ctx(nat(silent=(RELAY_IP, CLOUDFLARE_IP, GOOGLE_IP)))).status,
-                         Status.FAIL)
+        silent = udp.check_stun_binding(self.ctx(nat(silent=(RELAY_IP, CLOUDFLARE_IP, GOOGLE_IP))))
+        self.assertEqual(silent.status, Status.FAIL)
+        self.assertIn("does not prove that every UDP path is closed", silent.detail)
+        self.assertNotIn("cannot", silent.detail)
         partial = udp.check_stun_binding(self.ctx(nat(silent=(RELAY_IP,))))
         self.assertEqual(partial.status, Status.WARN)
         self.assertIn("Microsoft's relay is the one Xbox streaming uses", partial.detail)
@@ -887,7 +889,10 @@ class UdpChecksTest(unittest.TestCase):
         self.assertEqual(self.world.sent(), [])
 
     def test_turn_silence_is_a_failure_and_no_name_is_a_skip(self):
-        self.assertEqual(udp.check_turn_challenge(self.ctx(self.turn({}))).status, Status.FAIL)
+        silent = udp.check_turn_challenge(self.ctx(self.turn({})))
+        self.assertEqual(silent.status, Status.FAIL)
+        self.assertIn("silence alone does not prove that streaming is impossible", silent.detail)
+        self.assertNotIn("cannot work", silent.detail)
         self.assertEqual(udp.check_turn_challenge(self.ctx(self.turn({}), dns=fake_dns({}))).status, Status.SKIP)
 
     def test_same_public_port_for_every_destination_is_endpoint_independent(self):
@@ -1676,6 +1681,8 @@ class FirewallTest(NetCase):
         self.assertEqual((port.status, port.evidence["ufw_outbound_blocks"]), (Status.WARN, ["deny out udp port 3478"]))
         everything = firewall.check_active_policy(self.ctx({**base, "/etc/ufw/user6.rules": UFW_BLOCK_ALL}, UFW_ACTIVE))
         self.assertEqual(everything.status, Status.FAIL)
+        self.assertIn("Saved rules are not proof of the live ones", everything.detail)
+        self.assertIn("only root can read the live rules", port.detail)
         self.assertIn("`sudo ufw status numbered verbose`", everything.remediation)
         closed = {"/etc/default/ufw": UFW_DEFAULTS.replace('OUTPUT_POLICY="ACCEPT"', 'OUTPUT_POLICY="DROP"'),
                   "/etc/ufw/user.rules": UFW_RULES}
@@ -1773,18 +1780,23 @@ class ConsoleTest(NetCase):
             self.assertEqual((request.method, request.cls, request.attributes), (stun.BINDING, stun.REQUEST, ()))
         self.assertIn("cannot prove that Remote Play works", outcome.detail)
 
-    def test_stun_answer_or_arp_entry_counts_as_alive(self):
-        answered = console.check_console_reachability(self.console_ctx(tcp=TimeoutError(), responder=nat()))
+    def test_an_answer_counts_as_alive_but_a_cached_arp_entry_alone_does_not(self):
+        answered = console.check_console_reachability(self.console_ctx({"/proc/net/arp": arp("0x2")}, TimeoutError(),
+                                                                       responder=nat()))
         self.assertEqual((answered.status, answered.evidence["stun_udp_9002"]), (Status.PASS, True))
-        neighbour = console.check_console_reachability(self.console_ctx({"/proc/net/arp": arp("0x2")}, TimeoutError()))
-        self.assertEqual((neighbour.status, neighbour.evidence["neighbour"]), (Status.PASS, "resolved"))
-        self.assertNotIn(CANARY_MAC, neighbour.detail + json.dumps(neighbour.evidence))
+        self.assertIn("The kernel also holds its link-layer (ARP) address.", answered.detail)
+        cached = console.check_console_reachability(self.console_ctx({"/proc/net/arp": arp("0x2")}, TimeoutError()))
+        self.assertEqual((cached.status, cached.evidence["neighbour"]), (Status.WARN, "resolved"))
+        self.assertIn("A cached entry does not show that the console is awake now", cached.detail)
+        self.assertNotIn("reachable", cached.detail)
+        self.assertNotIn(CANARY_MAC, cached.detail + json.dumps(cached.evidence))
 
     def test_silence_is_inconclusive_never_a_failure(self):
         outcome = console.check_console_reachability(self.console_ctx({"/proc/net/arp": arp("0x0")}, TimeoutError()))
         self.assertEqual(outcome.status, Status.WARN)
         self.assertEqual(outcome.evidence, {"stun_udp_9002": False, "tcp_3074": "timeout", "neighbour": "unresolved"})
-        self.assertIn("Silence is not proof", outcome.detail)
+        self.assertIn("and the kernel holds no link-layer (ARP) address for it", outcome.detail)
+        self.assertIn("No reply does not prove that streaming from the console is impossible.", outcome.detail)
         routed = console.check_console_reachability(self.console_ctx(tcp=TimeoutError(), address="192.168.90.50"))
         self.assertEqual(routed.evidence["neighbour"], "not-on-link")
 
@@ -3371,8 +3383,9 @@ class ButtonCommandTest(InputCase):
             self.assertIn("usage: omarchy-game-mode doctor buttons", err)
         code, out, _err = self.run_buttons(ctx, {}, "--help")
         self.assertEqual(code, 0)
-        for phrase in ("--device", "--raw", "--timeout", "Read-only", "nothing is grabbed"):
-            self.assertIn(phrase, out)
+        for phrase in ("--device", "--raw", "--timeout", "Read-only", "nothing is grabbed", "read non-exclusively",
+                       "the Xbox (Guide) button included, still reaches Steam, games and other apps"):
+            self.assertIn(phrase, " ".join(out.split()))
         out_stream = io.StringIO()
         self.assertEqual(cli.main(["buttons", "--help"], stdout=out_stream), 0)
         self.assertIn("usage: omarchy-game-mode doctor buttons", out_stream.getvalue())

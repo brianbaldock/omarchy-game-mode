@@ -109,12 +109,14 @@ def check_active_policy(ctx: Context) -> Outcome:
               f"{defaults.get('outgoing', 'unknown')} outgoing"
     fix = f"Review the outbound rules with: `{ROOT_COMMANDS['ufw']}`"
     if any(rule.port == "any" and rule.everywhere for rule in blocks):
-        return fail(f"{summary}. A saved rule blocks all outbound UDP ({blocks[0].describe()}), which stops stream "
-                    "media from leaving this device.", fix, **evidence)
+        return fail(f"{summary}. A saved rule blocks all outbound UDP ({blocks[0].describe()}); once loaded, it "
+                    "stops stream media from leaving this device. Saved rules are not proof of the live ones, "
+                    "which only root can read (see Live firewall rules).", fix, **evidence)
     if blocks or defaults.get("outgoing") != "allow":
         reason = (f"{len(blocks)} saved rule(s) block outbound UDP ({', '.join(rule.describe() for rule in blocks)})"
                   if blocks else "outgoing traffic is not allowed by default, so streaming needs explicit allow rules")
-        return warn(f"{summary}; {reason}.", fix, **evidence)
+        return warn(f"{summary}; {reason}. This is the saved policy; only root can read the live rules.", fix,
+                    **evidence)
     if not policy["readable"]:
         return info(f"{summary}. The saved rules need root to read.", **evidence)
     return ok(f"{summary}; {len(policy['rules'])} saved rule(s), none blocks outbound traffic. Unsolicited inbound "
