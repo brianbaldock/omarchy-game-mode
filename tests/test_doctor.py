@@ -1,21 +1,24 @@
 """Tests for `omarchy-game-mode doctor`: no network, no devices, no root, no GTK."""
 
 import collections
+import io
 import ipaddress
 import json
 import os
+import re
 import shutil
 import socket
 import ssl
 import struct
+import subprocess
 import sys
 import threading
 import time
 import unittest
 from pathlib import Path
 
-from gaminghome.doctor import (browser, checks, console, context, devices, evdev, firewall, inputstack, model, net,
-                               redact, runner, stun, system, udp, wifi)
+from gaminghome.doctor import (browser, checks, cli, console, context, devices, evdev, firewall, inputstack, model,
+                               net, redact, report, runner, stun, system, udp, wifi)
 from gaminghome.doctor.context import CommandResult, Context, FileSystem, Options
 from gaminghome.doctor.model import Status
 from gaminghome.doctor.runner import Check
@@ -1852,8 +1855,9 @@ TIMEDATECTL = ("timedatectl", "show", "-p", "NTP", "-p", "NTPSynchronized")
 class World(InputCase):
     """A healthy ROG Xbox Ally behind a home router, as the doctor's primitives would see it."""
 
-    def world(self, options=None, *, console_answers=True, **ally):
-        ctx = self.ally(inputplumber=True, **ally)
+    def world(self, options=None, *, console_answers=True, files=None, **ally):
+        self.ally(inputplumber=True, **ally)
+        overrides = files or {}
         files = {
             **CLIENT_FILES, "/proc/net/route": WIFI_ROUTES, "/proc/net/if_inet6": IF_INET6_LOCAL,
             "/proc/net/ipv6_route": IPV6_ROUTE_NO_DEFAULT, "/proc/net/dev": PROC_NET_DEV,
@@ -1861,7 +1865,7 @@ class World(InputCase):
             "/proc/sys/kernel/hostname": CANARY_HOST + "\n", "/sys/class/net/wlp3s0/wireless/.keep": "",
             "/sys/class/net/wlp3s0/mtu": "1500\n", "/etc/default/ufw": UFW_DEFAULTS, "/etc/ufw/user.rules": UFW_RULES,
             "/sys/class/drm/card1/device/vendor": "0x1002\n", "/sys/class/drm/card1/device/device": "0x163f\n",
-            "/run/udev/rules.d/50-inputplumber-hide-hidraw5-early.rules": "",
+            "/run/udev/rules.d/50-inputplumber-hide-hidraw5-early.rules": "", **overrides,
         }
         for path, text in files.items():
             write(SCRATCH / path.lstrip("/"), text)
@@ -1888,10 +1892,12 @@ class World(InputCase):
         self.udp = UdpWorld(respond)
         self.tls = FakeTls()
         env = {**CLIENT_ENV, "USER": CANARY_USER, "HTTPS_PROXY": f"http://{CANARY_USER}:pw@proxy.{CANARY_DOMAIN}:3128"}
+        options = options or Options()
         return make_context(
-            root=SCRATCH, commands=self.commands, env=env, options=options or Options(),
+            root=SCRATCH, commands=self.commands, env=env, options=options,
             getaddrinfo=fake_dns(ipv6={"www.xbox.com": [CANARY_PUBLIC_IP6]}), udp_socket=self.udp.socket,
-            tcp_connect=lambda address, timeout: FakeTcp(), tls_context=self.tls, redactor=ctx.redactor)
+            tcp_connect=lambda address, timeout: FakeTcp(), tls_context=self.tls,
+            redactor=canary_redactor(mask_addresses=options.redact))
 
 
 class PlanTest(World):
@@ -1965,6 +1971,328 @@ class PlanTest(World):
                 self.assertEqual(call, ("omarchy", "version"))
             if call[0] == "busctl":
                 self.assertEqual(call[:3], ("busctl", "--system", "status"))
+
+
+# ---- command line, reports and privacy end to end ------------------------------------
+
+RAW_MAC = re.compile(r"(?i)\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b")
+RAW_IPV4 = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+
+
+class CliCase(World):
+    def run_cli(self, *argv, world=None):
+        """Run the doctor command against the fake device; returns (exit code, stdout, stderr)."""
+        out, err = io.StringIO(), io.StringIO()
+        self.contexts = []
+
+        def factory(options):
+            self.contexts.append(self.world(options, **(world or {})))
+            return self.contexts[-1]
+        code = cli.main(list(argv), stdout=out, stderr=err, context_factory=factory)
+        return code, out.getvalue(), err.getvalue()
+
+
+class CliTest(CliCase):
+    def test_default_run_is_text_for_all_scopes_and_warnings_do_not_fail(self):
+        code, out, err = self.run_cli()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.contexts[0].options, Options(scope="all", timeout=6.0, redact=True))
+        for marker in ("[PASS]", "[WARN]", "[SKIP]", "[INFO]"):
+            self.assertIn(marker, out)
+        self.assertNotIn("[FAIL]", out)
+        self.assertIn("Omarchy Game Mode doctor (all)", out)
+        self.assertIn("Device:      ASUSTeK COMPUTER INC. ROG Xbox Ally RC73YA_RC73YA, board RC73YA", out)
+        self.assertEqual(out.count("proves: "), out.count("  ["))
+
+    def test_report_is_inconclusive_while_decisive_evidence_is_unverified(self):
+        _code, out, _err = self.run_cli("streaming")
+        self.assertIn("Result: INCONCLUSIVE: no failures in what was tested, 5 warnings. Not verified: Live", out)
+        self.assertIn("Console settings and account, Live failed attempt.", out)
+        self.assertIn("cannot verify without root \u2014 run: sudo ufw status numbered verbose", out)
+        self.assertNotIn("Result: PASS", out)
+        _code, out, _err = self.run_cli("input")
+        self.assertIn("Result: No failures; 1 warning, first: Controller HID interfaces.", out)
+        _code, out, _err = self.run_cli("system")
+        self.assertIn("Result: Environment facts only; nothing was tested.", out)
+
+    def test_a_failed_check_sets_exit_status_one(self):
+        code, out, _err = self.run_cli("streaming", world={"files": {"/proc/net/route": route_table()}})
+        self.assertEqual(code, 1)
+        self.assertIn("[FAIL] IPv4 default route", out)
+        self.assertIn("Result: FAIL: 1 check failed, first: IPv4 default route.", out)
+        self.assertEqual(json.loads(self.run_cli("--json", world={"files": {"/proc/net/route": route_table()}})[1])
+                         ["summary"]["exit_code"], 1)
+
+    def test_usage_errors_exit_two_and_help_exits_zero(self):
+        for argv in (["nonsense"], ["--json", "--markdown"], ["--timeout", "0"], ["--timeout", "abc"],
+                     ["--console-ip", CANARY_PUBLIC_IP], ["--console-ip", "not-an-ip"], ["--interface", "wl an;0"],
+                     ["--no-redact", "--markdown"], ["--deep"], ["--lan"], ["all", "extra"]):
+            code, out, err = self.run_cli(*argv)
+            self.assertEqual((code, out), (2, ""), argv)
+            self.assertIn("usage: omarchy-game-mode doctor", err)
+            self.assertEqual(self.contexts, [], argv)
+        code, out, err = self.run_cli("--help")
+        self.assertEqual((code, err), (0, ""))
+        for phrase in ("streaming", "input", "system", "--console-ip", "--markdown", "no root", "Exit status"):
+            self.assertIn(phrase, out)
+
+    def test_options_reach_the_checks(self):
+        code, _out, _err = self.run_cli("streaming", "--console-ip", CONSOLE_IP, "--timeout", "9", "--interface",
+                                        "wlp3s0", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.contexts[0].options, Options("streaming", 9.0, CONSOLE_IP, "wlp3s0", True))
+
+    def test_interrupt_and_closed_pipe_are_not_tracebacks(self):
+        def interrupted(_options):
+            raise KeyboardInterrupt
+        err = io.StringIO()
+        self.assertEqual(cli.main([], stdout=io.StringIO(), stderr=err, context_factory=interrupted), 130)
+        self.assertIn("Interrupted", err.getvalue())
+
+        def closed(_options):
+            raise BrokenPipeError
+        self.assertEqual(cli.main([], stdout=io.StringIO(), stderr=io.StringIO(), context_factory=closed), 0)
+
+    def test_json_report_schema(self):
+        code, out, _err = self.run_cli("--json", "--console-ip", CONSOLE_IP)
+        document = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(document), ["checks", "duration_ms", "environment", "finished_at", "mode", "privacy",
+                                            "run_id", "schema", "schema_version", "scope", "started_at", "summary"])
+        self.assertEqual((document["schema"], document["schema_version"], document["mode"], document["scope"]),
+                         ("omarchy-game-mode.doctor/v1", 1, "doctor", "all"))
+        self.assertRegex(document["started_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertRegex(document["run_id"], r"^[0-9a-f]{32}$")
+        summary = document["summary"]
+        self.assertEqual(sorted(summary), ["exit_code", "fail", "headline", "info", "pass", "skip", "status",
+                                           "unverified", "warn"])
+        self.assertEqual((summary["status"], summary["exit_code"], summary["fail"]), ("inconclusive", 0, 0))
+        self.assertEqual(summary["unverified"], ["firewall.rules", "manual.console_account_region",
+                                                 "capture.failed_attempt"])
+        counted = sum(summary[name] for name in ("pass", "warn", "fail", "skip", "info"))
+        self.assertEqual(counted, len(document["checks"]))
+        for check in document["checks"]:
+            self.assertEqual(sorted(check), ["category", "decisive", "detail", "does_not_prove", "duration_ms",
+                                             "evidence", "id", "proves", "remediation", "root", "status", "title"])
+            self.assertIn(check["status"], ("pass", "warn", "fail", "skip", "info"))
+            self.assertTrue(check["proves"] and check["does_not_prove"], check["id"])
+        by_id = {check["id"]: check for check in document["checks"]}
+        self.assertEqual(by_id["firewall.rules"]["root"], {
+            "required": True, "status": "not_run", "cannot_verify_without_root": True,
+            "command": "sudo ufw status numbered verbose"})
+        self.assertEqual(by_id["stun.binding"]["root"], {"required": False})
+        self.assertEqual(document["privacy"], {
+            "redacted": True, "addresses_masked": True, "root_used": False, "tokens_read": False,
+            "accounts_read": False, "cookies_read": False, "browser_profiles_read": False, "lan_discovery": False,
+            "console_address_probed": True})
+
+    def test_environment_is_built_from_allowlisted_evidence(self):
+        _code, out, _err = self.run_cli("--json")
+        env = json.loads(out)["environment"]
+        self.assertEqual((env["os"], env["kernel"], env["hyprland"], env["game_mode"]),
+                         ("Omarchy", "7.2.15-1-omarchy", "0.56.2", "0.1.0"))
+        self.assertEqual(env["device"]["board"], "RC73YA")
+        self.assertEqual(env["network"], {"interface": "wlp3s0", "interface_type": "wifi", "ipv6_state": "local-only"})
+        self.assertEqual(env["wireless"], {"band": "5 GHz", "frequency_mhz": 5640, "channel": 128, "width_mhz": 160,
+                                           "dfs": True, "signal_dbm": -44, "generation": "Wi-Fi 6",
+                                           "power_save": False})
+        self.assertEqual(env["clients"], [{"name": "Chromium", "version": "155.0.8059.84"},
+                                          {"name": "Greenlight", "version": "2.4.2"}])
+        self.assertTrue(env["controllers"]["inputplumber"])
+        for forbidden in ("ssid", "bssid", "hostname", "mac", "serial", "ipv4", "user"):
+            self.assertNotIn(forbidden, json.dumps(env).lower())
+
+    def test_text_output_is_plain_ascii_apart_from_the_dash_in_the_root_notice(self):
+        _code, out, _err = self.run_cli()
+        self.assertEqual({char for char in out if ord(char) > 126}, {"\u2014"})
+        self.assertLessEqual(max(len(line) for line in out.splitlines()), report.TEXT_WIDTH)
+
+    def test_markdown_report_is_issue_ready(self):
+        code, out, _err = self.run_cli("--markdown", "--console-ip", CONSOLE_IP)
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith("### Omarchy Game Mode doctor report\n\n**Result:** INCONCLUSIVE"))
+        for line in ("| Environment |  |", "| Status | Check | Result |", "| Check | Proves | Does not prove |",
+                     "<details><summary>What each check proves and does not prove</summary>", "</details>",
+                     "**Next steps**"):
+            self.assertIn(line, out)
+        self.assertIn("| PASS | UDP and STUN | All 3 STUN servers answered", out)
+        self.assertIn("public address &lt;public-ip-", out)
+        self.assertNotIn("<public-ip-", out)
+        self.assertIn("- **Live firewall rules** (SKIP): run `sudo ufw status numbered verbose`.", out)
+        self.assertIn("-g 'UFW (BLOCK|ALLOW)'`", out)
+        self.assertIn("| UDP and STUN (`stun.binding`) | Outbound UDP works and replies come back. |", out)
+        table_rows = [line for line in out.splitlines() if line.startswith("| ")]
+        self.assertTrue(all(line.endswith(" |") for line in table_rows))
+        self.assertEqual({line.replace("\\|", "").count("|") for line in table_rows} - {3}, {4})
+
+    def test_markdown_escaping(self):
+        self.assertEqual(report.markdown_escape("a|b <tag> `x|<y>` & c\nd"), "a\\|b &lt;tag&gt; `x\\|<y>` &amp; c d")
+        self.assertEqual(report.markdown_escape("run `a|b` <now>", table=False), "run `a|b` &lt;now&gt;")
+
+
+class PrivacyTest(CliCase):
+    STYLES = ((), ("--json",), ("--markdown",))
+
+    def outputs(self, *extra, world=None):
+        return {style: self.run_cli(*style, *extra, world=world)[1] for style in self.STYLES}
+
+    def assert_private(self, text, label):
+        for canary in CANARIES:
+            self.assertNotIn(canary, text, f"{canary!r} leaked into {label}")
+        for pattern, kind in ((RAW_MAC, "MAC address"), (RAW_IPV4, "IPv4 address")):
+            leaked = [match for match in pattern.findall(text) if not match.startswith(("127.", "0.0.0.0"))]
+            self.assertEqual(leaked, [], f"{kind} leaked into {label}")
+        self.assertNotIn("/home/", text, label)
+
+    def test_no_canary_survives_in_text_json_or_markdown(self):
+        for style, output in self.outputs("--console-ip", CONSOLE_IP).items():
+            self.assert_private(output, style or "text")
+            self.assertGreater(len(output), 2000)
+
+    def test_the_canaries_really_were_in_the_inputs(self):
+        ctx = self.world(Options(console_ip=CONSOLE_IP))
+        raw = cli.diagnose(ctx)
+        evidence = json.dumps([check.evidence for check in raw.checks])
+        self.assertIn(CANARY_PUBLIC_IP, evidence)
+        self.assertIn(CANARY_LAN_IP, json.dumps([check.detail for check in raw.checks]))
+        tools = "".join(str(value) for value in self.commands.table.values())
+        for canary in (CANARY_SSID, CANARY_BSSID, CANARY_MAC, CANARY_HOST, CANARY_DOMAIN, CANARY_USER, CANARY_LAN_IP):
+            self.assertIn(canary, tools)
+        self.assertIn(CANARY_SERIAL, (SCRATCH / "sys/class/dmi/id/product_serial").read_text())
+        self.assertIn(CANARY_SERIAL, (SCRATCH / "sys/class/hidraw/hidraw5/device/uevent").read_text())
+
+    def test_public_address_gets_one_token_everywhere_in_a_report(self):
+        document = json.loads(self.run_cli("--json")[1])
+        by_id = {check["id"]: check for check in document["checks"]}
+        mapped = {row["mapped_address"] for row in by_id["stun.binding"]["evidence"]["servers"]}
+        mapped |= {row["mapped_address"] for row in by_id["nat.mapping_stability"]["evidence"]["mappings"]}
+        self.assertEqual(len(mapped), 1)
+        token = mapped.pop()
+        self.assertRegex(token, r"^<public-ip-\d+>$")
+        self.assertIn(token, by_id["stun.binding"]["detail"])
+        self.assertEqual(by_id["network.ipv4.default_route"]["evidence"]["gateway"], "192.168.x.x")
+        resolvers = {row["address"] for row in by_id["dns.resolver"]["evidence"]["servers"]}
+        self.assertTrue(all(re.fullmatch(r"<public-ip-\d+>", address) for address in resolvers))
+        self.assertNotIn(token, resolvers)
+
+    def test_no_redact_shows_addresses_but_never_identities(self):
+        code, out, _err = self.run_cli("--no-redact", "--console-ip", CONSOLE_IP)
+        self.assertEqual(code, 0)
+        self.assertFalse(self.contexts[0].options.redact)
+        for visible in (CANARY_PUBLIC_IP, CANARY_LAN_IP, "192.168.77.1"):
+            self.assertIn(visible, out)
+        for hidden in (CANARY_SSID, CANARY_BSSID, CANARY_MAC, CANARY_HOST, CANARY_DOMAIN, CANARY_USER, CANARY_SERIAL):
+            self.assertNotIn(hidden, out)
+        self.assertIn("do not post this output", out)
+        self.assertFalse(json.loads(self.run_cli("--no-redact", "--json")[1])["privacy"]["redacted"])
+
+    def test_a_check_that_tries_to_leak_is_stopped_by_allowlist_redaction_and_final_scrub(self):
+        def leaky(ctx):
+            ctx.secret(CANARY_SSID)
+            everything = (f"ssid {CANARY_SSID} bssid {CANARY_BSSID} host {CANARY_HOST} at {CANARY_PUBLIC_IP} and "
+                          f"{CANARY_LAN_IP} in {CANARY_HOME}/x token=abc123secret serial")
+            return model.warn(everything, everything, declared=everything, undeclared=CANARY_SERIAL,
+                              rows=[{"ok": everything, "uniq": CANARY_SERIAL}])
+        rogue = runner.Check("rogue.leak", f"Leak {CANARY_BSSID}", "system", leaky, everything_ok := "p", "n",
+                             ("declared", "rows", "rows.ok"))
+        original = cli.plan
+        cli.plan = lambda options: [rogue]
+        self.addCleanup(setattr, cli, "plan", original)
+        self.assertEqual(everything_ok, "p")
+        for style, output in self.outputs().items():
+            self.assert_private(output, f"rogue {style}")
+            self.assertNotIn("abc123secret", output)
+            self.assertIn("rogue.leak" if style else "Leak", output)
+
+    def test_final_scrub_catches_what_the_first_pass_never_saw(self):
+        redactor = canary_redactor()
+        clean = model.Report("all", [model.CheckResult("a.b", "T", Status.PASS, "fine")])
+
+        def poisoned(_report):
+            return f"late {CANARY_BSSID} {CANARY_PUBLIC_IP} {CANARY_HOME}\n"
+        self.addCleanup(setattr, cli, "render_text", cli.render_text)
+        self.addCleanup(setattr, cli, "render_markdown", cli.render_markdown)
+        cli.render_text = cli.render_markdown = poisoned
+        for style in ("text", "markdown"):
+            self.assertEqual(cli.render(clean, redactor, style), "late <mac> <public-ip-1> ~\n")
+        cli.render_json = lambda _report: json.dumps({"note": f"{CANARY_BSSID} {CANARY_HOME}", "token": "abc"})
+        self.addCleanup(setattr, cli, "render_json", report.render_json)
+        self.assertEqual(json.loads(cli.render(clean, redactor, "json")), {"note": "<mac> ~", "token": "<redacted>"})
+
+
+class EntryPointTest(unittest.TestCase):
+    """The doctor runs in the invoking process, without GTK and without a resident instance."""
+
+    BLOCK_GI = (
+        "import importlib.abc, sys\n"
+        "class NoGtk(importlib.abc.MetaPathFinder):\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name == 'gi' or name.startswith('gi.'):\n"
+        "            raise ImportError('gi is blocked in this test')\n"
+        "sys.meta_path.insert(0, NoGtk())\n")
+
+    def python(self, script, *argv):
+        return subprocess.run([sys.executable, "-I", "-c", script, *argv], cwd=ROOT, capture_output=True, text=True,
+                              timeout=60)
+
+    def test_doctor_never_imports_gtk_from_any_entry_point(self):
+        script = self.BLOCK_GI + (
+            "import io, pkgutil, runpy, contextlib\n"
+            "sys.path.insert(0, '.')\n"
+            "import gaminghome.doctor as package\n"
+            "names = [module.name for module in pkgutil.iter_modules(package.__path__)]\n"
+            "assert {'cli', 'net', 'udp', 'wifi', 'inputstack', 'report'} <= set(names), names\n"
+            "for name in names:\n"
+            "    __import__('gaminghome.doctor.' + name)\n"
+            "from gaminghome.doctor import cli\n"
+            "assert cli.main(['--help'], stdout=io.StringIO()) == 0\n"
+            "assert cli.main(['--nope'], stderr=io.StringIO()) == 2\n"
+            "for entry, argv0 in (('omarchy-game-mode.py', 'omarchy-game-mode'), ('gaminghome/__main__.py', 'x')):\n"
+            "    sys.argv = [argv0, 'doctor', '--help']\n"
+            "    try:\n"
+            "        with contextlib.redirect_stdout(io.StringIO()) as out:\n"
+            "            runpy.run_path(entry, run_name='__main__') if entry.endswith('mode.py') else "
+            "runpy.run_module('gaminghome', run_name='__main__')\n"
+            "    except SystemExit as exit:\n"
+            "        assert exit.code == 0, exit.code\n"
+            "    assert 'usage: omarchy-game-mode doctor' in out.getvalue()\n"
+            "loaded = sorted(name for name in sys.modules if name == 'gi' or name.startswith('gi.'))\n"
+            "assert not loaded, loaded\n"
+            "assert 'gaminghome.application' not in sys.modules\n"
+            "print('no-gtk-ok')\n")
+        result = self.python(script)
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "no-gtk-ok"), result.stderr)
+
+    def test_launcher_still_needs_gtk_for_everything_else(self):
+        script = self.BLOCK_GI + ("import runpy\nsys.path.insert(0, '.')\nsys.argv = ['omarchy-game-mode', 'status']\n"
+                                  "runpy.run_path('omarchy-game-mode.py', run_name='__main__')\n")
+        result = self.python(script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("gi is blocked in this test", result.stderr)
+
+    def test_application_main_answers_doctor_before_creating_the_application(self):
+        from gaminghome import application
+
+        class Forbidden:
+            def __init__(self):
+                raise AssertionError("doctor must not create or contact the GTK application")
+        original, application.GameModeApplication = application.GameModeApplication, Forbidden
+        self.addCleanup(setattr, application, "GameModeApplication", original)
+        out, err = io.StringIO(), io.StringIO()
+        from contextlib import redirect_stderr, redirect_stdout
+        with redirect_stdout(out), redirect_stderr(err):
+            self.assertEqual(application.main(["omarchy-game-mode", "doctor", "--help"]), 0)
+            self.assertEqual(application.main(["omarchy-game-mode", "doctor", "--nope"]), 2)
+        self.assertIn("usage: omarchy-game-mode doctor", out.getvalue())
+        self.assertIn("doctor [SCOPE]", application.USAGE)
+        with self.assertRaises(AssertionError):
+            application.main(["omarchy-game-mode", "status"])
+
+    def test_importing_the_application_does_not_load_the_doctor(self):
+        script = ("import sys\nsys.path.insert(0, '.')\nimport gaminghome.application\n"
+                  "print(sorted(name for name in sys.modules if name.startswith('gaminghome.doctor')))\n")
+        result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, capture_output=True, text=True, timeout=60)
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "[]"), result.stderr)
 
 
 if __name__ == "__main__":

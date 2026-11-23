@@ -308,7 +308,8 @@ def check_vpn_proxy(ctx: Context) -> Outcome:
     if proxies:
         problems.append(f"proxy variables are set ({', '.join(proxies)}; values not shown)")
     if problems:
-        return warn("; ".join(problems).capitalize() + ". A VPN changes latency, MTU and NAT behaviour, and "
+        summary = "; ".join(problems)
+        return warn(summary[0].upper() + summary[1:] + ". A VPN changes latency, MTU and NAT behaviour, and "
                     "stream media usually cannot use an HTTP proxy.",
                     "Retry once with the VPN disconnected and the proxy variables unset, to see whether the "
                     "result changes.", **evidence)

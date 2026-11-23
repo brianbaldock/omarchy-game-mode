@@ -34,6 +34,7 @@ USAGE = """Usage: omarchy-game-mode [COMMAND]
   autostart on|off|status Login autostart (owned XDG entry)
   mapper on|off|status    Let Game Mode switch AntiMicroX sets (off by default)
   status                  Print JSON status
+  doctor [SCOPE]          Read-only streaming and controller checks (see doctor --help)
   quit                    Restore controller sets and exit
   --version, help"""
 
@@ -549,6 +550,10 @@ class GameModeApplication(Gtk.Application):
 
 def main(argv=None):
     argv = list(sys.argv if argv is None else argv)
+    from . import doctor
+    if doctor.requested(argv):
+        # Diagnostics run in this process and are never forwarded to a resident instance.
+        return doctor.main(argv[2:])
     app = GameModeApplication()
     command = argv[1] if len(argv) > 1 else "show"
     if command in ("status", "quit", "help", "--help", "-h", "--version", "autostart", "mapper"):

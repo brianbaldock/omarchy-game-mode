@@ -1,0 +1,180 @@
+"""Command line for `omarchy-game-mode doctor`.
+
+Runs entirely in the invoking process: it never talks to a resident Game Mode
+instance and never imports GTK. Exit codes: 0 no failed check (warnings and
+inconclusive results included), 1 at least one failed check, 2 usage error.
+
+Other doctor commands plug in through `COMMANDS` (name -> `main(argv, stdout, stderr)`),
+reusing the model, runner, redactor and renderers; a failed-attempt `capture`
+command is the planned first one.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import os
+import socket
+import sys
+import uuid
+from typing import IO, Any, Callable, Sequence
+
+from . import console
+from .checks import SCOPES, plan
+from .context import Context, Options
+from .model import EXIT_USAGE, Report
+from .net import INTERFACE_NAME
+from .redact import Redactor
+from .report import environment, render_json, render_markdown, render_text
+from .runner import run_checks
+
+OVERALL_DEADLINE_S = 45.0
+EPILOG = """\
+scopes:
+  all         everything below (default)
+  streaming   network path, UDP/STUN/TURN, Wi-Fi, firewall, clients, video decode
+  input       controllers and input daemons
+  system      environment facts only
+
+The doctor is read-only: no root, no installs, no configuration changes, no sign-in.
+It sends anonymous probes to Microsoft's relay and service names, two public STUN
+servers, one NTP server and your own gateway. Exit status: 0 no failed check,
+1 at least one failed check, 2 usage error.
+"""
+
+
+class _Parser(argparse.ArgumentParser):
+    """argparse that writes to the streams the caller chose instead of the process streams."""
+
+    def __init__(self, *args: Any, stdout: IO[str], stderr: IO[str], **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._stdout, self._stderr = stdout, stderr
+
+    def _print_message(self, message: str, file: IO[str] | None = None) -> None:
+        if message:
+            (self._stdout if file is sys.stdout else self._stderr).write(message)
+
+
+def _console_ip(text: str) -> str:
+    try:
+        return console.private_ipv4(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{exc} (got {text!r})") from None
+
+
+def _interface(text: str) -> str:
+    if not INTERFACE_NAME.match(text):
+        raise argparse.ArgumentTypeError("not a network interface name")
+    return text
+
+
+def _timeout(text: str) -> float:
+    try:
+        seconds = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("not a number") from None
+    if not 1 <= seconds <= 60:
+        raise argparse.ArgumentTypeError("must be between 1 and 60 seconds")
+    return seconds
+
+
+def build_parser(stdout: IO[str], stderr: IO[str]) -> argparse.ArgumentParser:
+    parser = _Parser(prog="omarchy-game-mode doctor", stdout=stdout, stderr=stderr, epilog=EPILOG,
+                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                     description="Check what Xbox streaming and the controller need on this device, and say "
+                                 "what each result proves and does not prove.")
+    parser.add_argument("scope", nargs="?", choices=SCOPES, default="all", help="what to check (default: all)")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--json", action="store_true", help="machine-readable report")
+    output.add_argument("--markdown", action="store_true", help="redacted report to paste into a GitHub issue")
+    parser.add_argument("--console-ip", metavar="IPV4", type=_console_ip,
+                        help="also probe this one private address (your console on the home network)")
+    parser.add_argument("--interface", metavar="IFACE", type=_interface,
+                        help="Wi-Fi interface to inspect (default: the one carrying the default route)")
+    parser.add_argument("--timeout", metavar="SECONDS", type=_timeout, default=6.0,
+                        help="time limit per check, 1-60 (default: 6)")
+    parser.add_argument("--no-redact", action="store_true",
+                        help="show IP addresses in full for local debugging; never for sharing")
+    return parser
+
+
+def _login_name() -> str:
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError, OSError):
+        return os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+
+
+def system_redactor(mask_addresses: bool = True) -> Redactor:
+    """Redactor primed with this machine's home directory, user name and host name."""
+    try:
+        host = socket.gethostname()
+    except OSError:
+        host = ""
+    redactor = Redactor(home=os.path.expanduser("~"), user=_login_name(), host=host.split(".")[0],
+                        mask_addresses=mask_addresses)
+    redactor.add_secret(host)
+    return redactor
+
+
+def _timestamp(seconds: float) -> str:
+    moment = datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc)
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def diagnose(ctx: Context) -> Report:
+    """Run the plan for `ctx.options` and return the raw (not yet redacted) report."""
+    options = ctx.options
+    started_wall, started = ctx.wall_time(), ctx.monotonic()
+    results = run_checks(plan(options), ctx, timeout=options.timeout, deadline=OVERALL_DEADLINE_S)
+    privacy = {"redacted": options.redact, "addresses_masked": options.redact, "root_used": False,
+               "tokens_read": False, "accounts_read": False, "cookies_read": False, "browser_profiles_read": False,
+               "lan_discovery": False, "console_address_probed": bool(options.console_ip)}
+    return Report(scope=options.scope, checks=results, environment=environment(results), privacy=privacy,
+                  run_id=uuid.uuid4().hex, started_at=_timestamp(started_wall), finished_at=_timestamp(ctx.wall_time()),
+                  duration_ms=round((ctx.monotonic() - started) * 1000))
+
+
+def render(report: Report, redactor: Redactor, style: str) -> str:
+    """Redact the report, render it, then scrub the rendered output once more."""
+    safe = report.transformed(redactor.text, redactor.data)
+    if style == "json":
+        # Scrubbing string by string keeps the document valid JSON.
+        return json.dumps(redactor.data(json.loads(render_json(safe))), indent=2, ensure_ascii=False) + "\n"
+    return redactor.text(render_markdown(safe) if style == "markdown" else render_text(safe))
+
+
+def _diagnose_command(argv: Sequence[str], stdout: IO[str], stderr: IO[str],
+                      context_factory: Callable[[Options], Context] | None = None) -> int:
+    parser = build_parser(stdout, stderr)
+    args = parser.parse_args(list(argv))
+    if args.no_redact and args.markdown:
+        parser.error("--markdown is meant for sharing and is always redacted; drop --no-redact")
+    options = Options(scope=args.scope, timeout=args.timeout, console_ip=args.console_ip or "",
+                      interface=args.interface or "", redact=not args.no_redact)
+    ctx = context_factory(options) if context_factory else Context(options, redactor=system_redactor(options.redact))
+    report = diagnose(ctx)
+    stdout.write(render(report, ctx.redactor, "json" if args.json else "markdown" if args.markdown else "text"))
+    return report.exit_code()
+
+
+COMMANDS: dict[str, Callable[[Sequence[str], IO[str], IO[str]], int]] = {}
+
+
+def main(argv: Sequence[str] | None = None, *, stdout: IO[str] | None = None, stderr: IO[str] | None = None,
+         context_factory: Callable[[Options], Context] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    stdout, stderr = stdout or sys.stdout, stderr or sys.stderr
+    try:
+        if argv and argv[0] in COMMANDS:
+            return COMMANDS[argv[0]](argv[1:], stdout, stderr)
+        return _diagnose_command(argv, stdout, stderr, context_factory)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else EXIT_USAGE
+    except KeyboardInterrupt:
+        stderr.write("\nInterrupted.\n")
+        return 130
+    except BrokenPipeError:
+        return 0

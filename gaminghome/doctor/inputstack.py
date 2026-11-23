@@ -187,7 +187,8 @@ def check_hidraw_access(ctx: Context) -> Outcome:
     clues = [f"{daemon} is running" for daemon in stack.daemons]
     if hide_rules:
         owner = "InputPlumber" if any("inputplumber" in name for name in hide_rules) else "an input daemon"
-        clues.append(f"{len(hide_rules)} temporary udev rules from {owner} hide device nodes")
+        rules = "1 temporary udev rule" if len(hide_rules) == 1 else f"{len(hide_rules)} temporary udev rules"
+        clues.append(f"{rules} from {owner} hide device nodes")
     command = next((STOP_DAEMON[daemon] for daemon in stack.daemons), "")
     manual = (f" To test without it, stop it yourself (`{command}`) and start it again afterwards." if command else "")
     return warn(f"{summary}. Another input daemon may be hiding the controller interfaces"

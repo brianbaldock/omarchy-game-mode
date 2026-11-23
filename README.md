@@ -37,7 +37,9 @@ This is an independent preview, not an official Omarchy component.
   then `LANG`, and you can pick a language in Settings. Missing strings fall back to
   English.
 - **Theme**: uses your current Omarchy theme colors when they can be read, with a dark
-  fallback. There are no background images, network fetches or idle redraws.
+  fallback. There are no background images or idle redraws, and the launcher itself makes
+  no network requests. Only the `doctor` command, when you run it, sends the diagnostic
+  probes listed under [Doctor](#doctor).
 
 ## Controls
 
@@ -149,6 +151,126 @@ launcher by its absolute path with `--autostart`, so Gaming Home appears at logi
 the autostart file Game Mode created.
 
 `omarchy-game-mode mapper on|off|status` turns AntiMicroX set switching on or off.
+
+`omarchy-game-mode doctor` is described in the next section. It always answers in the
+terminal you ran it from, even while Game Mode is running.
+
+## Doctor
+
+`omarchy-game-mode doctor` checks what Xbox Remote Play, Xbox Cloud Gaming and your
+controller need on this device. Every result says what it proves and what it does not.
+
+```
+omarchy-game-mode doctor                  Everything below
+omarchy-game-mode doctor streaming        Network, Wi-Fi, firewall, clients, video decode
+omarchy-game-mode doctor input            Controllers and input daemons
+omarchy-game-mode doctor system           Device, system and GPU facts only
+omarchy-game-mode doctor --console-ip 192.168.1.50   Also probe your console's address
+omarchy-game-mode doctor --markdown       Redacted report to paste into an issue
+omarchy-game-mode doctor --json           The same report for tools
+```
+
+What it checks:
+
+- **Network path:** default route, IPv6 consistency, VPN or proxy in the way, which DNS
+  resolver answers, the Microsoft and Xbox service names, TLS to them, the clock, MTU.
+- **Streaming transport:** UDP to Microsoft's relay and two public STUN servers, the
+  relay's TURN challenge, and how your router maps one connection to several servers.
+- **Wi-Fi:** band, channel width, radar-shared (DFS) spectrum, signal, power saving,
+  roams and disconnects in the last 10 minutes, loss between the device and the router.
+- **Firewall:** which firewall is active and, for ufw, the saved policy.
+- **Clients and video:** browsers, Greenlight, browser flag files, hardware H.264 decode.
+- **Controller:** which controls each gamepad can report (the ROG Xbox Ally's built-in
+  pad has no R3 without a handheld daemon), InputPlumber, Handheld Daemon and AntiMicroX,
+  and controller interfaces that another daemon has hidden.
+
+What it never does:
+
+- **No root.** It never runs `sudo`. Where only root can answer, it prints the command
+  for you to run and marks the result "cannot verify without root".
+- **No changes.** Nothing is written, installed, enabled, started or stopped. No
+  controller is grabbed and no input is injected. Advice is text you can act on or ignore.
+- **No account access.** It does not sign in and never reads tokens, cookies, browser
+  profiles or keyrings. Greenlight is never started.
+- **No discovery.** Nothing is broadcast and no network is scanned. Your console is
+  contacted only when you pass `--console-ip` with its private address, and then with an
+  anonymous STUN request on UDP 9002 and one connection attempt on TCP 3074.
+
+What it sends, only while you run it: DNS lookups and TLS handshakes (no request, no
+credentials) for `login.live.com`, `user.auth.xboxlive.com`, `xsts.auth.xboxlive.com`,
+`www.xbox.com`, `xhome.gssv-play-prod.xboxlive.com` and `gssv-play-prod.xboxlive.com`;
+anonymous STUN to `relay.communication.microsoft.com`, `stun.cloudflare.com` and
+`stun.l.google.com`; one unauthenticated TURN request to Microsoft's relay; one time
+query to `time.cloudflare.com`; and a few pings to your router and to `1.1.1.1`.
+
+Reading the result:
+
+```
+Streaming transport (UDP)
+  [PASS] UDP and STUN: All 3 STUN servers answered (Microsoft relay 80 ms, Cloudflare 4 ms,
+         Google 10 ms); public address <public-ip-1>.
+         proves: Outbound UDP works and replies come back. Not: That the ports a real stream
+                 negotiates are open, or that the console is reachable.
+...
+Not verifiable from this device
+  [SKIP] Live firewall rules: cannot verify without root — run: sudo ufw status numbered verbose
+
+Result: INCONCLUSIVE: no failures in what was tested, 2 warnings. Not verified: Live firewall
+        rules, Console settings and account, Live failed attempt.
+```
+
+`[PASS]`, `[WARN]`, `[FAIL]`, `[SKIP]` and `[INFO]` mark each check. A streaming report
+ends with **INCONCLUSIVE** even when every check passes, because three things cannot be
+seen from this device: the live firewall rules, the console's own settings, and what
+happens during a real connection attempt. A clean report rules causes out; it is not a
+promise that a stream connects. The exit status is 0 when no check failed, 1 when at
+least one failed and 2 for a usage error.
+
+Microsoft's supported-browser list for `xbox.com/play` and `xbox.com/remoteplay` does
+not include desktop Linux, so the doctor always warns that the web client can fail here
+whatever the network looks like. Greenlight is the client to compare against.
+
+**Privacy.** Reports are redacted before they are printed. Public IP addresses become
+tokens such as `<public-ip-1>` (the same address gets the same token within one report),
+private addresses keep only their first two numbers (`192.168.x.x`), and the Wi-Fi network
+name, access-point and device MAC addresses, host name, user name, home directory, DNS
+search domains and serial numbers are never included. `--no-redact` shows IP addresses in
+full for your own debugging; it cannot be combined with `--markdown`.
+
+**Sharing a report.** Run `omarchy-game-mode doctor --markdown`, read it once, and paste
+it into the "Optional redacted evidence" field of the
+[hardware-validation issue form](https://github.com/brianbaldock/omarchy-game-mode/issues/new?template=hardware-validation.yml).
+
+The doctor's output is English only by design, so reports read the same for everyone who
+helps with them; it adds no strings to the translated interface.
+
+## Xbox Remote Play: before you troubleshoot
+
+Remote Play streams from your own console, so most of what decides whether it connects
+is set on the console. Check these there first; none of them can be seen from the handheld.
+
+1. **Update and restart** the console, and make sure nobody else is in a remote session.
+2. **Remote features:** press the Xbox button, then go to *Profile & system > Settings >
+   Devices & connections > Remote features*. Tick **Enable remote features**. Under
+   **Power options** choose **Sleep**; a console set to *Shutdown (energy saving)* cannot
+   be woken remotely.
+3. **Same profile:** sign in to Greenlight with the Xbox profile that is signed in on the
+   console. If *Remote features* shows **Xbox app preferences**, allow connections there.
+4. **Test remote play:** on the *Remote features* page, run **Test remote play** and note
+   what it reports. Away from home, Microsoft asks for at least 4.75 Mbps upload (9 Mbps
+   recommended) and less than 150 ms latency.
+5. **Network:** in *Profile & system > Settings > General > Network settings* run **Test
+   network connection** and **Test NAT type**. *Open* or *Moderate* is fine.
+6. **If the NAT type is Strict:** turn on UPnP on your router, or forward UDP port 9002
+   to the console (never to the handheld), and remove a second router in between if there
+   is one. Then test again.
+7. **Same network:** for a first test put the console and the handheld on the same
+   trusted network, not a guest network, and wire the console if you can. The console's
+   address is under *Network settings > Advanced settings*; pass it to
+   `omarchy-game-mode doctor --console-ip` to check that the handheld can reach it.
+
+None of this applies to Xbox Cloud Gaming, which runs on Microsoft's servers: there the
+things to check are the account, the region and the subscription.
 
 ### Upgrading from an earlier preview
 

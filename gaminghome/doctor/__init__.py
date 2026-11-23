@@ -10,5 +10,20 @@ Ownership and safety rules for everything in this package:
   file read is bounded; every socket has a timeout.
 - Output is English only and redacted by default (see `redact.py`).
 
-Importing this package is free: nothing is loaded until `cli.main` runs.
+Importing this package is free: nothing else is loaded until `main` runs.
 """
+
+from __future__ import annotations
+
+from typing import Sequence
+
+
+def requested(argv: Sequence[str]) -> bool:
+    """True when a full command line (program name first) asks for the doctor."""
+    return len(argv) > 1 and argv[1] == "doctor"
+
+
+def main(argv: Sequence[str]) -> int:
+    """Run the doctor in this process; `argv` is what follows the `doctor` word."""
+    from .cli import main as run
+    return run(argv)
