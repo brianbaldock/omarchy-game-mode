@@ -57,7 +57,11 @@ together for at least 0.8 seconds**. A single or brief press does nothing. The n
 Guide/Xbox button is deliberately left alone, so Steam and other apps keep using it.
 On InputPlumber's virtual gamepad only, a button or direction pressed while Guide is
 held is ignored too, until it is released: InputPlumber sends vendor buttons as Guide
-chords. On every other controller Game Mode ignores just the Guide button itself.
+chords. Game Mode follows that gamepad event by event, focused or not, and reads what
+is held only when it connects or after events were dropped. Such a read cannot tell
+how a hold began, so a button or direction held then, other than Guide, has to be
+released once before it counts. On every other controller Game Mode ignores just
+the Guide button itself.
 Vendor-specific buttons (for example ROG Ally's dedicated keys) are not mapped.
 
 Controller input is read **read-only and non-exclusively** from evdev. Devices that

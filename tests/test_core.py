@@ -451,16 +451,17 @@ class ControllerTest(unittest.TestCase):
     def test_what_is_held_together_with_guide_when_state_is_adopted_counts_as_its_chord(self):
         self.ci.add_device("d", guide_chords=True)
         self.ci.on_resync = lambda dev: self.ci.sync_state(dev, {core.BTN_MODE, BTN_SELECT}, {core.ABS_HAT0X: 1})
-        self.ci.set_nav_enabled(False)
-        self.ci.set_nav_enabled(True)          # Home is shown while Guide, View and a direction are down
+        self.ci.feed("d", EV_SYN, SYN_DROPPED, 0)
+        self.ci.feed("d", EV_SYN, SYN_REPORT, 0)  # read while Guide, View and a direction are down
         self.assertEqual(self.clock.timers, {})
+        self.key(BTN_SOUTH, 1)                  # pressed later, Guide still down
         self.key(core.BTN_MODE, 0)
         self.key(BTN_START, 1)
         self.clock.fire_all()
         self.assertEqual(self.actions, [])
 
     def test_what_belongs_to_a_guide_chord_stays_ignored_when_the_state_is_read_again(self):
-        # Home reads the state again when it is focused and after dropped events; only a release ends the chord.
+        # The state is read again after dropped events, not when Home is focused; only a release ends the chord.
         self.ci.add_device("d", guide_chords=True)
         self.key(core.BTN_MODE, 1)
         self.key(BTN_SELECT, 1)
@@ -470,7 +471,7 @@ class ControllerTest(unittest.TestCase):
         self.ci.feed("d", EV_SYN, SYN_DROPPED, 0)
         self.ci.feed("d", EV_SYN, SYN_REPORT, 0)
         self.ci.set_nav_enabled(False)
-        self.ci.set_nav_enabled(True)          # focused again while View and right are still held
+        self.ci.set_nav_enabled(True)          # focused again while View and right are still held: no read
         self.key(BTN_START, 1)
         self.clock.fire_all()
         self.key(BTN_START, 0)
@@ -509,30 +510,29 @@ class ControllerTest(unittest.TestCase):
         self.clock.fire_all()
         self.assertEqual(self.actions, [HOME])
 
-    def test_what_a_resync_finds_held_without_seeing_it_pressed_is_ignored_until_released(self):
-        # Reading the keys drops the key events still queued: Guide down, View down and Guide up, or the
-        # Guide around a D-pad press, may never be seen. Only what is held afterwards is.
+    def test_whatever_a_read_finds_held_waits_for_its_release(self):
+        # A read, on connect or after dropped events, drops the key events still queued: Guide down, View
+        # down and Guide up, or the Guide around a D-pad press, may never be seen, even after a plain hold.
         self.ci.add_device("d", guide_chords=True)
-        self.ci.on_resync = lambda dev: self.ci.sync_state(dev, {BTN_SELECT}, {core.ABS_HAT0X: 1})
-        self.ci.set_nav_enabled(False)
-        self.ci.set_nav_enabled(True)
+        self.key(BTN_SELECT, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.ci.sync_state("d", {BTN_SELECT}, {core.ABS_HAT0X: 1})
         self.key(BTN_START, 1)
         self.clock.fire_all()
         self.key(BTN_START, 0)
-        self.assertEqual(self.actions, [MENU])
+        self.assertEqual(self.actions, [core.RIGHT, MENU])
         self.key(BTN_SELECT, 0)
         self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
         self.key(BTN_SELECT, 1)
         self.key(BTN_START, 1)
         self.clock.fire_all()
         self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
-        self.assertEqual(self.actions, [MENU, HOME, core.RIGHT])
+        self.assertEqual(self.actions, [core.RIGHT, MENU, HOME, core.RIGHT])
 
-    def test_hold_seen_without_guide_still_counts_after_a_resync(self):
+    def test_hold_seen_without_guide_still_counts_across_a_focus_change(self):
         self.ci.add_device("d", guide_chords=True)
         self.key(BTN_SELECT, 1)
         self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
-        self.ci.on_resync = lambda dev: self.ci.sync_state(dev, {BTN_SELECT}, {core.ABS_HAT0X: 1})
         self.ci.set_nav_enabled(False)
         self.ci.set_nav_enabled(True)          # focus went away and came back while View and right stayed down
         self.key(BTN_START, 1)
@@ -545,8 +545,8 @@ class ControllerTest(unittest.TestCase):
         self.ci.feed("d", EV_ABS, core.ABS_X, 32767)
         self.key(core.BTN_MODE, 0)
         self.ci.on_resync = lambda dev: self.ci.sync_state(dev, set(), {core.ABS_X: 15000})
-        self.ci.set_nav_enabled(False)
-        self.ci.set_nav_enabled(True)
+        self.ci.feed("d", EV_SYN, SYN_DROPPED, 0)
+        self.ci.feed("d", EV_SYN, SYN_REPORT, 0)
         self.ci.feed("d", EV_ABS, core.ABS_X, 32767)   # pushed further, never let go
         self.assertEqual((self.actions, self.clock.timers), ([], {}))
         self.ci.feed("d", EV_ABS, core.ABS_X, 0)
@@ -563,6 +563,33 @@ class ControllerTest(unittest.TestCase):
         self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
         self.ci.feed("d", EV_ABS, core.ABS_X, 32767)   # the band released the stick: this is a new push
         self.assertEqual(self.actions, [core.RIGHT, core.RIGHT, HOME, core.RIGHT])
+
+    def test_focus_reads_an_ordinary_pad_but_not_one_that_sends_guide_chords(self):
+        # That pad is followed event by event: reading it would drop the Guide edges still queued for it.
+        self.ci.add_device("g", guide_chords=True)
+        self.ci.add_device("o")
+        self.ci.feed("g", EV_ABS, core.ABS_HAT0X, 1)
+        self.ci.set_nav_enabled(False)
+        self.ci.set_nav_enabled(True)
+        self.assertEqual(self.resyncs, ["o"])
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [core.RIGHT, core.RIGHT])   # the held direction repeats again
+
+    def test_guide_chords_made_while_home_is_not_focused_count_by_their_events(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(BTN_SELECT, 1)                # a plain View hold
+        self.ci.set_nav_enabled(False)
+        for code, value in ((BTN_SELECT, 0), (core.BTN_MODE, 1), (BTN_SELECT, 1), (core.BTN_MODE, 0),
+                            (core.BTN_MODE, 1), (BTN_SOUTH, 1)):
+            self.key(code, value)              # View pressed again for a Guide chord, then Guide + A held
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.key(core.BTN_MODE, 0)
+        self.ci.set_nav_enabled(True)
+        self.key(BTN_SOUTH, 0)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [])
 
     def test_reenabled_nav_resumes_held_direction_without_stale_press(self):
         held = {"d": ({BTN_SOUTH}, {core.ABS_HAT0X: 1})}

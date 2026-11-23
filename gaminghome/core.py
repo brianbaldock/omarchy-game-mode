@@ -519,9 +519,10 @@ class ControllerInterpreter:
     * A device added with ``guide_chords`` is the virtual gamepad of an input
       stack that sends a handheld's vendor buttons as Guide chords. On it,
       every button or direction pressed while Guide is held is ignored as
-      well, until it is let go, also across a resync, and Guide ends a
-      pending Menu or Home hold. A resync ignores the same way what it finds
-      held without having seen it pressed: Guide may have been held then.
+      well, until it is let go, and Guide ends a pending Menu or Home hold.
+      It is followed by its events alone, so focus does not resync it. Its
+      state is adopted on connect and after dropped events only, and then
+      whatever is held other than Guide waits for its release.
     * SYN_DROPPED discards state until the next SYN_REPORT, after which the
       caller resyncs held buttons without generating actions.
     """
@@ -568,8 +569,11 @@ class ControllerInterpreter:
                 continue
             # Adopt the physical state now (held buttons stay consumed, so a
             # stale A never activates); a direction still held resumes
-            # repeating after the normal delay instead of stalling.
-            if self.on_resync:
+            # repeating after the normal delay instead of stalling. A pad that
+            # sends Guide chords is followed event by event whether Home is
+            # focused or not: reading it would drop the Guide edges still
+            # queued for it, which nothing else records.
+            if self.on_resync and not state.guide_chords:
                 self.on_resync(device_id)
                 state = self.devices.get(device_id)
             if state is not None and state.direction is not None:
@@ -593,28 +597,24 @@ class ControllerInterpreter:
         state.chord_consumed = {BTN_SELECT, BTN_START} <= state.pressed
 
     def _sync_guide_chords(self, state, keys, axes):
-        """Adopt the state of a pad that sends Guide chords, ignoring what may belong to one.
+        """Adopt the state of a pad that sends Guide chords after a gap in what was seen of it.
 
-        Reading the keys drops the key events still queued, Guide's among
-        them. So a button or direction held now that was not known as a plain
-        hold may have been pressed for a Guide chord: like one that was, it is
-        ignored until it is released. A direction ignored before keeps its
-        side while the stick is in its hysteresis band or the axis is not read.
+        That is on connect and after dropped events. Reading the keys also
+        drops the key events still queued, Guide's among them, so nothing
+        tells whether what is held now was pressed for a Guide chord: after a
+        gap, whatever is held waits for its release. Guide itself is tracked.
+        A direction ignored before keeps its side while the stick is in its
+        hysteresis band or the axis is not read.
         """
-        plain_keys = set(state.pressed)
-        plain_directions = self._pushed_directions(state) - state.suppressed_directions
         self._clear(state)
         for code, sign in state.suppressed_directions:
             values, index = self._slot(state, code)
             values[index] = sign
         for code, value in axes.items():
             self._set_axis(state, code, value)
-        if BTN_MODE in keys:
-            # Whatever is down together with Guide may have been pressed for its chord.
-            plain_keys, plain_directions = {BTN_MODE}, set()
-        state.suppressed = keys - plain_keys - {BTN_MODE}
-        state.suppressed_directions = self._pushed_directions(state) - plain_directions
-        state.pressed = (keys & NAV_BUTTONS) - state.suppressed
+        state.suppressed = keys - {BTN_MODE}
+        state.suppressed_directions = self._pushed_directions(state)
+        state.pressed = keys & {BTN_MODE}
         state.direction = self._direction(state)
         state.chord_consumed = {BTN_SELECT, BTN_START} <= state.pressed
 

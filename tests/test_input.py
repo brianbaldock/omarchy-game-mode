@@ -35,9 +35,11 @@ class MonitorCase(unittest.TestCase):
         self.addCleanup(reads.stop)
         self.allow = VirtualGamepads()
         self.actions, self.changes, self.hints = [], [], []
+        self.timers, self.timer = {}, 0
 
     def monitor(self) -> ControllerMonitor:
-        interpreter = core.ControllerInterpreter(lambda _ms, _callback: 0, lambda _token: None, self.actions.append)
+        interpreter = core.ControllerInterpreter(self.schedule, lambda token: self.timers.pop(token, None),
+                                                 self.actions.append)
         interpreter.set_nav_enabled(True)
         monitor = ControllerMonitor(interpreter, lambda: self.changes.append(1), dev_dir=str(self.tree.dev),
                                     sysfs_root=str(self.tree.sys), extra_gamepads=lambda: self.allow,
@@ -45,6 +47,20 @@ class MonitorCase(unittest.TestCase):
         self.addCleanup(monitor.stop)
         monitor.start()
         return monitor
+
+    def schedule(self, _ms, callback):
+        self.timer += 1
+        self.timers[self.timer] = callback
+        return self.timer
+
+    def fire_timers(self):
+        timers, self.timers = self.timers, {}
+        for callback in timers.values():
+            callback()
+
+    def press(self, node, *keys):
+        for code, value in keys:
+            self.evdev.send(node, (core.EV_KEY, code, value))
 
     def candidate(self) -> int:
         """The provider of the allowlist is told to look again and names the read that will answer."""
@@ -111,43 +127,55 @@ class VirtualGamepadTest(MonitorCase):
             self.assertTrue(pump(lambda: core.BACK in self.actions))
             self.assertEqual(self.actions, expected, node)
 
-    def test_virtual_pad_keeps_its_state_when_it_cannot_be_read_again(self):
-        # Reading what is held fails, as it does on a node that is going away.
+    def test_focus_does_not_read_the_virtual_pad_and_a_failed_read_empties_an_ordinary_one(self):
         elite, usb = self.tree.add(21, ELITE), self.tree.add(7, PHYSICAL, where=USB)
         self.allow = VirtualGamepads({ELITE: 1})
         monitor = self.monitor()
-        writers = {node: os.open(node, os.O_WRONLY | os.O_NONBLOCK) for node in (elite, usb)}
-        for writer in writers.values():
-            self.addCleanup(os.close, writer)
 
-        def press(node, *keys):
-            os.write(writers[node], b"".join(EVENT.pack(0, 0, core.EV_KEY, code, value)
-                                             + EVENT.pack(0, 0, core.EV_SYN, core.SYN_REPORT, 0) for code, value in keys))
-
-        def read_again(code):
-            self.assertTrue(pump(lambda: all(code in monitor.interpreter.devices[node].pressed for node in writers)))
-            for node in writers:
-                self.evdev.fail[(node, EVIOCGKEY(KEY_BYTES))] = errno.ENODEV
+        def focus_again(code):
+            self.assertTrue(pump(lambda: all(code in monitor.interpreter.devices[node].pressed for node in (elite, usb))))
+            self.evdev.fail[(usb, EVIOCGKEY(KEY_BYTES))] = errno.ENODEV   # as on a node that is going away
+            reads = self.evdev.key_reads[elite]
             monitor.interpreter.set_nav_enabled(False)
-            monitor.interpreter.set_nav_enabled(True)   # focused again: both are read, and the reads fail
+            monitor.interpreter.set_nav_enabled(True)
+            self.assertEqual(self.evdev.key_reads[elite], reads)          # the virtual pad is followed, not read
 
-        for node in writers:
-            press(node, (core.BTN_MODE, 1))
-        read_again(core.BTN_MODE)
-        press(elite, (core.BTN_SOUTH, 1), (core.BTN_SOUTH, 0), (core.BTN_MODE, 0), (core.BTN_EAST, 1))
+        for node in (elite, usb):
+            self.press(node, (core.BTN_MODE, 1))
+        focus_again(core.BTN_MODE)
+        self.press(elite, (core.BTN_SOUTH, 1), (core.BTN_SOUTH, 0), (core.BTN_MODE, 0), (core.BTN_EAST, 1))
         self.assertTrue(pump(lambda: core.BACK in self.actions))
         self.assertEqual(self.actions, [core.BACK])   # Guide was still held: A belonged to its chord
-        press(usb, (core.BTN_MODE, 0))
-        for node in writers:
-            press(node, (core.BTN_SELECT, 1))
-        read_again(core.BTN_SELECT)
+        self.press(usb, (core.BTN_MODE, 0))
+        for node in (elite, usb):
+            self.press(node, (core.BTN_SELECT, 1))
+        focus_again(core.BTN_SELECT)
         for node, expected in ((elite, [core.BACK]), (usb, [core.MENU, core.BACK])):
             del self.actions[:]
-            press(node, (core.BTN_START, 1), (core.BTN_START, 0), (core.BTN_EAST, 0), (core.BTN_EAST, 1))
+            self.press(node, (core.BTN_START, 1), (core.BTN_START, 0), (core.BTN_EAST, 0), (core.BTN_EAST, 1))
             self.assertTrue(pump(lambda: core.BACK in self.actions))
             # View is still held on the virtual pad, so Menu began the View + Menu hold; the other
             # pad took the failed read for nothing held, as before.
             self.assertEqual(self.actions, expected, node)
+
+    def test_events_queued_when_home_is_focused_are_read_in_order_with_their_guide(self):
+        elite = self.tree.add(21, ELITE)
+        self.allow = VirtualGamepads({ELITE: 1})
+        monitor = self.monitor()
+        self.press(elite, (core.BTN_SELECT, 1))                      # a plain View hold
+        self.assertTrue(pump(lambda: core.BTN_SELECT in monitor.interpreter.devices[elite].pressed))
+        # Still queued when Home is focused: View again for a Guide chord, Guide + A and a Guide + D-pad tap.
+        self.press(elite, (core.BTN_SELECT, 0), (core.BTN_MODE, 1), (core.BTN_SELECT, 1), (core.BTN_MODE, 0),
+                   (core.BTN_MODE, 1), (core.BTN_SOUTH, 1), (core.BTN_SOUTH, 0))
+        self.evdev.send(elite, (core.EV_ABS, core.ABS_HAT0X, 1))
+        self.evdev.send(elite, (core.EV_ABS, core.ABS_HAT0X, 0))
+        self.press(elite, (core.BTN_MODE, 0))
+        monitor.interpreter.set_nav_enabled(False)
+        monitor.interpreter.set_nav_enabled(True)
+        self.press(elite, (core.BTN_START, 1))
+        self.assertTrue(pump(lambda: core.BTN_START in monitor.interpreter.devices[elite].pressed))
+        self.fire_timers()
+        self.assertEqual(self.actions, [])
 
     def test_only_the_announced_identity_is_used(self):
         self.tree.add(20, STEAM_PAD)                 # Steam Input's own virtual pad
