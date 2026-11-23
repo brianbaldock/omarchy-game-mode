@@ -996,22 +996,11 @@ PROC_NET_DEV = ("Inter-|   Receive                                              
                 "wlp3s0: 99 9 0 0 0 0 0 0 99 9 0 0 0 0 0 0\n")
 RESOLV_STUB = ("# managed by systemd-resolved\nnameserver 127.0.0.53\noptions edns0 trust-ad\n"
                f"search {CANARY_DOMAIN} .\n")
-RESOLVECTL_STATUS = f"""Global
-           Protocols: -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
-    resolv.conf mode: stub
-Fallback DNS Servers: 9.9.9.9#dns.quad9.net 2620:fe::9#dns.quad9.net
-                      1.1.1.1#cloudflare-dns.com
-                      2606:4700:4700::1111#cloudflare-dns.com 8.8.8.8#dns.google
-                      2001:4860:4860::8888#dns.google
-
-Link 2 (wlp3s0)
-    Current Scopes: DNS
-         Protocols: +DefaultRoute -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
-Current DNS Server: 1.1.1.3
-       DNS Servers: 1.1.1.3 1.0.0.3
-        DNS Domain: {CANARY_DOMAIN} ~.
-     Default Route: yes
-"""
+# What systemd-resolved writes to /run/systemd/resolve/resolv.conf: the upstream servers it knows.
+RESOLVED_UPLINKS = ("# This is /run/systemd/resolve/resolv.conf managed by man:systemd-resolved(8).\n"
+                    "nameserver 1.1.1.3\nnameserver 1.0.0.3\nnameserver 1.1.1.3\n"
+                    f"search {CANARY_DOMAIN}\n")
+RESOLVECTL_STATUS = "Link 2 (wlp3s0)\nCurrent DNS Server: 9.9.9.9\n"
 IP_RULES_DEFAULT = "0:\tfrom all lookup local\n32766:\tfrom all lookup main\n32767:\tfrom all lookup default\n"
 IP_RULES_WIREGUARD = ("0:\tfrom all lookup local\n32764:\tfrom all lookup main suppress_prefixlength 0\n"
                       "32765:\tnot from all fwmark 0xca6c lookup 51820\n32766:\tfrom all lookup main\n"
@@ -1202,7 +1191,7 @@ RESOLVED_ACTIVE = ("systemctl", "is-active", "systemd-resolved.service")
 
 class DnsTest(NetCase):
     def test_resolver_behind_the_systemd_stub_is_identified_and_filtering_is_flagged(self):
-        ctx = self.ctx({"/etc/resolv.conf": RESOLV_STUB},
+        ctx = self.ctx({"/etc/resolv.conf": RESOLV_STUB, net.RESOLVED_UPLINKS: RESOLVED_UPLINKS},
                        {RESOLVED_ACTIVE: "active\n", ("resolvectl", "status"): RESOLVECTL_STATUS})
         outcome = net.check_resolver(ctx)
         self.assertEqual(outcome.status, Status.WARN)
@@ -1213,15 +1202,16 @@ class DnsTest(NetCase):
         self.assertNotIn(CANARY_DOMAIN, outcome.detail + json.dumps(outcome.evidence))
         self.assertEqual(ctx.redactor.text(f"search {CANARY_DOMAIN}"), "search <redacted>")
 
-    def test_resolvectl_parser_handles_wrapped_lists_and_decorated_addresses(self):
-        servers, fallback, domains = net.parse_resolvectl_status(RESOLVECTL_STATUS)
-        self.assertEqual(servers, ["1.1.1.3", "1.0.0.3"])
-        self.assertEqual(fallback, ["9.9.9.9", "2620:fe::9", "1.1.1.1", "2606:4700:4700::1111", "8.8.8.8",
-                                    "2001:4860:4860::8888"])
-        self.assertEqual(domains, [CANARY_DOMAIN])
-        self.assertEqual([net._server_address(token) for token in
-                          ("1.1.1.1:53#one.one", "[2606:4700:4700::1111]:853", "fe80::1%wlp3s0", "nonsense")],
-                         ["1.1.1.1", "2606:4700:4700::1111", "fe80::1", ""])
+    def test_systemd_resolved_is_never_asked_over_d_bus(self):
+        commands = FakeCommands({RESOLVED_ACTIVE: "active\n", ("resolvectl", "status"): RESOLVECTL_STATUS})
+        files = {"/etc/resolv.conf": RESOLV_STUB, net.RESOLVED_UPLINKS: RESOLVED_UPLINKS}
+        outcome = net.check_resolver(make_context(root=self.tree(files), commands=commands))
+        self.assertEqual((outcome.status, commands.calls), (Status.WARN, [RESOLVED_ACTIVE]))
+        self.assertEqual([row["address"] for row in outcome.evidence["servers"]], ["1.1.1.3", "1.0.0.3"])
+        unlisted = net.check_resolver(make_context(root=self.tree({"/etc/resolv.conf": RESOLV_STUB}),
+                                                   commands=FakeCommands({RESOLVED_ACTIVE: "active\n"})))
+        self.assertEqual(unlisted.status, Status.SKIP)
+        self.assertIn("cannot be verified here", unlisted.detail)
 
     def test_plain_resolv_conf_router_and_public_resolvers(self):
         resolv = f"nameserver 192.168.77.1\nsearch {CANARY_DOMAIN}\n"
@@ -2387,7 +2377,8 @@ class World(InputCase):
         files = {
             **CLIENT_FILES, "/proc/net/route": WIFI_ROUTES, "/proc/net/if_inet6": IF_INET6_LOCAL,
             "/proc/net/ipv6_route": IPV6_ROUTE_NO_DEFAULT, "/proc/net/dev": PROC_NET_DEV,
-            "/proc/net/arp": arp("0x2"), "/etc/resolv.conf": RESOLV_STUB, "/etc/hostname": CANARY_HOST + "\n",
+            "/proc/net/arp": arp("0x2"), "/etc/resolv.conf": RESOLV_STUB, net.RESOLVED_UPLINKS: RESOLVED_UPLINKS,
+            "/etc/hostname": CANARY_HOST + "\n",
             "/proc/sys/kernel/hostname": CANARY_HOST + "\n", "/sys/class/net/wlp3s0/wireless/.keep": "",
             "/sys/class/net/wlp3s0/mtu": "1500\n", "/etc/default/ufw": UFW_DEFAULTS, "/etc/ufw/user.rules": UFW_RULES,
             "/sys/class/drm/card1/device/vendor": "0x1002\n", "/sys/class/drm/card1/device/device": "0x163f\n",
@@ -2505,11 +2496,8 @@ class PlanTest(World):
         options = Options(console_ip=CONSOLE_IP)
         runner.run_checks(checks.plan(options), self.world(options), workers=1)
         tools = {call[0] for call in self.commands.calls}
-        self.assertEqual(tools, {"omarchy", "hyprctl", "pacman", "ip", "resolvectl", "iw", "journalctl", "ping",
-                                 "systemctl", "chromium", "vainfo", "busctl"})
-        # Tools that talk to a D-Bus activatable service run only once systemd says it is already up.
-        calls = self.commands.calls
-        self.assertLess(calls.index(RESOLVED_ACTIVE), calls.index(("resolvectl", "status")))
+        self.assertEqual(tools, {"omarchy", "hyprctl", "pacman", "ip", "iw", "journalctl", "ping", "systemctl",
+                                 "chromium", "vainfo", "busctl"})
         for call in self.commands.calls:
             self.assertNotIn(call[0], ("sudo", "pkexec", "su", "doas", "greenlight", "greenlight-desktop", "steam"))
             if call[0] == "systemctl":
@@ -2796,8 +2784,9 @@ class PrivacyTest(CliCase):
         self.assertIn(CANARY_PUBLIC_IP, evidence)
         self.assertIn(CANARY_LAN_IP, json.dumps([check.detail for check in raw.checks]))
         tools = "".join(str(value) for value in self.commands.table.values())
-        for canary in (CANARY_SSID, CANARY_BSSID, CANARY_MAC, CANARY_HOST, CANARY_DOMAIN, CANARY_USER, CANARY_LAN_IP):
+        for canary in (CANARY_SSID, CANARY_BSSID, CANARY_MAC, CANARY_HOST, CANARY_USER, CANARY_LAN_IP):
             self.assertIn(canary, tools)
+        self.assertIn(CANARY_DOMAIN, (SCRATCH / "run/systemd/resolve/resolv.conf").read_text())
         self.assertIn(CANARY_SERIAL, (SCRATCH / "sys/class/dmi/id/product_serial").read_text())
         self.assertIn(CANARY_SERIAL, (SCRATCH / "sys/class/hidraw/hidraw5/device/uevent").read_text())
 

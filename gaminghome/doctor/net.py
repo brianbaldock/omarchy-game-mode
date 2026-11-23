@@ -48,6 +48,8 @@ TABLE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 NTP_HOST = "time.cloudflare.com"
 NTP_EPOCH_OFFSET = 2208988800
 TIME_SERVICES = ("systemd-timesyncd", "chronyd", "ntpd")
+# The upstream servers systemd-resolved knows, as it writes them for programs that read resolv.conf.
+RESOLVED_UPLINKS = "/run/systemd/resolve/resolv.conf"
 TIMESYNC_FLAG = "/run/systemd/timesync/synchronized"
 # One of the STUN servers the UDP checks contact anyway (see `udp.STUN_SERVERS`), so the
 # path MTU probe adds no destination of its own.
@@ -434,41 +436,6 @@ def parse_resolv_conf(text: str) -> tuple[list[str], list[str]]:
     return servers, domains
 
 
-def _server_address(token: str) -> str:
-    """Strip resolvectl decorations: `addr#name`, `addr%iface`, `[addr]:port`, `addr:port`."""
-    token = token.split("#", 1)[0].split("%", 1)[0]
-    if token.startswith("["):
-        token = token[1:].split("]", 1)[0]
-    elif token.count(":") == 1:
-        token = token.split(":", 1)[0]
-    try:
-        return ipaddress.ip_address(token).compressed
-    except ValueError:
-        return ""
-
-
-def parse_resolvectl_status(text: str) -> tuple[list[str], list[str], list[str]]:
-    """(link DNS servers, fallback servers, search domains) from `resolvectl status`."""
-    values: dict[str, list[str]] = {}
-    key = ""
-    for line in text.splitlines():
-        match = re.match(r"^\s*([A-Za-z][A-Za-z0-9. ]*?):\s+(.*)$", line)
-        if match:
-            key = match.group(1)
-            values.setdefault(key, []).extend(match.group(2).split())
-        elif line.strip() and key and line.startswith(" "):
-            values[key].extend(line.split())
-        else:
-            key = ""
-
-    def addresses(name: str) -> list[str]:
-        return list(dict.fromkeys(filter(None, (_server_address(token) for token in values.get(name, [])))))
-
-    servers = list(dict.fromkeys(addresses("Current DNS Server") + addresses("DNS Servers")))
-    domains = [token.lstrip("~") for token in values.get("DNS Domain", []) if token.lstrip("~").strip(".")]
-    return servers, addresses("Fallback DNS Servers"), domains
-
-
 def classify_resolver(address: str) -> tuple[str, str]:
     """(kind, provider) for one resolver address; kind is filtering, public, lan or local."""
     if address in FILTERING_RESOLVERS:
@@ -482,21 +449,23 @@ def classify_resolver(address: str) -> tuple[str, str]:
 
 
 def check_resolver(ctx: Context) -> Outcome:
+    """Which servers answer this device's lookups, from the files the system keeps them in.
+
+    Behind systemd-resolved's stub (127.0.0.53) the upstream servers are read from the copy it
+    writes to RESOLVED_UPLINKS. `resolvectl` is never asked: it talks to systemd-resolved over
+    D-Bus, which could start the service again, and the fallback servers or which server is in
+    use right now are only known that way, so they are not reported.
+    """
     servers, domains = parse_resolv_conf(ctx.fs.read("/etc/resolv.conf") or "")
     mode = "direct"
     if any(server.startswith("127.0.0.5") for server in servers):
-        mode, servers = "systemd-resolved", []
-        # `resolvectl` asks systemd-resolved over D-Bus, which would start it if it were stopped.
+        mode = "systemd-resolved"
+        servers, uplink_domains = parse_resolv_conf(ctx.fs.read(RESOLVED_UPLINKS) or "")
+        domains += uplink_domains
+        for domain in domains:
+            ctx.secret(domain)
         state = ctx.command(["systemctl", "is-active", "systemd-resolved.service"], 3).stdout.strip()
-        if state == "active":
-            status = ctx.command(["resolvectl", "status"], 4)
-            if status.ok:
-                upstream, fallback, link_domains = parse_resolvectl_status(status.stdout)
-                domains += link_domains
-                servers = upstream or fallback
-        elif state in ("inactive", "failed"):
-            for domain in domains:
-                ctx.secret(domain)
+        if state in ("inactive", "failed"):
             return warn("DNS goes to systemd-resolved's local stub (127.0.0.53), but systemd-resolved is not "
                         "running, so lookups through it fail.",
                         "Start it again: `sudo systemctl start systemd-resolved.service`", mode=mode, servers=[],
@@ -504,13 +473,19 @@ def check_resolver(ctx: Context) -> Outcome:
     for domain in domains:
         ctx.secret(domain)
     rows = []
-    for address in dict.fromkeys(servers):
+    for raw in servers:
         try:
-            kind, provider = classify_resolver(address)
+            address = ipaddress.ip_address(raw).compressed
         except ValueError:
             continue
-        rows.append({"address": address, "kind": kind, "provider": provider})
+        kind, provider = classify_resolver(address)
+        if all(row["address"] != address for row in rows):
+            rows.append({"address": address, "kind": kind, "provider": provider})
     if not rows:
+        if mode == "systemd-resolved":
+            return skip("DNS goes through systemd-resolved, which lists no upstream server in "
+                        f"{RESOLVED_UPLINKS}; the servers it falls back to cannot be verified here.",
+                        mode=mode, servers=[], filtering=False)
         return skip("Could not identify the DNS resolver in use.", mode=mode, servers=[], filtering=False)
     providers = ", ".join(dict.fromkeys(row["provider"] for row in rows))
     filtering = [row for row in rows if row["kind"] == "filtering"]
