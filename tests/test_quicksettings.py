@@ -1,7 +1,10 @@
+import gc
 import io
 import json
 import math
+import os
 import unittest
+import weakref
 from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -18,14 +21,26 @@ class Variant:
 
 
 class FakeBus:
-    def __init__(self, properties=None, devices=None, hold_cookie=41):
+    def __init__(
+        self,
+        properties=None,
+        devices=None,
+        hold_cookie=41,
+        *,
+        release_error=None,
+        synchronous_vanish=False,
+    ):
         self.properties = properties or {}
         self.devices = devices or []
         self.hold_cookie = hold_cookie
+        self.release_error = release_error
+        self.synchronous_vanish = synchronous_vanish
         self.calls = []
         self.sets = []
         self.watches = []
+        self.signals = []
         self.next_watch = 1
+        self.next_signal = 1
         self.fail_names = set()
 
     def get_all(self, name, path, interface):
@@ -46,16 +61,34 @@ class FakeBus:
             return list(self.devices)
         if method == "HoldProfile":
             return self.hold_cookie
+        if method == "ReleaseProfile" and self.release_error is not None:
+            raise self.release_error
         return None
 
     def watch_name(self, name, appeared, vanished):
         token = self.next_watch
         self.next_watch += 1
         self.watches.append((name, appeared, vanished, token))
+        if self.synchronous_vanish:
+            vanished()
         return token
 
     def unwatch_name(self, token):
         self.watches = [watch for watch in self.watches if watch[3] != token]
+
+    def subscribe_signal(self, name, path, interface, member, callback):
+        token = self.next_signal
+        self.next_signal += 1
+        self.signals.append((name, path, interface, member, callback, token))
+        return token
+
+    def unsubscribe_signal(self, token):
+        self.signals = [signal for signal in self.signals if signal[5] != token]
+
+    def emit_profile_released(self, cookie):
+        for _name, _path, _interface, member, callback, _token in list(self.signals):
+            if member == "ProfileReleased":
+                callback([cookie])
 
 
 class FakeRunner:
@@ -143,6 +176,69 @@ class PowerProfilesTest(unittest.TestCase):
         self.assertEqual(release_call[5:7], ("(u)", (41,)))
         self.assertIsNone(self.power.hold_cookie)
         self.assertTrue(self.power.close()["ok"])
+
+    def test_realistic_hold_listing_preserves_owned_cookie(self):
+        self.assertTrue(self.power.hold_performance()["ok"])
+        self.bus.properties[(*self.endpoint,)]["ActiveProfileHolds"] = [{
+            "ApplicationId": quick.APP_ID,
+            "Profile": "performance",
+            "Reason": "Game Mode performance session",
+        }]
+        status = self.power.read()
+        self.assertTrue(status["owned_hold"])
+        self.assertEqual(self.power.hold_cookie, 41)
+        self.assertTrue(self.power.release_profile()["ok"])
+
+    def test_empty_hold_listing_forgets_auto_released_cookie(self):
+        self.assertTrue(self.power.hold_performance()["ok"])
+        self.bus.properties[(*self.endpoint,)]["ActiveProfileHolds"] = []
+        status = self.power.read()
+        self.assertFalse(status["owned_hold"])
+        self.assertIsNone(self.power.hold_cookie)
+        self.assertFalse(any(
+            len(call) > 4 and call[4] == "ReleaseProfile"
+            for call in self.bus.calls
+        ))
+
+    def test_matching_profile_released_signal_forgets_cookie(self):
+        self.assertTrue(self.power.hold_performance()["ok"])
+        self.bus.emit_profile_released(40)
+        self.assertEqual(self.power.hold_cookie, 41)
+        self.bus.emit_profile_released(41)
+        self.assertIsNone(self.power.hold_cookie)
+        self.assertEqual(self.bus.signals, [])
+
+    def test_failed_release_clears_state_before_a_new_hold(self):
+        self.assertTrue(self.power.hold_performance()["ok"])
+        self.bus.release_error = RuntimeError("PPD restarted")
+        self.assertFalse(self.power.release_profile()["ok"])
+        self.assertIsNone(self.power.hold_cookie)
+        self.assertEqual(self.bus.watches, [])
+        self.assertEqual(self.bus.signals, [])
+        self.bus.release_error = None
+        self.bus.hold_cookie = 42
+        self.assertTrue(self.power.hold_performance("Fresh game")["ok"])
+        self.assertEqual(self.power.hold_cookie, 42)
+
+    def test_synchronous_holder_vanish_cannot_leave_a_stale_watch(self):
+        bus = FakeBus({(*self.endpoint,): ppd_properties()}, synchronous_vanish=True)
+        power = quick.PowerProfiles(bus)
+        self.assertFalse(power.hold_performance(holder_name="com.example.Game")["ok"])
+        self.assertIsNone(power.hold_cookie)
+        self.assertIsNone(power._holder_watch)
+        self.assertEqual(bus.watches, [])
+        self.assertEqual(bus.signals, [])
+
+    def test_holder_name_must_be_a_valid_dbus_name(self):
+        for invalid in ("org..example", "1org.example", "has spaces", ":1.", "a\nb"):
+            with self.subTest(invalid=invalid):
+                bus = FakeBus({(*self.endpoint,): ppd_properties()})
+                result = quick.PowerProfiles(bus).hold_performance(holder_name=invalid)
+                self.assertFalse(result["ok"])
+                self.assertFalse(any(
+                    len(call) > 4 and call[4] == "HoldProfile"
+                    for call in bus.calls
+                ))
 
     def test_rejects_unbounded_hold_strings(self):
         self.assertFalse(self.power.hold_performance("x" * 161)["ok"])

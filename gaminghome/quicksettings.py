@@ -42,6 +42,10 @@ LOGIN1_PATH = "/org/freedesktop/login1"
 LOGIN1_MANAGER = "org.freedesktop.login1.Manager"
 DEFAULT_SINK = "@DEFAULT_AUDIO_SINK@"
 DEFAULT_SOURCE = "@DEFAULT_AUDIO_SOURCE@"
+DBUS_WELL_KNOWN_NAME = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)+"
+)
+DBUS_UNIQUE_NAME = re.compile(r":[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+")
 QUICK_USAGE = (
     "Usage: omarchy-game-mode quick "
     "[status|profile <power-saver|balanced|performance>|brightness <N|+N|-N>|"
@@ -255,6 +259,34 @@ class GioSystemBus:
         self._gio_required()
         self._gio.bus_unwatch_name(token)
 
+    def subscribe_signal(
+        self,
+        name: str,
+        path: str,
+        interface: str,
+        member: str,
+        callback: Callable,
+    ) -> int:
+        self._ensure()
+
+        def dispatch(_connection, _sender, _path, _interface, _member, parameters, _data):
+            callback(_plain(parameters))
+
+        return self._connection.signal_subscribe(
+            name,
+            interface,
+            member,
+            path,
+            None,
+            self._gio.DBusSignalFlags.NONE,
+            dispatch,
+            None,
+        )
+
+    def unsubscribe_signal(self, token: int):
+        self._ensure()
+        self._connection.signal_unsubscribe(token)
+
     def _gio_required(self):
         self._ensure()
 
@@ -269,6 +301,7 @@ class PowerProfiles:
         self._hold_cookie: int | None = None
         self._hold_generation = 0
         self._holder_watch = None
+        self._profile_signal = None
 
     @property
     def hold_cookie(self) -> int | None:
@@ -319,12 +352,12 @@ class PowerProfiles:
             endpoint, properties = self._load()
             active = properties.get("ActiveProfile")
             profiles = self._profiles(properties.get("Profiles", []))
-            holds = self._holds(properties.get("ActiveProfileHolds", []))
-            owned = False
-            if self._hold_cookie is not None:
-                owned = any(_mapping(item).get("Cookie") == self._hold_cookie for item in holds)
-                if holds and not owned:
-                    self._hold_cookie = None
+            raw_holds = _plain(properties.get("ActiveProfileHolds"))
+            holds = self._holds(raw_holds)
+            owned = self._hold_cookie is not None
+            if owned and isinstance(raw_holds, list) and not raw_holds:
+                self._forget_hold()
+                owned = False
             return {
                 "available": True,
                 "service": endpoint[0],
@@ -379,7 +412,7 @@ class PowerProfiles:
         try:
             reason_text = self._validate_text(reason, "hold reason", 160)
             app_id = self._validate_text(application_id, "application id", 128)
-            holder = self._validate_text(holder_name, "holder name", 128) if holder_name is not None else None
+            holder = self._validate_bus_name(holder_name) if holder_name is not None else None
             endpoint, properties = self._load()
             available = {item["id"] for item in self._profiles(properties.get("Profiles", []))}
             if profile not in available:
@@ -396,6 +429,9 @@ class PowerProfiles:
             self._hold_cookie = cookie
             self._hold_endpoint = endpoint
             self._hold_generation += 1
+            self._watch_profile_released(endpoint, self._hold_generation)
+            if self._hold_cookie is None:
+                return _failed("Power profile hold was already released")
             if holder is not None:
                 self._watch_holder(holder, self._hold_generation)
                 if self._hold_cookie is None:
@@ -421,27 +457,59 @@ class PowerProfiles:
             self.release_profile()
 
         watch = self.bus.watch_name(holder, lambda _owner: None, vanished)
-        self._holder_watch = watch
+        if generation == self._hold_generation and self._hold_cookie is not None:
+            self._holder_watch = watch
+        else:
+            try:
+                self.bus.unwatch_name(watch)
+            except Exception:
+                pass
+
+    def _watch_profile_released(self, endpoint: tuple[str, str, str], generation: int):
+        def released(parameters):
+            values = _plain(parameters)
+            cookie = values[0] if isinstance(values, list) and len(values) == 1 else None
+            if generation == self._hold_generation and cookie == self._hold_cookie:
+                self._forget_hold()
+
+        name, path, interface = endpoint
+        try:
+            token = self.bus.subscribe_signal(name, path, interface, "ProfileReleased", released)
+        except Exception:
+            return
+        if generation == self._hold_generation and self._hold_cookie is not None:
+            self._profile_signal = token
+        else:
+            try:
+                self.bus.unsubscribe_signal(token)
+            except Exception:
+                pass
 
     def release_profile(self) -> dict[str, Any]:
         cookie, endpoint = self._hold_cookie, self._hold_endpoint
         if cookie is None:
-            self._unwatch_holder()
+            self._forget_hold()
             return _ok("No power profile hold active")
-        if endpoint is None:
-            self._hold_cookie = None
-            self._unwatch_holder()
-            return _failed("Power profile hold service is unavailable")
+        failure = None
         try:
+            if endpoint is None:
+                raise RuntimeError("Power profile hold service is unavailable")
             name, path, interface = endpoint
             self.bus.call(name, path, interface, "ReleaseProfile", "(u)", (cookie,), None)
         except Exception as error:
-            return _failed(error)
+            failure = error
+        finally:
+            self._forget_hold()
+        if failure is not None:
+            return _failed(failure)
+        return _ok("Power profile hold released")
+
+    def _forget_hold(self):
         self._hold_generation += 1
         self._hold_cookie = None
         self._hold_endpoint = None
         self._unwatch_holder()
-        return _ok("Power profile hold released")
+        self._unsubscribe_profile_released()
 
     def release_hold(self) -> dict[str, Any]:
         return self.release_profile()
@@ -455,6 +523,15 @@ class PowerProfiles:
             pass
         self._holder_watch = None
 
+    def _unsubscribe_profile_released(self):
+        if self._profile_signal is None:
+            return
+        try:
+            self.bus.unsubscribe_signal(self._profile_signal)
+        except Exception:
+            pass
+        self._profile_signal = None
+
     def close(self) -> dict[str, Any]:
         return self.release_profile()
 
@@ -465,6 +542,13 @@ class PowerProfiles:
         if any(ord(char) < 32 or ord(char) == 127 for char in value):
             raise ValueError(f"{label} is invalid")
         return value
+
+    @classmethod
+    def _validate_bus_name(cls, value: Any) -> str:
+        name = cls._validate_text(value, "holder name", 255)
+        if not (DBUS_WELL_KNOWN_NAME.fullmatch(name) or DBUS_UNIQUE_NAME.fullmatch(name)):
+            raise ValueError("holder name is not a valid D-Bus name")
+        return name
 
 
 class Battery:
