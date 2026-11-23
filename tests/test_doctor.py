@@ -1690,6 +1690,8 @@ COMMIT
 """
 UFW_BLOCK_PORT = "### tuple ### deny udp 3478 0.0.0.0/0 any 0.0.0.0/0 out\n"
 UFW_BLOCK_ALL = "### tuple ### reject_log any any 0.0.0.0/0 any 0.0.0.0/0 out_wlp3s0\n"
+UFW_BLOCK_ALL_V6 = "### tuple ### deny udp any ::/0 any ::/0 out\n"
+UFW_ALLOW_OUT = "### tuple ### allow udp 3074 0.0.0.0/0 any 0.0.0.0/0 out\n"
 
 
 def firewall_states(*states):
@@ -1703,8 +1705,11 @@ class FirewallTest(NetCase):
     def test_ufw_rule_tuples_are_parsed_without_addresses_or_comments(self):
         rules = firewall.parse_ufw_rules(UFW_RULES + UFW_BLOCK_ALL)
         self.assertEqual([rule.describe() for rule in rules], [
-            "allow in udp port 53317", "allow in udp port 53", "allow in tcp port 22", "reject out any port any"])
+            "allow in udp port 53317 (IPv4)", "allow in udp port 53 (IPv4)", "allow in tcp port 22 (IPv4)",
+            "reject out any port any (IPv4)"])
         self.assertEqual([rule.everywhere for rule in rules], [True, False, True, True])
+        self.assertEqual([rule.describe() for rule in firewall.parse_ufw_rules(UFW_BLOCK_ALL_V6, "IPv6")],
+                         ["deny out udp port any (IPv6)"])
         odd = (f"### tuple ### deny {CANARY_PAD_SERIAL} any 0.0.0.0/0 any 0.0.0.0/0 out\n"
                f"### tuple ### deny udp {CANARY_HOME}/{CANARY_SUFFIX} 0.0.0.0/0 any 0.0.0.0/0 out\n")
         self.assertEqual(firewall.parse_ufw_rules(odd), [])
@@ -1717,22 +1722,60 @@ class FirewallTest(NetCase):
         self.assertEqual(outcome.status, Status.PASS)
         self.assertEqual(outcome.evidence, {
             "active": ["ufw"], "ufw_incoming": "deny", "ufw_outgoing": "allow", "ufw_rules_readable": True,
-            "ufw_saved_rules": 3, "ufw_outbound_blocks": []})
+            "ufw_saved_rules": 3, "ufw_outbound_blocks": [], "ufw_all_udp_blocked": []})
         self.assertNotIn(CANARY_LAN_IP, outcome.detail + json.dumps(outcome.evidence))
+        self.assertIn("none of which would block outbound UDP. Unsolicited inbound packets are dropped", outcome.detail)
 
-    def test_outbound_udp_blocks_are_found_and_only_a_total_block_is_a_failure(self):
-        base = {"/etc/default/ufw": UFW_DEFAULTS}
-        port = firewall.check_active_policy(self.ctx({**base, "/etc/ufw/user.rules": UFW_RULES + UFW_BLOCK_PORT},
-                                                     UFW_ACTIVE))
-        self.assertEqual((port.status, port.evidence["ufw_outbound_blocks"]), (Status.WARN, ["deny out udp port 3478"]))
-        everything = firewall.check_active_policy(self.ctx({**base, "/etc/ufw/user6.rules": UFW_BLOCK_ALL}, UFW_ACTIVE))
-        self.assertEqual(everything.status, Status.FAIL)
-        self.assertIn("Saved rules are not proof of the live ones", everything.detail)
-        self.assertIn("only root can read the live rules", port.detail)
-        self.assertIn("`sudo ufw status numbered verbose`", everything.remediation)
-        closed = {"/etc/default/ufw": UFW_DEFAULTS.replace('OUTPUT_POLICY="ACCEPT"', 'OUTPUT_POLICY="DROP"'),
-                  "/etc/ufw/user.rules": UFW_RULES}
-        self.assertEqual(firewall.check_active_policy(self.ctx(closed, UFW_ACTIVE)).status, Status.WARN)
+    def saved_policy(self, ipv4=UFW_RULES, ipv6="", defaults=UFW_DEFAULTS):
+        files = {"/etc/default/ufw": defaults, "/etc/ufw/user.rules": ipv4, "/etc/ufw/user6.rules": ipv6}
+        outcome = firewall.check_active_policy(self.ctx(files, UFW_ACTIVE))
+        if outcome.status is not Status.PASS:
+            self.assertIn("Saved rules are not the live state, which only root can read", outcome.detail)
+            self.assertIn("`sudo ufw status numbered verbose`", outcome.remediation)
+        return outcome, outcome.evidence["ufw_outbound_blocks"], outcome.evidence["ufw_all_udp_blocked"]
+
+    def test_a_saved_block_counts_only_for_its_own_address_family(self):
+        port, blocks, closed = self.saved_policy(UFW_RULES + UFW_BLOCK_PORT)
+        self.assertEqual((port.status, blocks, closed), (Status.WARN, ["deny out udp port 3478 (IPv4)"], []))
+        self.assertIn("1 saved rule(s) would block some outbound UDP (deny out udp port 3478 (IPv4))", port.detail)
+        ipv4, blocks, closed = self.saved_policy(UFW_RULES + UFW_BLOCK_ALL)
+        self.assertEqual((ipv4.status, closed), (Status.FAIL, ["IPv4"]))
+        self.assertIn("The saved rules would block all outbound UDP over IPv4 (reject out any port any (IPv4)); once "
+                      "loaded, they stop stream media from leaving this device.", ipv4.detail)
+        ipv6, blocks, closed = self.saved_policy(ipv6=UFW_BLOCK_ALL_V6)
+        self.assertEqual((ipv6.status, blocks, closed), (Status.WARN, ["deny out udp port any (IPv6)"], ["IPv6"]))
+        self.assertIn("would block all outbound UDP over IPv6 but not over IPv4, which streams can use instead",
+                      ipv6.detail)
+        self.assertNotIn("all outbound UDP over IPv4", ipv6.detail)
+        both, blocks, closed = self.saved_policy(UFW_BLOCK_ALL, UFW_BLOCK_ALL_V6)
+        self.assertEqual((both.status, closed), (Status.FAIL, ["IPv4", "IPv6"]))
+        self.assertIn("would block all outbound UDP over IPv4 and IPv6", both.detail)
+
+    def test_only_rules_ufw_would_apply_first_and_load_at_all_count(self):
+        allowed_first, blocks, closed = self.saved_policy(UFW_ALLOW_OUT + UFW_BLOCK_ALL)
+        self.assertEqual((allowed_first.status, blocks, closed), (Status.WARN, ["reject out any port any (IPv4)"], []))
+        self.assertNotIn("all outbound UDP", allowed_first.detail)
+        ipv6_off = UFW_DEFAULTS.replace("IPV6=yes", "IPV6=no")
+        off, blocks, closed = self.saved_policy(ipv6=UFW_BLOCK_ALL_V6, defaults=ipv6_off)
+        self.assertEqual((off.status, blocks, closed), (Status.PASS, [], []))
+
+    def test_the_saved_default_policies_are_reported_for_what_they_say(self):
+        def defaults(incoming, outgoing):
+            return UFW_DEFAULTS.replace('INPUT_POLICY="DROP"', incoming).replace('OUTPUT_POLICY="ACCEPT"', outgoing)
+        for outgoing in ('OUTPUT_POLICY="DROP"', 'OUTPUT_POLICY="REJECT"'):
+            closed, _blocks, _families = self.saved_policy(defaults=defaults('INPUT_POLICY="DROP"', outgoing))
+            self.assertEqual(closed.status, Status.WARN, outgoing)
+            self.assertIn("the saved default policy would stop outgoing traffic that no rule allows, so streaming "
+                          "needs explicit allow rules", closed.detail)
+        unknown, _blocks, _families = self.saved_policy(defaults=defaults('INPUT_POLICY="DROP"', ""))
+        self.assertEqual(unknown.status, Status.WARN)
+        self.assertIn("the saved default policy for outgoing traffic could not be read", unknown.detail)
+        self.assertNotIn("would stop outgoing traffic", unknown.detail)
+        open_inbound, _blocks, _families = self.saved_policy(defaults=defaults('INPUT_POLICY="ACCEPT"',
+                                                                               'OUTPUT_POLICY="ACCEPT"'))
+        self.assertEqual(open_inbound.status, Status.PASS)
+        self.assertIn("allow incoming, allow outgoing", open_inbound.detail)
+        self.assertNotIn("inbound packets are dropped", open_inbound.detail)
 
     def test_what_cannot_be_read_is_reported_as_information_not_as_a_pass(self):
         unreadable = firewall.check_active_policy(self.ctx({"/etc/default/ufw": UFW_DEFAULTS}, UFW_ACTIVE))

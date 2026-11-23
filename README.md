@@ -183,7 +183,9 @@ What it checks:
   relay's TURN challenge, and how your router maps one connection to several servers.
 - **Wi-Fi:** band, channel width, radar-shared (DFS) spectrum, signal, power saving,
   roams and disconnects in the last 10 minutes, loss between the device and the router.
-- **Firewall:** which firewall is active and, for ufw, the saved policy.
+- **Firewall:** which firewall is active and, for ufw, what its saved policy and rules
+  would do to outbound UDP, for IPv4 and IPv6 separately. Saved rules are not the live
+  ones, which only root can read.
 - **Clients and video:** browsers, Greenlight, browser flag files, hardware H.264 decode.
 - **Controller:** which control codes each gamepad lists (read without a handheld daemon,
   the ROG Xbox Ally's built-in pad lists generically numbered buttons and no standard
