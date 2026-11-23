@@ -5,10 +5,15 @@ replace each primitive with a fake and never need a network, a device or root.
 The real primitives here are the only place that spawns processes or opens files:
 commands are argv lists (never a shell) with a deadline and a bounded capture, and
 file reads are bounded and read-only.
+
+Every command runs in a process group of its own and stays tracked until it has been
+collected, so `stop_commands` can end all of them, and whatever they started, when the
+doctor stops: normally, on Ctrl-C, or on SIGTERM or SIGHUP (see `ending_signals_raise`).
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import select
 import selectors
@@ -22,10 +27,10 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from .redact import Redactor
-from .runner import check_cancelled, parallel_map, time_left
+from .runner import cancelled, check_cancelled, parallel_map, time_left
 
 READ_LIMIT = 65536
 OUTPUT_LIMIT = 262144
@@ -41,6 +46,88 @@ ENDPOINT_VARIABLES = frozenset({
     *(name for proxy in ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy", "no_proxy")
       for name in (proxy, proxy.upper())),
 })
+ENDING_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+class Interrupted(KeyboardInterrupt):
+    """A signal ended the command; raised in place of the signal's default action, so clean-up runs."""
+
+    def __init__(self, number: int):
+        super().__init__(number)
+        self.number = number
+
+
+class _Ending:
+    """Main-thread state for the handler below: how deep inside `ending_signals_held`, and what waits."""
+
+    holding = 0
+    waiting: int | None = None
+
+
+def _interrupt(number: int, _frame: Any) -> None:
+    if _Ending.holding:
+        if _Ending.waiting is None:
+            _Ending.waiting = number
+        return
+    raise Interrupted(number)
+
+
+@contextlib.contextmanager
+def ending_signals_raise() -> Iterator[None]:
+    """While inside, SIGINT, SIGTERM and SIGHUP raise `Interrupted` instead of killing the process.
+
+    A signal the process was started with ignored stays ignored. Outside the main thread,
+    where Python cannot install handlers, nothing changes.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = {}
+    try:
+        for number in ENDING_SIGNALS:
+            if signal.getsignal(number) is not signal.SIG_IGN:
+                previous[number] = signal.signal(number, _interrupt)
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
+@contextlib.contextmanager
+def ending_signals_held() -> Iterator[None]:
+    """Hold `Interrupted` back for a moment; a signal that arrived meanwhile raises it on the way out.
+
+    The signal mask stays as it is on purpose: a command started inside would inherit it.
+    Only the main thread ever gets `Interrupted`, so elsewhere there is nothing to hold.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    _Ending.holding += 1
+    try:
+        yield
+    finally:
+        _Ending.holding -= 1
+        if not _Ending.holding and _Ending.waiting is not None:
+            number, _Ending.waiting = _Ending.waiting, None
+            raise Interrupted(number)
+
+
+@contextlib.contextmanager
+def ending_signals_ignored() -> Iterator[None]:
+    """While inside, the ending signals do nothing: for clean-up that has to finish once begun."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = {}
+    try:
+        for number in ENDING_SIGNALS:
+            previous[number] = signal.signal(number, signal.SIG_IGN)
+        yield
+    finally:
+        for number, handler in previous.items():
+            if handler is not None:
+                signal.signal(number, handler)
 
 
 @dataclass(frozen=True)
@@ -170,6 +257,8 @@ def _exited(proc: subprocess.Popen[bytes], deadline: float) -> bool:
     A process that has not been collected keeps its pid, so `_reap` can still name its
     process group without any risk of the pid having been reused.
     """
+    if proc.returncode is not None:  # `stop_commands` got there first
+        return True
     try:
         handle = os.pidfd_open(proc.pid)
     except (AttributeError, OSError):
@@ -184,11 +273,29 @@ def _exited(proc: subprocess.Popen[bytes], deadline: float) -> bool:
         os.close(handle)
 
 
-def _reap(proc: subprocess.Popen[bytes]) -> None:
-    """Kill the command's whole process group, then collect the command.
+_RUNNING: set[subprocess.Popen[bytes]] = set()
+_RUNNING_LOCK = threading.Lock()
 
-    The group goes whether or not the command is still running: a child it started stays in
-    its group and can outlive it, still running or still holding a pipe open.
+
+def _start(argv: tuple[str, ...], env: Mapping[str, str] | None) -> subprocess.Popen[bytes] | None:
+    """Start `argv` in a new session (so a process group of its own) and track it.
+
+    None once the check it runs for has to stop: `stop_commands` may already have run,
+    and nothing may start after it.
+    """
+    with _RUNNING_LOCK:
+        if cancelled():
+            return None
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env=_command_env(env), start_new_session=True)
+        _RUNNING.add(proc)
+        return proc
+
+
+def _kill_group(proc: subprocess.Popen[bytes]) -> None:
+    """Kill the command's process group; called once, by whoever takes it off the tracked set.
+
+    `_exited` leaves the command uncollected, so its pid still names its group and nothing else.
     """
     try:
         os.killpg(proc.pid, signal.SIGKILL)
@@ -196,6 +303,18 @@ def _reap(proc: subprocess.Popen[bytes]) -> None:
         pass
     except PermissionError:
         proc.kill()
+
+
+def _reap(proc: subprocess.Popen[bytes]) -> None:
+    """Kill the command's whole process group, then collect the command.
+
+    The group goes whether or not the command is still running: a child it started stays in
+    its group and can outlive it, still running or still holding a pipe open.
+    """
+    with _RUNNING_LOCK:
+        if proc in _RUNNING:  # else `stop_commands` has killed it already
+            _RUNNING.discard(proc)
+            _kill_group(proc)
     try:
         proc.wait(2)
     except subprocess.TimeoutExpired:
@@ -205,24 +324,46 @@ def _reap(proc: subprocess.Popen[bytes]) -> None:
             stream.close()
 
 
+def stop_commands(timeout: float = 2.0) -> None:
+    """Kill every command still running, with everything it started, and collect them.
+
+    For the way out: however the doctor ends, nothing it started keeps running. A check
+    still running by then cannot start anything new, because the runner has stopped it.
+    """
+    with _RUNNING_LOCK:
+        stopping = list(_RUNNING)
+        _RUNNING.clear()
+        for proc in stopping:
+            _kill_group(proc)
+    deadline = time.monotonic() + timeout
+    for proc in stopping:
+        try:
+            proc.wait(max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def run_command(argv: Sequence[str], timeout: float = 5.0, *, env: Mapping[str, str] | None = None,
                 limit: int = OUTPUT_LIMIT) -> CommandResult:
     """Run `argv` without a shell, with a deadline and bounded output. Never raises."""
     argv = tuple(argv)
     deadline = time.monotonic() + timeout
+    proc = None
     try:
-        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                env=_command_env(env), start_new_session=True)
+        with ending_signals_held():  # no signal may land between starting the command and tracking it
+            proc = _start(argv, env)
+        if proc is None:
+            return CommandResult(argv, error="cancelled")
+        out, err, timed_out = _drain(proc, deadline, limit)
+        timed_out = timed_out or not _exited(proc, deadline)
     except FileNotFoundError:
         return CommandResult(argv, error="not-found")
     except OSError as exc:
         reason = os.strerror(exc.errno).lower() if exc.errno else type(exc).__name__
         return CommandResult(argv, error=f"os-error: {reason}")
-    try:
-        out, err, timed_out = _drain(proc, deadline, limit)
-        timed_out = timed_out or not _exited(proc, deadline)
     finally:
-        _reap(proc)
+        if proc is not None:
+            _reap(proc)
     return CommandResult(argv, None if timed_out else proc.returncode, out.decode("utf-8", "replace"),
                          err.decode("utf-8", "replace"), "timeout" if timed_out else "")
 

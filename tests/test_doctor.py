@@ -2616,6 +2616,75 @@ class CliTest(CliCase):
             raise BrokenPipeError
         self.assertEqual(cli.main([], stdout=io.StringIO(), stderr=io.StringIO(), context_factory=closed), 0)
 
+    @staticmethod
+    def sleepers(marker):
+        """Live processes running `sleep <marker>`, whoever started them."""
+        found, wanted = [], marker.encode()
+        for entry in os.listdir("/proc"):
+            try:
+                command = Path(f"/proc/{entry}/cmdline").read_bytes().split(b"\0")
+                if command[1:2] != [wanted] or not command[0].endswith(b"sleep"):
+                    continue
+                state = Path(f"/proc/{entry}/stat").read_text().rpartition(")")[2].split()[0]
+            except (OSError, IndexError):
+                continue
+            if state not in "ZX":
+                found.append(int(entry))
+        return found
+
+    def test_no_command_outlives_the_doctor_however_it_ends(self):
+        if threading.current_thread() is not threading.main_thread():
+            self.skipTest("signal handlers can only be installed in the main thread")
+        shell = shutil.which("sh")
+        if not shell or not shutil.which("sleep"):
+            self.skipTest("needs sh and sleep")
+        main = threading.main_thread().ident
+        started_with = {number: signal.getsignal(number) for number in context.ENDING_SIGNALS}
+        for index, ending in enumerate((signal.SIGINT, signal.SIGTERM, signal.SIGHUP, None)):
+            if ending is not None and started_with[ending] is signal.SIG_IGN:
+                continue  # a signal ignored from the start stays ignored, by design
+            marker = f"{50 + index}.{os.getpid()}"  # how long each sleep lasts, and how this test finds it
+            self.addCleanup(lambda marker=marker: [os.kill(pid, signal.SIGKILL) for pid in self.sleepers(marker)])
+
+            def sleeper(ctx, marker=marker, ending=ending):
+                argv = (shell, "-c", f"sleep {marker} & sleep {marker}")
+                if ending is not None:
+                    ctx.command(argv, 30)
+                    return model.ok("finished")
+                # The check is over before its command is: what a normal exit has to stop.
+                threading.Thread(target=ctx.run, args=(argv, 30), daemon=True).start()
+                deadline = time.monotonic() + 5
+                while len(self.sleepers(marker)) < 2 and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                return model.ok("finished")
+            check = Check("test.sleeper", "Sleeper", "system", sleeper, timeout=20)
+            problems = []
+
+            def send(ending=ending, marker=marker):
+                deadline = time.monotonic() + 5
+                while len(self.sleepers(marker)) < 2 and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                if len(self.sleepers(marker)) < 2:
+                    problems.append("the command never started")
+                if signal.getsignal(ending) in (signal.SIG_DFL, signal.SIG_IGN):
+                    problems.append(f"{signal.Signals(ending).name} would kill the doctor without any clean-up")
+                    ending = signal.SIGINT
+                signal.pthread_kill(main, ending)
+            with self.subTest(ending=ending):
+                if ending is not None:
+                    threading.Thread(target=send, daemon=True).start()
+                err = io.StringIO()
+                with mock.patch.object(cli, "plan", return_value=[check]):
+                    code = cli.main(["system"], stdout=io.StringIO(), stderr=err,
+                                    context_factory=lambda options: Context(options, redactor=redact.Redactor()))
+                deadline = time.monotonic() + 2  # what the dead command left to init is collected there
+                while self.sleepers(marker) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(self.sleepers(marker), [])
+                self.assertEqual(problems, [])
+                self.assertEqual(code, 0 if ending is None else 128 + ending)
+                self.assertEqual({number: signal.getsignal(number) for number in started_with}, started_with)
+
     def test_report_survives_a_terminal_that_cannot_encode_it(self):
         class Latin1(io.StringIO):
             encoding = "latin-1"
@@ -3696,7 +3765,7 @@ class ButtonCommandTest(InputCase):
     def test_a_signal_ends_the_test_with_the_terminal_restored_and_every_node_closed(self):
         if threading.current_thread() is not threading.main_thread():
             self.skipTest("signal handlers can only be installed in the main thread")
-        handlers = {number: signal.getsignal(number) for number in buttonsio.ENDING_SIGNALS}
+        handlers = {number: signal.getsignal(number) for number in context.ENDING_SIGNALS}
         # A signal this process was started with ignored stays ignored, by design: nothing to test then.
         for number in [number for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
                        if handlers[number] is not signal.SIG_IGN]:

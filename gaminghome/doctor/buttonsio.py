@@ -25,17 +25,16 @@ import signal
 import struct
 import sys
 import termios
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import IO, Any, Callable, Iterator, Sequence
+from typing import IO, Any, Callable, Sequence
 
 from . import buttons, evdev, hid
 from .buttons import AxisInfo, Control, ControlResult, Event, Observation
 from .checks import INPUT, SYSTEM
 from .cli import Parser
-from .context import Context, Options
+from .context import Context, Interrupted, Options, ending_signals_held, ending_signals_raise
 from .evdev import InputDevice
 from .inputstack import input_stack
 from .model import EXIT_USAGE, Report
@@ -55,54 +54,8 @@ NOT_A_TERMINAL = ("omarchy-game-mode doctor buttons is interactive: run it in a 
                   "the prompts go to stderr, so the report itself can be redirected.\n")
 
 
-ENDING_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
-
-
 class NotOpened(Exception):
     """A node or the terminal could not be opened; the message is a short reason, never a path."""
-
-
-class Interrupted(KeyboardInterrupt):
-    """A signal ended the test; raised in place of the signal's default action, so clean-up runs."""
-
-    def __init__(self, number: int):
-        super().__init__(number)
-        self.number = number
-
-
-@contextlib.contextmanager
-def ending_signals_raise() -> Iterator[None]:
-    """While inside, SIGINT, SIGTERM and SIGHUP raise `Interrupted` instead of killing the process.
-
-    A signal the process was started with ignored stays ignored. Outside the main thread,
-    where Python cannot install handlers, nothing changes.
-    """
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
-
-    def interrupt(number: int, _frame: Any) -> None:
-        raise Interrupted(number)
-
-    previous = {}
-    try:
-        for number in ENDING_SIGNALS:
-            if signal.getsignal(number) is not signal.SIG_IGN:
-                previous[number] = signal.signal(number, interrupt)
-        yield
-    finally:
-        for number, handler in previous.items():
-            signal.signal(number, handler)
-
-
-@contextlib.contextmanager
-def ending_signals_held() -> Iterator[None]:
-    """Hold the ending signals back for a moment; one that arrived meanwhile is handled on the way out."""
-    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, ENDING_SIGNALS)
-    try:
-        yield
-    finally:
-        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
 
 
 def run_every(*steps: Callable[[], Any]) -> None:

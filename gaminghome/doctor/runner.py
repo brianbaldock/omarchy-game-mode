@@ -210,28 +210,36 @@ def run_checks(checks: Sequence[Check], ctx: Any, *, timeout: float = 6.0, deadl
 
     for _ in range(max(1, min(workers, len(tasks)))):
         spawn()
-    with changed:
-        while any(task.state != _DONE for task in tasks):
-            now = monotonic()
-            if now >= overall:
-                pending.clear()
+    try:
+        with changed:
+            while any(task.state != _DONE for task in tasks):
+                now = monotonic()
+                if now >= overall:
+                    pending.clear()
+                    for task in tasks:
+                        if task.state == _PENDING:
+                            abandon(task, now, "not run: the doctor reached its overall time limit")
+                        elif task.state == _RUNNING:
+                            abandon(task, now, "stopped at the doctor's overall time limit; result unknown")
+                    break
+                wake = overall
                 for task in tasks:
-                    if task.state == _PENDING:
-                        abandon(task, now, "not run: the doctor reached its overall time limit")
-                    elif task.state == _RUNNING:
-                        abandon(task, now, "stopped at the doctor's overall time limit; result unknown")
-                break
-            wake = overall
+                    if task.state != _RUNNING:
+                        continue
+                    limit = task.check.timeout if task.check.timeout is not None else timeout
+                    if now >= task.started + limit:
+                        abandon(task, now, f"timed out after {limit:g} s; result unknown")
+                        spawn()
+                    else:
+                        wake = min(wake, task.started + limit)
+                changed.wait(max(0.0, wake - monotonic()))
+    finally:
+        # Interrupted or not, no check starts or goes on once the caller has stopped waiting.
+        with changed:
+            pending.clear()
             for task in tasks:
-                if task.state != _RUNNING:
-                    continue
-                limit = task.check.timeout if task.check.timeout is not None else timeout
-                if now >= task.started + limit:
-                    abandon(task, now, f"timed out after {limit:g} s; result unknown")
-                    spawn()
-                else:
-                    wake = min(wake, task.started + limit)
-            changed.wait(max(0.0, wake - monotonic()))
+                if task.budget is not None:
+                    task.budget.stop()
     return [task.result for task in tasks if task.result is not None]
 
 

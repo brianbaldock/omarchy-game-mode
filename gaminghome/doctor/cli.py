@@ -2,7 +2,9 @@
 
 Runs entirely in the invoking process: it never talks to a resident Game Mode
 instance and never imports GTK. Exit codes: 0 no failed check (warnings and
-inconclusive results included), 1 at least one failed check, 2 usage error.
+inconclusive results included), 1 at least one failed check, 2 usage error, and
+128 plus the signal number after SIGINT, SIGTERM or SIGHUP. However it ends, every
+command it started is killed and collected before `main` returns.
 
 Other doctor commands plug in through `COMMANDS` (name -> `main(argv, stdout, stderr)`),
 reusing the model, runner, redactor and `render`; `buttons` is one, and a
@@ -12,10 +14,12 @@ failed-attempt `capture` command is the planned next one.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import json
 import os
 import re
+import signal
 import socket
 import sys
 import uuid
@@ -23,7 +27,8 @@ from typing import IO, Any, Callable, NoReturn, Sequence
 
 from . import console
 from .checks import SCOPES, plan
-from .context import KEY_LOG_VARIABLE, Context, Options
+from .context import (KEY_LOG_VARIABLE, Context, Options, ending_signals_ignored, ending_signals_raise,
+                      stop_commands)
 from .model import EXIT_USAGE, Report
 from .net import INTERFACE_NAME
 from .redact import Redactor
@@ -49,7 +54,8 @@ other commands:
 The doctor is read-only: no root, no installs, no configuration changes, no sign-in.
 It sends anonymous probes to Microsoft's relay and service names, two public STUN
 servers, one NTP server, your own gateway and, with --console-ip, that one address.
-Exit status: 0 no failed check, 1 at least one failed check, 2 usage error.
+Exit status: 0 no failed check, 1 at least one failed check, 2 usage error,
+128 + the signal number when stopped by Ctrl-C, SIGTERM or SIGHUP.
 """
 
 
@@ -229,17 +235,26 @@ def main(argv: Sequence[str] | None = None, *, stdout: IO[str] | None = None, st
     stdout, stderr = stdout or sys.stdout, stderr or sys.stderr
     os.environ.pop(KEY_LOG_VARIABLE, None)  # nothing the doctor starts may write TLS secrets to disk
     try:
-        if argv and argv[0] in COMMANDS:
-            code = COMMANDS[argv[0]](argv[1:], stdout, stderr)
-        else:
-            code = _diagnose_command(argv, stdout, stderr, context_factory)
-        stdout.flush()
+        with ending_signals_raise():
+            try:
+                if argv and argv[0] in COMMANDS:
+                    code = COMMANDS[argv[0]](argv[1:], stdout, stderr)
+                else:
+                    code = _diagnose_command(argv, stdout, stderr, context_factory)
+                stdout.flush()
+            finally:
+                # However the doctor ends, no command it started keeps running.
+                with ending_signals_ignored():
+                    stop_commands()
         return code
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else EXIT_USAGE
-    except KeyboardInterrupt:
-        stderr.write("\nInterrupted.\n")
-        return 130
+    except KeyboardInterrupt as exc:
+        number = getattr(exc, "number", signal.SIGINT)
+        with contextlib.suppress(OSError, ValueError):
+            stderr.write("\nInterrupted.\n" if number == signal.SIGINT
+                         else f"\nStopped by {signal.Signals(number).name}.\n")
+        return 128 + number
     except BrokenPipeError:
         # The reader went away (`doctor | head`). Point stdout at /dev/null so the
         # interpreter's own flush at exit does not report the same error again.

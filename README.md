@@ -237,7 +237,8 @@ ends with **INCONCLUSIVE** even when every check passes, because three things ca
 seen from this device: the live firewall rules, the console's own settings, and what
 happens during a real connection attempt. A clean report rules causes out; it is not a
 promise that a stream connects. The exit status is 0 when no check failed, 1 when at
-least one failed and 2 for a usage error.
+least one failed and 2 for a usage error. Ctrl-C, SIGTERM and SIGHUP stop it with 128 plus
+the signal number (130 for Ctrl-C), and only after every tool it started has been ended.
 
 Microsoft's supported-browser list for `xbox.com/play` and `xbox.com/remoteplay` does
 not include desktop Linux, so the doctor always warns that the web client can fail here
