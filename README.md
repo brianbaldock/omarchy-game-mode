@@ -172,6 +172,7 @@ omarchy-game-mode doctor system           Device, system and GPU facts only
 omarchy-game-mode doctor --console-ip 192.168.1.50   Also probe your console's address
 omarchy-game-mode doctor --markdown       Redacted report to paste into an issue
 omarchy-game-mode doctor --json           The same report for tools
+omarchy-game-mode doctor --timeout 3      No check gets more than 3 seconds
 omarchy-game-mode doctor buttons          Guided button test (see below)
 ```
 

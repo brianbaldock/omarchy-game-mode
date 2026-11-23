@@ -410,7 +410,7 @@ def resolve(ctx: Context, host: str, family: int = socket.AF_INET, timeout: floa
     check_cancelled()
     thread = threading.Thread(target=lookup, name="doctor-dns", daemon=True)
     thread.start()
-    thread.join(timeout)
+    thread.join(time_left(timeout))
     # Lookups are shared between checks: one that was given up on mid-way is not an answer to keep.
     check_cancelled()
     elapsed = round((ctx.monotonic() - started) * 1000)
@@ -724,12 +724,19 @@ def parse_ping(text: str) -> dict[str, Any] | None:
             "rtt_max_ms": float(timing.group(3)) if timing else None}
 
 
+def ping_seconds(longest: int) -> int:
+    """How long a ping may run (its `-w`): at most `longest` seconds, and short enough to print its
+    summary within what is left of the check's time (an explicit --timeout can leave only one second)."""
+    return max(1, min(longest, int(time_left(longest + 1.0) - 0.5)))
+
+
 def check_gateway_loss(ctx: Context) -> Outcome:
     defaults = default_routes(ctx)
     if not defaults or not defaults[0].gateway:
         return skip("No default gateway to probe.")
-    result = ctx.command(["ping", "-4", "-n", "-q", "-c", "20", "-i", "0.2", "-W", "1", "-w", "7",
-                          defaults[0].gateway_address], 9)
+    seconds = ping_seconds(7)
+    result = ctx.command(["ping", "-4", "-n", "-q", "-c", str(min(20, 5 * seconds)), "-i", "0.2", "-W", "1",
+                          "-w", str(seconds), defaults[0].gateway_address], seconds + 2)
     if result.error == "not-found":
         return skip("The ping tool is not installed.")
     stats = parse_ping(result.stdout)
@@ -766,8 +773,9 @@ def check_mtu_interface(ctx: Context) -> Outcome:
 
 def _ping_size(ctx: Context, address: str, size: int) -> bool | None:
     """Whether `size`-byte pings got through unfragmented; None when the probe produced no result."""
-    result = ctx.command(["ping", "-4", "-n", "-q", "-c", "2", "-i", "0.2", "-W", "1", "-w", "3", "-M", "do",
-                          "-s", str(size), address], 5)
+    seconds = ping_seconds(3)
+    result = ctx.command(["ping", "-4", "-n", "-q", "-c", "2", "-i", "0.2", "-W", "1", "-w", str(seconds), "-M", "do",
+                          "-s", str(size), address], seconds + 2)
     stats = None if result.error else parse_ping(result.stdout)
     return None if stats is None else bool(stats["received"])
 

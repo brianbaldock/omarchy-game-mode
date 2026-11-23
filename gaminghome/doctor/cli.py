@@ -36,6 +36,7 @@ from .report import environment, render_json, render_markdown, render_text
 from .runner import run_checks
 
 OVERALL_DEADLINE_S = 45.0
+CHECK_TIMEOUT_S = 6.0
 # What an error message may still name: a long option or a single-letter short one.
 _OPTION_NAME = re.compile(r"--[a-z][a-z-]{0,30}|-[A-Za-z]")
 # argparse messages that end with the rejected value.
@@ -136,8 +137,9 @@ def build_parser(stdout: IO[str], stderr: IO[str]) -> argparse.ArgumentParser:
                         help="also probe this one private address (your console on the home network)")
     parser.add_argument("--interface", metavar="IFACE", type=_interface,
                         help="Wi-Fi interface to inspect (default: the one carrying the default route)")
-    parser.add_argument("--timeout", metavar="SECONDS", type=_timeout, default=6.0,
-                        help="time limit per check, 1-60 (default: 6)")
+    parser.add_argument("--timeout", metavar="SECONDS", type=_timeout,
+                        help="time limit for every check, 1-60 (default: 6, and up to 11 for the gateway and "
+                             "path MTU pings)")
     parser.add_argument("--no-redact", action="store_true",
                         help="show IP addresses in full for local debugging; never for sharing")
     return parser
@@ -172,7 +174,8 @@ def diagnose(ctx: Context) -> Report:
     """Run the plan for `ctx.options` and return the raw (not yet redacted) report."""
     options = ctx.options
     started_wall, started = ctx.wall_time(), ctx.monotonic()
-    results = run_checks(plan(options), ctx, timeout=options.timeout, deadline=OVERALL_DEADLINE_S)
+    results = run_checks(plan(options), ctx, timeout=options.timeout or CHECK_TIMEOUT_S, cap=options.timeout,
+                         deadline=OVERALL_DEADLINE_S)
     privacy = {"redacted": options.redact, "addresses_masked": options.redact, "root_used": False,
                "tokens_read": False, "accounts_read": False, "cookies_read": False, "browser_profiles_read": False,
                "lan_discovery": False, "console_address_probed": bool(options.console_ip)}

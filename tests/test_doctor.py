@@ -466,6 +466,15 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("timed out after 0.05 s", results[0].detail)
         self.assertEqual(results[0].evidence, {"reason": "timeout"})
 
+    def test_an_explicit_timeout_caps_a_check_that_normally_gets_longer(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        stuck = self.check("stuck", lambda _c: release.wait(5) and model.ok("late"), timeout=11)
+        started = time.monotonic()
+        result = runner.run_checks([stuck], None, timeout=6, cap=0.05)[0]
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertEqual((result.status, result.detail), (Status.SKIP, "timed out after 0.05 s; result unknown"))
+
     def test_an_abandoned_check_is_told_to_stop_and_starts_nothing_new(self):
         finished = {name: threading.Event() for name in ("loop", "probes", "late")}
         commands = FakeCommands({("iw", "dev"): "x"})
@@ -1491,6 +1500,20 @@ class PingTest(NetCase):
             self.assertEqual(outcome.status, status, output)
         self.assertEqual(net.check_gateway_loss(self.ctx(self.FILES)).status, Status.SKIP)
         self.assertEqual(net.check_gateway_loss(self.ctx({})).status, Status.SKIP)
+
+    def test_an_explicit_timeout_bounds_the_gateway_ping(self):
+        calls = []
+
+        def run(argv, timeout):
+            calls.append((argv[argv.index("-c") + 1], argv[argv.index("-w") + 1], timeout))
+            return CommandResult(tuple(argv), 0, PING_CLEAN)
+        ctx = self.ctx(self.FILES, run=run, which=lambda name: f"/usr/bin/{name}")
+        gateway = [check for check in checks.plan(Options()) if check.id == "wifi.loss_gateway"]
+        for cap, expected in ((None, ("20", "7", 9.0)), (1.0, ("5", "1", 1.0)), (3.0, ("10", "2", 3.0))):
+            calls.clear()
+            # A clock that stands still: the ping gets exactly what the check's limit leaves.
+            result = runner.run_checks(gateway, ctx, cap=cap, monotonic=lambda: 100.0)[0]
+            self.assertEqual((result.status, calls), (Status.PASS, [expected]), cap)
 
     def test_path_mtu_probe(self):
         cases = [(1, 1, Status.PASS), (1, 0, Status.WARN), (0, 0, Status.SKIP)]
@@ -2576,7 +2599,7 @@ class CliTest(CliCase):
     def test_default_run_is_text_for_all_scopes_and_warnings_do_not_fail(self):
         code, out, err = self.run_cli()
         self.assertEqual((code, err), (0, ""))
-        self.assertEqual(self.contexts[0].options, Options(scope="all", timeout=6.0, redact=True))
+        self.assertEqual(self.contexts[0].options, Options(scope="all", timeout=None, redact=True))
         for marker in ("[PASS]", "[WARN]", "[SKIP]", "[INFO]"):
             self.assertIn(marker, out)
         self.assertNotIn("[FAIL]", out)
@@ -2647,6 +2670,26 @@ class CliTest(CliCase):
                                         "wlp3s0", "--json")
         self.assertEqual(code, 0)
         self.assertEqual(self.contexts[0].options, Options("streaming", 9.0, CONSOLE_IP, "wlp3s0", True))
+
+    def test_an_explicit_timeout_caps_even_the_longer_checks(self):
+        gateway = [check for check in checks.plan(Options()) if check.id == "wifi.loss_gateway"]
+        for argv, count, seconds, longest in ((["--timeout", "1"], "5", "1", 1.0), ([], "20", "7", 9.0)):
+            calls = []
+
+            def run(command, timeout):
+                calls.append((command[command.index("-c") + 1], command[command.index("-w") + 1], timeout))
+                return CommandResult(tuple(command), 0, PING_CLEAN)
+
+            def factory(options):
+                ctx = self.world(options)
+                ctx.run, ctx.which = run, lambda name: f"/usr/bin/{name}"
+                return ctx
+            with mock.patch.object(cli, "plan", return_value=gateway):
+                code = cli.main(["streaming", "--json", *argv], stdout=io.StringIO(), stderr=io.StringIO(),
+                                context_factory=factory)
+            self.assertEqual((code, [call[:2] for call in calls]), (0, [(count, seconds)]), argv)
+            self.assertLessEqual(calls[0][2], longest)
+            self.assertGreater(calls[0][2], longest - 0.5)
 
     def test_interrupt_and_closed_pipe_are_not_tracebacks(self):
         def interrupted(_options):

@@ -133,7 +133,7 @@ def ending_signals_ignored() -> Iterator[None]:
 @dataclass(frozen=True)
 class Options:
     scope: str = "all"
-    timeout: float = 6.0
+    timeout: float | None = None  # an explicit --timeout: every check's limit, and a cap on the longer ones
     console_ip: str = ""
     interface: str = ""
     redact: bool = True

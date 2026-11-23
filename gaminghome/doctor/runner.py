@@ -174,12 +174,21 @@ def _execute(check: Check, ctx: Any, budget: Budget | None = None) -> Outcome:
 
 
 def run_checks(checks: Sequence[Check], ctx: Any, *, timeout: float = 6.0, deadline: float = 45.0,
-               workers: int = 8, monotonic: Callable[[], float] = time.monotonic) -> list[CheckResult]:
-    """Run every check; results come back in the order the checks were given."""
+               workers: int = 8, monotonic: Callable[[], float] = time.monotonic,
+               cap: float | None = None) -> list[CheckResult]:
+    """Run every check; results come back in the order the checks were given.
+
+    Each check gets its own time limit, or `timeout` when it has none, and never more than
+    `cap` (an explicit `--timeout`), whatever it would normally take.
+    """
     tasks = [_Task(check) for check in checks]
     pending = collections.deque(tasks)
     changed = threading.Condition()
     overall = monotonic() + deadline
+
+    def limit_of(check: Check) -> float:
+        own = check.timeout if check.timeout is not None else timeout
+        return own if cap is None else min(own, cap)
 
     def worker() -> None:
         while True:
@@ -188,8 +197,7 @@ def run_checks(checks: Sequence[Check], ctx: Any, *, timeout: float = 6.0, deadl
                     return
                 task = pending.popleft()
                 task.state, task.started = _RUNNING, monotonic()
-                limit = task.check.timeout if task.check.timeout is not None else timeout
-                task.budget = Budget(min(task.started + limit, overall), monotonic)
+                task.budget = Budget(min(task.started + limit_of(task.check), overall), monotonic)
                 changed.notify_all()
             outcome = _execute(task.check, ctx, task.budget)
             with changed:
@@ -226,10 +234,11 @@ def run_checks(checks: Sequence[Check], ctx: Any, *, timeout: float = 6.0, deadl
                 for task in tasks:
                     if task.state != _RUNNING:
                         continue
-                    limit = task.check.timeout if task.check.timeout is not None else timeout
+                    limit = limit_of(task.check)
                     if now >= task.started + limit:
                         abandon(task, now, f"timed out after {limit:g} s; result unknown")
                         spawn()
+                        wake = now  # look again at once: that may have been the last check
                     else:
                         wake = min(wake, task.started + limit)
                 changed.wait(max(0.0, wake - monotonic()))
