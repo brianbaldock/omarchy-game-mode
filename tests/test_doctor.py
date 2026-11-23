@@ -15,9 +15,11 @@ import struct
 import subprocess
 import sys
 import threading
+import termios
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from gaminghome.doctor import (browser, buttons, buttonsio, checks, cli, console, context, devices, evdev, firewall,
                                hid, inputstack, model, net, redact, report, runner, stun, system, udp, wifi)
@@ -3076,6 +3078,38 @@ class ButtonSessionTest(unittest.TestCase):
         self.assertEqual(buttons.outcome(results["paddle_left"]), "recorded")
 
 
+class ButtonLimitTest(unittest.TestCase):
+    def test_a_flood_of_codes_is_recorded_only_up_to_the_limits(self):
+        flood = [event for code in range(1, 301) for event in key(code, hold=0.05)]
+        results, _source, recorder = run_session({"paddle_left": flood}, controls=only("paddle_left"))
+        self.assertEqual(len(results["paddle_left"].observations), buttons.OBSERVATIONS_PER_PROMPT)
+        self.assertEqual(len(recorder.lines), buttons.OBSERVATIONS_PER_PROMPT + 2)
+        with mock.patch.object(buttons, "OBSERVATIONS_TOTAL", 300):
+            results, _source, _recorder = run_session({"paddle_left": flood, "paddle_right": flood},
+                                                      controls=only("paddle_left", "paddle_right"))
+        self.assertEqual([len(results[name].observations) for name in ("paddle_left", "paddle_right")], [256, 44])
+
+    def test_raw_report_decoding_is_bounded(self):
+        watcher = hid.RawWatcher(hid.parse_report_descriptor(ALLY_REPORT_DESCRIPTOR))
+        started = time.perf_counter()
+        watcher.feed(bytes([0x0B]) + bytes(4095))
+        found = []
+        for _round in range(20):
+            batch = watcher.feed(bytes([0x0B]) + b"\xff" * 4095)
+            self.assertLessEqual(len(batch), hid.MAX_BITS_PER_REPORT)
+            found += batch
+        self.assertEqual(len(found), hid.MAX_BITS_TOTAL)
+        self.assertTrue(all(bit.bit < 8 * hid.MAX_REPORT_BYTES for bit in found))
+        others = hid.RawWatcher(hid.parse_report_descriptor(ALLY_REPORT_DESCRIPTOR))
+        padding = bytearray(15)
+        padding[110 // 8] = 1 << 110 % 8  # the padding bit after the Ally's 14 buttons
+        for number in range(256):
+            others.feed(bytes([number]) + bytes(15))
+        changed = {bit.report_id for number in range(256) for bit in others.feed(bytes([number]) + padding)}
+        self.assertEqual(len(changed), hid.MAX_REPORT_IDS)
+        self.assertLess(time.perf_counter() - started, 0.5)
+
+
 class ButtonVerdictTest(unittest.TestCase):
     def verdicts(self, script, devices=(RAW_PAD, NKEY_KEYS), primary=RAW_PAD, **kw):
         results, _source, _recorder = run_session(script, **kw)
@@ -3553,6 +3587,59 @@ class ButtonCommandTest(InputCase):
             for canary in (CANARY_PAD_SERIAL, CANARY_SUFFIX, CANARY_HOME, CANARY_USER):
                 self.assertNotIn(canary, err, argument)
             self.assertIn("error: --device", err)
+
+    def terminal(self):
+        """A pseudo-terminal standing in for the one the test runs in, and a file standing in for a HID node."""
+        leader, follower = os.openpty()
+        self.addCleanup(os.close, leader)
+        self.addCleanup(os.close, follower)
+        return follower, str(write(SCRATCH / "hidraw-stand-in"))
+
+    def test_a_signal_ends_the_test_with_the_terminal_restored_and_every_node_closed(self):
+        if threading.current_thread() is not threading.main_thread():
+            self.skipTest("signal handlers can only be installed in the main thread")
+        handlers = {number: signal.getsignal(number) for number in buttonsio.ENDING_SIGNALS}
+        # A signal this process was started with ignored stays ignored, by design: nothing to test then.
+        for number in [number for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+                       if handlers[number] is not signal.SIG_IGN]:
+            ctx = self.device_ctx()
+            follower, raw_path = self.terminal()
+            before, opened = termios.tcgetattr(follower), []
+
+            class Signalled(buttonsio.LiveSource):
+                def poll(self, _timeout):
+                    os.kill(os.getpid(), number)
+                    time.sleep(0.5)
+                    raise AssertionError("the signal did not end the test")
+
+            def factory(_selection, _raw):
+                opened.append(Signalled([], raw_path, follower))
+                self.assertFalse(termios.tcgetattr(follower)[3] & termios.ECHO)
+                return opened[-1]
+            err = io.StringIO()
+            code = buttonsio.main([], io.StringIO(), err, ctx=ctx, stdin=io.StringIO(),
+                                  is_terminal=lambda _stream: True, source_factory=factory)
+            self.assertEqual(code, 128 + number)
+            self.assertIn(f"Stopped by {signal.Signals(number).name}; the terminal was restored.", err.getvalue())
+            self.assertEqual(termios.tcgetattr(follower), before)
+            self.assertEqual(opened[0]._raw_fd, -1)
+            self.assertEqual({number: signal.getsignal(number) for number in handlers}, handlers)
+
+    def test_closing_carries_on_when_the_terminal_is_already_gone(self):
+        follower, raw_path = self.terminal()
+        source = buttonsio.LiveSource([], raw_path, follower)
+        raw = source._raw_fd
+        with mock.patch.object(buttonsio.termios, "tcsetattr", side_effect=termios.error(5, "Input/output error")):
+            source.close()
+        with self.assertRaises(OSError):
+            os.fstat(raw)
+        steps = []
+
+        def interrupted():
+            raise KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            buttonsio.run_every(lambda: steps.append(1), interrupted, lambda: steps.append(3))
+        self.assertEqual(steps, [1, 3])
 
     def test_event_reader_parses_kernel_events_and_survives_a_node_that_is_not_evdev(self):
         read_end, write_end = os.pipe()

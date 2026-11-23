@@ -4,8 +4,9 @@ Device nodes are opened O_RDONLY|O_NONBLOCK and only read. There is no EVIOCGRAB
 no write and no uinput, so every other program (Steam, games, input daemons) keeps
 receiving the same events, the Guide button included. Raw HID reads (`--raw`) are
 the same: read-only, and skipped without a word when the node is not readable.
-Everything that was opened is closed, and the terminal mode restored, on exit and
-on Ctrl-C.
+Everything that was opened is closed, and the terminal mode restored, on exit, on
+Ctrl-C and when the test is ended by SIGTERM or a hang-up: those signals are turned
+into an exception for the duration of the test, so the clean-up always runs.
 
 Everything this command prints, prompts included, goes through the redactor: a
 controller's name is free text and can hold a serial number or an address.
@@ -14,17 +15,20 @@ controller's name is free text and can hold a serial number or an address.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import os
 import re
 import select
+import signal
 import struct
 import sys
 import termios
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import IO, Any, Callable, Sequence
+from typing import IO, Any, Callable, Iterator, Sequence
 
 from . import buttons, evdev, hid
 from .buttons import AxisInfo, Control, ControlResult, Event, Observation
@@ -49,6 +53,74 @@ UNREADABLE = {"hidden": "an input daemon hides it (mode 000)",
               "missing": "it has no device node"}
 NOT_A_TERMINAL = ("omarchy-game-mode doctor buttons is interactive: run it in a terminal. With --json or --markdown "
                   "the prompts go to stderr, so the report itself can be redirected.\n")
+
+
+ENDING_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+class NotOpened(Exception):
+    """A node or the terminal could not be opened; the message is a short reason, never a path."""
+
+
+class Interrupted(KeyboardInterrupt):
+    """A signal ended the test; raised in place of the signal's default action, so clean-up runs."""
+
+    def __init__(self, number: int):
+        super().__init__(number)
+        self.number = number
+
+
+@contextlib.contextmanager
+def ending_signals_raise() -> Iterator[None]:
+    """While inside, SIGINT, SIGTERM and SIGHUP raise `Interrupted` instead of killing the process.
+
+    A signal the process was started with ignored stays ignored. Outside the main thread,
+    where Python cannot install handlers, nothing changes.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def interrupt(number: int, _frame: Any) -> None:
+        raise Interrupted(number)
+
+    previous = {}
+    try:
+        for number in ENDING_SIGNALS:
+            if signal.getsignal(number) is not signal.SIG_IGN:
+                previous[number] = signal.signal(number, interrupt)
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
+@contextlib.contextmanager
+def ending_signals_held() -> Iterator[None]:
+    """Hold the ending signals back for a moment; one that arrived meanwhile is handled on the way out."""
+    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, ENDING_SIGNALS)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+
+
+def run_every(*steps: Callable[[], Any]) -> None:
+    """Run every clean-up step even when one fails.
+
+    A terminal or node that is already gone (an error from termios or the OS) is expected and
+    ignored; anything else, such as a second Ctrl-C, is raised once every step has run.
+    """
+    pending: BaseException | None = None
+    for step in steps:
+        try:
+            step()
+        except (OSError, termios.error):
+            pass
+        except BaseException as exc:  # noqa: BLE001 - re-raised below, after the remaining steps
+            pending = pending or exc
+    if pending is not None:
+        raise pending
 
 
 class Scrubbed:
@@ -266,7 +338,11 @@ class LiveSource:
                 os.close(self._raw_fd)
                 self._raw_fd = -1
         if self._stdin in ready:
-            for byte in os.read(self._stdin, 64) or b"q":
+            try:
+                typed = os.read(self._stdin, 64) or b"q"
+            except OSError:  # the terminal hung up
+                typed = b"q"
+            for byte in typed:
                 if byte in QUIT_KEYS:
                     events.append(Event("quit"))
                 elif byte in SKIP_KEYS:
@@ -274,15 +350,17 @@ class LiveSource:
         return events
 
     def close(self) -> None:
-        if self._saved is not None:
-            termios.tcsetattr(self._stdin, termios.TCSADRAIN, self._saved)
-            self._saved = None
-        for reader in self._readers:
-            reader.close()
-        self._readers = []
-        if self._raw_fd >= 0:
-            os.close(self._raw_fd)
-            self._raw_fd = -1
+        """Restore the terminal and close every node; a step that fails never skips the others."""
+        saved, self._saved = self._saved, None
+        readers, self._readers = self._readers, []
+        raw, self._raw_fd = self._raw_fd, -1
+        steps: list[Callable[[], Any]] = []
+        if saved is not None:
+            steps.append(lambda: termios.tcsetattr(self._stdin, termios.TCSADRAIN, saved))
+        steps += [reader.close for reader in readers]
+        if raw >= 0:
+            steps.append(lambda: os.close(raw))
+        run_every(*steps)
 
 
 class Console(buttons.Listener):
@@ -460,6 +538,28 @@ def _raw_info(node: RawNode | None, results: Sequence[ControlResult], requested:
     return {"status": "watched", **summary, "undeclared_changes": changes}
 
 
+def _run_session(selection: Selection, raw_node: RawNode | None, args: argparse.Namespace, prompts: IO[str],
+                 stdin: Any, source_factory: Callable[[Selection, RawNode | None], Any] | None) -> list[ControlResult]:
+    """Open the nodes, ask for every control and close everything again, whatever happens in between."""
+    source = None
+    try:
+        # A signal that arrives while the terminal changes mode is handled once `source` can be closed.
+        with ending_signals_held():
+            try:
+                source = (source_factory(selection, raw_node) if source_factory
+                          else LiveSource(selection.watched, raw_node.path if raw_node else "", stdin.fileno()))
+            except (OSError, termios.error) as exc:
+                raise NotOpened(_reason(exc)) from None
+        tracker = buttons.Tracker(source.keys_down(), source.axes())
+        session = buttons.Session(source, tracker, source.clock, timeout=args.timeout,
+                                  watcher=hid.RawWatcher(raw_node.fields) if raw_node else None,
+                                  listener=Console(prompts, selection.watched, args.timeout))
+        return session.run()
+    finally:
+        if source is not None:
+            source.close()
+
+
 def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str], *, ctx: Context | None = None,
          stdin: Any = None, is_terminal: Callable[[Any], bool] = _is_terminal,
          source_factory: Callable[[Selection, RawNode | None], Any] | None = None) -> int:
@@ -498,19 +598,15 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str], *, ctx: Context 
     raw_node = find_raw_node(ctx, selection) if args.raw else None
     started = ctx.wall_time()
     try:
-        source = (source_factory(selection, raw_node) if source_factory
-                  else LiveSource(selection.watched, raw_node.path if raw_node else "", stdin.fileno()))
-    except (OSError, termios.error) as exc:
-        stderr.write(f"omarchy-game-mode doctor buttons: could not open the controller for reading: {_reason(exc)}\n")
+        with ending_signals_raise():
+            results = _run_session(selection, raw_node, args, prompts, stdin, source_factory)
+    except Interrupted as stop:
+        with contextlib.suppress(OSError, ValueError):
+            stderr.write(f"\nStopped by {signal.Signals(stop.number).name}; the terminal was restored.\n")
+        return 128 + stop.number
+    except NotOpened as exc:
+        stderr.write(f"omarchy-game-mode doctor buttons: could not open the controller for reading: {exc}\n")
         return 1
-    try:
-        tracker = buttons.Tracker(source.keys_down(), source.axes())
-        session = buttons.Session(source, tracker, source.clock, timeout=args.timeout,
-                                  watcher=hid.RawWatcher(raw_node.fields) if raw_node else None,
-                                  listener=Console(prompts, selection.watched, args.timeout))
-        results = session.run()
-    finally:
-        source.close()
     report = build_report(ctx, selection, results, _raw_info(raw_node, results, args.raw), started)
     style = "json" if args.json else "markdown" if args.markdown else "text"
     emit(stdout, render(report, ctx.redactor, style, text=render_text, markdown=render_markdown))

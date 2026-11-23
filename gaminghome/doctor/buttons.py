@@ -32,6 +32,9 @@ SETTLE_SECONDS = 0.25
 HOLD_SECONDS = 2.5
 # A mapper can turn a controller button into Enter; a key that follows an input this closely is not the user.
 SKIP_GUARD_SECONDS = 0.4
+# What one test run records, at most: a real press brings a handful of codes, a flood of events does not grow
+# the report (or what is printed during the test) without bound.
+OBSERVATIONS_PER_PROMPT, OBSERVATIONS_TOTAL = 256, 2048
 
 
 @dataclass(frozen=True)
@@ -216,6 +219,8 @@ class Session:
         self.timeout, self.controls, self.watcher = timeout, controls, watcher
         self.listener = listener or Listener()
         self._last_input = float("-inf")
+        self._recorded = 0
+        self._noted: set[Observation] = set()
 
     def run(self) -> list[ControlResult]:
         """Ask for every control in turn. A quit leaves the remaining ones `not tested`."""
@@ -232,6 +237,7 @@ class Session:
 
     def _ask(self, index: int, control: Control) -> tuple[ControlResult, bool]:
         result = ControlResult(control)
+        self._noted = set()
         self.source.begin_prompt(control)
         self.listener.prompt(index, len(self.controls), control)
         limit = self.clock() + self.timeout
@@ -257,21 +263,30 @@ class Session:
         result.status = OBSERVED if seen else TIMEOUT
         return result, False
 
+    def _room(self, result: ControlResult) -> int:
+        """How many more observations this prompt may record."""
+        used = len(result.observations) + len(result.raw_bits)
+        return max(0, min(OBSERVATIONS_PER_PROMPT - used, OBSERVATIONS_TOTAL - self._recorded))
+
     def _record(self, event: Event, result: ControlResult) -> bool:
         """Store what an event adds to this control's result; True when it added something."""
         if event.kind == "raw":
-            bits = self.watcher.feed(event.data) if self.watcher else []
+            bits = (self.watcher.feed(event.data) if self.watcher else [])[:self._room(result)]
             for bit in bits:
                 result.raw_bits.append(bit)
                 self.listener.raw(result.control, bit)
+            self._recorded += len(bits)
             return bool(bits)
         if event.kind != "input":
             return False
         self._last_input = self.clock()
+        # The tracker sees every event, so a press past the limit still keeps its state right.
         observation = self.tracker.feed(event.device, event.type, event.code, event.value)
-        if observation is None or observation in result.observations:
+        if observation is None or observation in self._noted or not self._room(result):
             return False
+        self._noted.add(observation)
         result.observations.append(observation)
+        self._recorded += 1
         self.listener.observed(result.control, observation)
         return True
 

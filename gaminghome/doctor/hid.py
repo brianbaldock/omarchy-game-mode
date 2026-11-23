@@ -17,6 +17,12 @@ _USAGE_PAGE, _REPORT_SIZE, _REPORT_ID, _REPORT_COUNT, _PUSH, _POP = 0x0, 0x7, 0x
 _USAGE, _USAGE_MIN, _USAGE_MAX = 0x0, 0x1, 0x2
 _CONSTANT = 0x01
 MAX_REPORT_BITS = 8 * 4096
+# Bounds on what one raw report costs to decode and what one test run keeps: real gamepad reports
+# are tens of bytes, and a handful of undeclared bits is already the finding.
+MAX_REPORT_BYTES = 512
+MAX_REPORT_IDS = 16
+MAX_BITS_PER_REPORT = 32
+MAX_BITS_TOTAL = 256
 
 
 @dataclass(frozen=True)
@@ -124,15 +130,23 @@ def describe_bit(fields: list[Field], report_id: int, bit: int) -> str:
 
 @dataclass
 class RawWatcher:
-    """Reports bits that change although the descriptor says they carry nothing."""
+    """Reports bits that change although the descriptor says they carry nothing.
+
+    Decoding is bounded: the first MAX_REPORT_BYTES of a report, MAX_REPORT_IDS report ids,
+    MAX_BITS_PER_REPORT new bits per report and MAX_BITS_TOTAL over the whole test.
+    """
 
     fields: list[Field]
-    _baseline: dict[int, bytes] = field(default_factory=dict)
+    _baseline: dict[int, tuple[int, int]] = field(default_factory=dict)
     _seen: set[tuple[int, int]] = field(default_factory=set)
+    _declared: dict[int, int] = field(default_factory=dict)
 
-    def _declared(self, report_id: int, bit: int) -> bool:
-        return any(not item.constant and item.offset <= bit < item.offset + item.bits
-                   for item in self.fields if item.report_id == report_id)
+    def _declared_mask(self, report_id: int) -> int:
+        """The bits of a report that the descriptor declares as data, as one integer."""
+        if report_id not in self._declared:
+            self._declared[report_id] = sum(((1 << item.bits) - 1) << item.offset for item in self.fields
+                                            if item.report_id == report_id and not item.constant)
+        return self._declared[report_id]
 
     def feed(self, report: bytes) -> list[UndeclaredBit]:
         """Undeclared bits of `report` that differ from the first report seen, each reported once."""
@@ -140,19 +154,24 @@ class RawWatcher:
             return []
         numbered = uses_report_ids(self.fields)
         report_id, payload = (report[0], report[1:]) if numbered else (0, report)
-        baseline = self._baseline.setdefault(report_id, payload)
-        found = []
-        for index, (now, before) in enumerate(zip(payload, baseline)):
-            changed = now ^ before
-            position = 0
-            while changed:
-                if changed & 1:
-                    bit = index * 8 + position
-                    if not self._declared(report_id, bit) and (report_id, bit) not in self._seen:
-                        self._seen.add((report_id, bit))
-                        found.append(UndeclaredBit(report_id, bit, describe_bit(self.fields, report_id, bit)))
-                changed >>= 1
-                position += 1
+        payload = payload[:MAX_REPORT_BYTES]
+        # Bit n of the report is bit n of this little-endian number, as in the descriptor's offsets.
+        value = int.from_bytes(payload, "little")
+        if report_id not in self._baseline:
+            if len(self._baseline) < MAX_REPORT_IDS:
+                self._baseline[report_id] = (value, len(payload))
+            return []
+        baseline, size = self._baseline[report_id]
+        compared = (1 << 8 * min(size, len(payload))) - 1
+        changed = (value ^ baseline) & compared & ~self._declared_mask(report_id)
+        found: list[UndeclaredBit] = []
+        while changed and len(found) < MAX_BITS_PER_REPORT and len(self._seen) < MAX_BITS_TOTAL:
+            lowest = changed & -changed
+            changed ^= lowest
+            bit = lowest.bit_length() - 1
+            if (report_id, bit) not in self._seen:
+                self._seen.add((report_id, bit))
+                found.append(UndeclaredBit(report_id, bit, describe_bit(self.fields, report_id, bit)))
         return found
 
     def summary(self) -> dict[str, int]:
