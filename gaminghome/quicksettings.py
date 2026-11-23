@@ -215,7 +215,7 @@ class GioSystemBus:
         value: Any,
     ):
         self._ensure()
-        variant = self._glib.Variant(signature, (value,))
+        variant = self._glib.Variant(signature, value)
         parameters = self._glib.Variant("(ssv)", (interface, property_name, variant))
         self._connection.call_sync(
             name,
@@ -1044,10 +1044,9 @@ class QuickSettings:
             if value is not None:
                 return _failed("release_hold does not accept a value")
             return self.power.release_profile()
-        confirmed = confirm is True or value is True
-        if value not in (None, True, False):
+        if value is not None:
             return _failed("Power actions do not accept a value")
-        return self.power_actions.perform(action, confirm=confirmed)
+        return self.power_actions.perform(action, confirm=confirm is True)
 
     def _hold_performance(self, value: Any) -> dict[str, Any]:
         if value is None:

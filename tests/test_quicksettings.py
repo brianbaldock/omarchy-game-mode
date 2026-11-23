@@ -1,6 +1,8 @@
+import io
 import json
 import math
 import unittest
+from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -224,6 +226,36 @@ class BatteryTest(unittest.TestCase):
         self.assertFalse(status["charge_limit_writable"])
         self.assertFalse(battery.set_charge_limit(80)["ok"])
         self.assertEqual(self.bus.sets, [])
+
+
+class GioSystemBusTest(unittest.TestCase):
+    def test_set_property_constructs_scalar_variant_without_a_bus_call(self):
+        from gi.repository import Gio, GLib
+
+        class Connection:
+            def __init__(self):
+                self.arguments = None
+
+            def call_sync(self, *arguments):
+                self.arguments = arguments
+
+        for signature, expected in (("s", "balanced"), ("y", 80)):
+            with self.subTest(signature=signature):
+                connection = Connection()
+                bus = quick.GioSystemBus()
+                bus._connection = connection
+                bus._gio, bus._glib = Gio, GLib
+                bus.set_property(
+                    "service",
+                    "/path",
+                    "interface",
+                    "Property",
+                    signature,
+                    expected,
+                )
+                parameters = connection.arguments[4]
+                value = parameters.get_child_value(2).get_variant()
+                self.assertEqual(value.unpack(), expected)
 
 
 class BrightnessTest(unittest.TestCase):
@@ -457,6 +489,7 @@ class AggregatorTest(unittest.TestCase):
             ("unknown", None),
             ("mute", "yes"),
             ("release_hold", "cookie"),
+            ("suspend", True),
             ("suspend", {"confirm": True}),
             ("hold_performance", {"reason": "x", "extra": "y"}),
         ):
@@ -530,6 +563,33 @@ class RuntimeQuickTest(unittest.TestCase):
             self.assertIs(runtime.quick, sentinel)
             self.assertIs(runtime.quick, sentinel)
         constructor.assert_called_once_with()
+
+    def test_main_quick_answers_without_registering_a_resident_application(self):
+        from gaminghome.application import main
+
+        class LocalOnlyApplication:
+            def __init__(self):
+                self.registered = False
+                self.arguments = None
+
+            def register(self, _cancellable):
+                self.registered = True
+
+            def dispatch(self, arguments):
+                self.arguments = arguments
+                return 0, '{"battery":{"percentage":80}}'
+
+            def get_is_remote(self):
+                raise AssertionError("quick should not inspect the resident application")
+
+        application = LocalOnlyApplication()
+        output = io.StringIO()
+        with patch("gaminghome.application.GameModeApplication", return_value=application):
+            with redirect_stdout(output):
+                self.assertEqual(main(["omarchy-game-mode", "quick", "status"]), 0)
+        self.assertFalse(application.registered)
+        self.assertEqual(application.arguments, ["quick", "status"])
+        self.assertIn('"percentage":80', output.getvalue())
 
 
 if __name__ == "__main__":
