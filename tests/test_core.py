@@ -1,5 +1,6 @@
 import json
 import shutil
+import time
 import unittest
 from pathlib import Path
 
@@ -612,66 +613,68 @@ class CatalogTest(unittest.TestCase):
         # While a stream runs, the window title is the game's name: only the class tells what it is.
         model = core.HomeModel(core.Classifier(load_catalog(DATA / "catalog.json")))
         model.ipc_restored()
-        for cls in ("chrome-www.xbox.com__en-US_play-Default", "chrome-www.xbox.com__de-DE_play-Default",
-                    "msedge-www.xbox.com__fr-FR_play-Default", "chromium-www.xbox.com__pt-BR_play-Profile_1",
-                    "chrome-www.xbox.com__es-419_play_-Default", "chrome-www.xbox.com__play-Default",
-                    "chrome-www.xbox.com__en-US_play_launch_forza-horizon-5_9NKX70BBCDRN-Default"):
+        for cls in ("chrome-www.xbox.com__en-US_play-Default", "chrome-www.xbox.com__fr-FR_play-Default",
+                    "msedge-www.xbox.com__de-DE_play-Default", "chromium-www.xbox.com__ja-JP_play-Profile_1",
+                    "chrome-www.xbox.com__zh-Hans-CN_play-Default", "chrome-www.xbox.com__play-Default",
+                    "msedge-www.xbox.com__play-Profile_1", "CHROMIUM-WWW.XBOX.COM__ES-419_PLAY-DEFAULT"):
             window = W("0x71", cls, "Forza Horizon 5")
             self.assertEqual(model.service(window), "cloud", cls)
             model.update_windows([window], window)
             self.assertEqual(model.desired_mode(), GAME, cls)
-        for cls in ("chrome-www.xbox.com__en-US_consoles_remote-play-Default",      # a product page
+        for cls in ("chrome-support.xbox.com__en-US_help_play-Default", "chrome-support.xbox.com__en-US_play-Default",
+                    "msedge-support.xbox.com__play-Default", "chrome-www.xbox.com__en-US_playground-Default",
+                    "chrome-www.xbox.com__en-US_remoteplay-Default",
+                    "chrome-www.xbox.com__en-US_consoles_remote-play-Default",      # a product page
                     "chrome-www.xbox.com__en-US_games_xbox-play-anywhere-Default",
                     "chrome-www.xbox.com__en-US_xbox-game-pass-Default", "chrome-www.xbox.com__-Default",
-                    "chrome-www.xbox.com__en-US_play-anywhere-Default",
-                    "chrome-www.xbox.com__en-US_playlists-Default",
-                    "chrome-www.xbox.com__en-US_remoteplay-Default", "chrome-www.xbox.com__en-US_play-Default\n",
-                    "chrome-support.xbox.com__en-US_help_play-Default", "notchrome-www.xbox.com__en-US_play-Default",
-                    "chrome-support.xbox.com__en-US_play-Default", "msedge-support.xbox.com__play-Default",
-                    "chrome-www.xbox.com__en-US_support_play-Default", "chrome-www.xbox.com__en-US_play-",
+                    "chrome-www.xbox.com__en-US_playlists-Default", "chrome-www.xbox.com_play-Default",
+                    "notchrome-www.xbox.com__en-US_play-Default", "brave-www.xbox.com__en-US_play-Default",
                     "chrome-www.xbox.com.example.org__en-US_play-Default",
-                    "chrome-www.example.com__en-US_play-Default"):
+                    "chrome-www.example.com__en-US_play-Default",
+                    "chrome-evil.example__www.xbox.com__en-US_play-Default"):
             window = W("0x72", cls, "Forza Horizon 5")
             self.assertIsNone(model.service(window), cls)
             model.update_windows([window], window)
             self.assertEqual(model.desired_mode(), DESKTOP, cls)
 
-    def test_class_patterns_match_a_whole_class_in_any_case(self):
-        entry = parse_entry({**self.BASE, "match": {"patterns": ["app-[0-9]+"]}})
-        self.assertTrue(entry.matches("APP-42", "", ""))
-        self.assertTrue(entry.matches("", "app-7", ""))
-        for cls in ("app-42-helper", "my-app-42", "app-", "app-42\n"):
+    def test_class_glob_finds_its_literal_parts_in_order_in_any_case(self):
+        entry = parse_entry({**self.BASE, "match": {"globs": ["example-app_*_play-*", "example-tool*-end",
+                                                               "Straße-App*", "EXAMPLE-\u0130-APP-*"]}})
+        for cls in ("example-app__play-", "EXAMPLE-APP_en_play-Profile_1", "example-app_a_play_b_play-c",
+                    "example-tool-end", "Example-Tool-x-END", "STRASSE-APP-1", "example-\u0130-app-2"):
+            self.assertTrue(entry.matches(cls, "", ""), cls)
+            self.assertTrue(entry.matches("", cls, ""), cls)
+        for cls in ("my-example-app__play-", "example-app_play-", "example-app__playground-x",
+                    "example-tool-end-2", "example-tool", "example-i-app-3", "example_app__play-"):
             self.assertFalse(entry.matches(cls, "", ""), cls)
 
-    def test_class_pattern_that_fails_or_could_match_slowly_is_ignored_with_one_warning(self):
-        # Checked at load: a pattern never keeps the catalog or its entry from loading, nor stalls matching.
-        for text in ("a{99999999999}", "a{65}", "a{2,65}", "a{65,}",      # repeat counts
-                     "(a+)+", "(.*)*", "(?:a|aa)+", "(a{1,9}){2}",       # repeats of a variable group
-                     ".*.*", "a+b?c*", "x(a*)b*",                        # open-ended repeats in a row
-                     "a?" * 21 + "a" * 21, ".*a" * 4 + "!",              # too many ways to split a class
-                     "app-(", "x" * 201, "", 7, "(a)\\1", "(?=a)"):      # invalid or unsupported
-            with self.subTest(pattern=text):
+    def test_invalid_class_glob_is_ignored_with_one_warning_and_the_entry_kept(self):
+        for glob in (7, ["list"], "", "short*", "*example-app", "example-app" + "*x" * 5,
+                     "example-app-" + "x" * 120):
+            with self.subTest(glob=glob):
                 catalog = parse_catalog({"schemaVersion": 1, "apps": [
-                    {**self.BASE, "match": {"classes": ["x-app"], "patterns": [text, "app-[0-9]+"]}}]})
+                    {**self.BASE, "match": {"classes": ["x-app"], "globs": [glob, "example-app-*"]}}]})
                 self.assertEqual(catalog.ids, ["x"])
                 self.assertEqual(len(catalog.errors), 1, catalog.errors)
-                self.assertTrue(catalog.errors[0].startswith("x: patterns[0] ignored: "), catalog.errors)
-                for cls in ("x-app", "APP-7"):
+                self.assertTrue(catalog.errors[0].startswith("x: globs[0] ignored: "), catalog.errors)
+                for cls in ("x-app", "EXAMPLE-APP-7"):
                     self.assertIs(catalog.match_window(cls, "", ""), catalog.get("x"), cls)
-        catalog = parse_catalog({"schemaVersion": 1, "apps": [{**self.BASE, "match": {"patterns": "app-[0-9]+"}}]})
-        self.assertEqual((catalog.ids, len(catalog.errors)), (["x"], 1))
-        for text in ("(?:ab)+-[a-z]{2,64}", "a*-b+", "(x[a-z]*)?-y+", "[(*+?{]+\\.(?:ab){3}?(c|d)", ".*a" * 3):
-            catalog = parse_catalog({"schemaVersion": 1, "apps": [{**self.BASE, "match": {"patterns": [text]}}]})
-            self.assertEqual(catalog.errors, [], text)
+        for globs, warning in (("example-app-*", "x: globs ignored: "), (["example-app-*"] * 9, "x: globs[8:] ignored: ")):
+            catalog = parse_catalog({"schemaVersion": 1, "apps": [{**self.BASE, "match": {"globs": globs}}]})
+            self.assertEqual((catalog.ids, len(catalog.errors)), (["x"], 1))
+            self.assertTrue(catalog.errors[0].startswith(warning), catalog.errors)
+        catalog = parse_catalog({"schemaVersion": 1, "apps": [
+            {**self.BASE, "match": {"globs": ["abcdefgh*", "abcdefgh*a*b**", "a" * 120]}}]})
+        self.assertEqual(catalog.errors, [])
 
-    def test_catalog_file_with_an_oversized_repeat_count_still_loads(self):
-        SCRATCH.mkdir(parents=True, exist_ok=True)
-        self.addCleanup(shutil.rmtree, SCRATCH, ignore_errors=True)
-        path = SCRATCH / "catalog.json"
-        path.write_text(json.dumps({"schemaVersion": 1, "apps": [
-            {**self.BASE, "match": {"classes": ["x-app"], "patterns": ["x{99999999999}"]}}]}), encoding="utf-8")
-        catalog = load_catalog(path)
-        self.assertEqual((catalog.source, catalog.ids, len(catalog.errors)), (str(path), ["x"], 1))
+    def test_class_globs_match_long_classes_in_linear_time(self):
+        entry = parse_entry({**self.BASE, "match": {"globs": ["chrome-www.xbox.com_*_play-*",
+                                                               "example-app_*_a_*_b_*_c_*-end"]}})
+        started = time.perf_counter()
+        for cls in ("chrome-www.xbox.com_" + "_" * 100_000, "chrome-www.xbox.com_" + "_pla" * 25_000 + "y",
+                    "example-app_" + "_a_b_c" * 17_000 + "-en", "example-app_" + "_a_" * 33_000 + "-end"):
+            self.assertFalse(entry.matches(cls, "", ""))
+        self.assertLess(time.perf_counter() - started, 0.25)
 
 
 class FakeBus:

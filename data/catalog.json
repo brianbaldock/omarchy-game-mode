@@ -100,8 +100,10 @@
           "chrome-www.xbox.com__en-US_play-Default"
         ],
         "prefixes": [],
-        "patterns": [
-          "(chrome|chromium|msedge)-www\\.xbox\\.com__([a-z]{2,3}-[a-z0-9]{2,4}(-[a-z0-9]{2,4})?_)?play(_[a-z0-9_.~%-]*)?-[a-z0-9_ ]+"
+        "globs": [
+          "chrome-www.xbox.com_*_play-*",
+          "chromium-www.xbox.com_*_play-*",
+          "msedge-www.xbox.com_*_play-*"
         ],
         "titleContains": [
           "Xbox Cloud Gaming"
