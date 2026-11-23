@@ -1,20 +1,24 @@
 """ControllerMonitor against a mocked sysfs tree and FIFO event nodes.
 
 No controller, no D-Bus: the virtual-gamepad allowlist is injected, and what
-the kernel would say about an opened node is answered by the fake tree.
+the kernel would say about an opened node is answered by the fake tree, its
+held keys and axes by a fake evdev.
 """
 
+import array
+import errno
 import os
 import shutil
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from gi.repository import Gio
 
-from fakes.fake_input import ELITE, PHYSICAL, STEAM_PAD, UHID, USB, XBOX_360, FakeInputTree
+from fakes.fake_input import ELITE, PHYSICAL, STEAM_PAD, UHID, USB, XBOX_360, FakeEvdev, FakeInputTree
 from fakes.loop import pump
 from gaminghome import core
-from gaminghome.input import EVENT, ControllerMonitor, VirtualGamepads, probe
+from gaminghome.input import EVENT, EVIOCGABS, EVIOCGKEY, KEY_BYTES, ControllerMonitor, VirtualGamepads, probe
 
 SCRATCH = Path(__file__).resolve().parent / "scratch" / "input"
 
@@ -24,6 +28,11 @@ class MonitorCase(unittest.TestCase):
         shutil.rmtree(SCRATCH, ignore_errors=True)
         self.tree = FakeInputTree(SCRATCH)
         self.addCleanup(shutil.rmtree, SCRATCH, True)
+        self.evdev = FakeEvdev(self.tree)
+        self.addCleanup(self.evdev.close)
+        reads = mock.patch("gaminghome.input.fcntl", self.evdev)   # held keys and axes, answered as evdev does
+        reads.start()
+        self.addCleanup(reads.stop)
         self.allow = VirtualGamepads()
         self.actions, self.changes, self.hints = [], [], []
 
@@ -103,7 +112,7 @@ class VirtualGamepadTest(MonitorCase):
             self.assertEqual(self.actions, expected, node)
 
     def test_virtual_pad_keeps_its_state_when_it_cannot_be_read_again(self):
-        # These nodes are FIFOs, so reading what is held fails, as it does on a node that is going away.
+        # Reading what is held fails, as it does on a node that is going away.
         elite, usb = self.tree.add(21, ELITE), self.tree.add(7, PHYSICAL, where=USB)
         self.allow = VirtualGamepads({ELITE: 1})
         monitor = self.monitor()
@@ -117,6 +126,8 @@ class VirtualGamepadTest(MonitorCase):
 
         def read_again(code):
             self.assertTrue(pump(lambda: all(code in monitor.interpreter.devices[node].pressed for node in writers)))
+            for node in writers:
+                self.evdev.fail[(node, EVIOCGKEY(KEY_BYTES))] = errno.ENODEV
             monitor.interpreter.set_nav_enabled(False)
             monitor.interpreter.set_nav_enabled(True)   # focused again: both are read, and the reads fail
 
@@ -221,6 +232,21 @@ class VirtualGamepadTest(MonitorCase):
         self.tree.add(21, ELITE, kernel=STEAM_PAD)   # sysfs still describes the announced pad
         self.allow = VirtualGamepads({ELITE: 1})
         self.assertEqual(self.monitor().status()["devices"], [])
+
+
+class EvdevReadTest(MonitorCase):
+    def test_reading_held_keys_drops_queued_key_events_but_not_axis_events(self):
+        # What evdev does, and what the controller tests rest on.
+        node = self.tree.add(7, PHYSICAL, where=USB)
+        fd = self.monitor().devices[node].fd
+        self.evdev.send(node, (core.EV_KEY, core.BTN_SOUTH, 1), (core.EV_ABS, core.ABS_HAT0X, 1))
+        self.evdev.send(node, (core.EV_KEY, core.BTN_SOUTH, 0))
+        self.evdev.ioctl(fd, EVIOCGABS(core.ABS_HAT0X), array.array("i", [0] * 6))
+        self.assertEqual(self.evdev.unread(fd), 5)
+        keys = bytearray(KEY_BYTES)
+        self.evdev.ioctl(fd, EVIOCGKEY(KEY_BYTES), keys)
+        self.assertEqual(self.evdev.unread(fd), 2)    # the axis event and its SYN_REPORT
+        self.assertEqual(keys, bytearray(KEY_BYTES))  # A was let go again
 
 
 @unittest.skipIf(os.geteuid() == 0, "root can read every node")
