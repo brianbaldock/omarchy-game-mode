@@ -88,6 +88,9 @@ class FileSystem:
         except OSError:
             return None
 
+    def readable(self, absolute: str) -> bool:
+        return os.access(self.path(absolute), os.R_OK)
+
     def resolved(self, absolute: str) -> str:
         """Symlink-free form of a path, expressed below the root again."""
         real = os.path.realpath(self.path(absolute))

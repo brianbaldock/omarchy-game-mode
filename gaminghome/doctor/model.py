@@ -71,7 +71,7 @@ def skip(detail: str, remediation: str = "", **evidence: Any) -> Outcome:
 
 def needs_root(command: str, remediation: str = "", **evidence: Any) -> Outcome:
     """A check only root can answer. The doctor prints the command; it never runs it."""
-    return Outcome(Status.SKIP, f"cannot verify without root - run: {command}", remediation, evidence,
+    return Outcome(Status.SKIP, f"cannot verify without root \u2014 run: {command}", remediation, evidence,
                    root_command=command)
 
 

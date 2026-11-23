@@ -3,6 +3,7 @@
 import collections
 import ipaddress
 import json
+import os
 import shutil
 import socket
 import ssl
@@ -13,7 +14,8 @@ import time
 import unittest
 from pathlib import Path
 
-from gaminghome.doctor import context, model, net, redact, runner, stun, udp
+from gaminghome.doctor import (browser, checks, console, context, devices, evdev, firewall, inputstack, model, net,
+                               redact, runner, stun, system, udp, wifi)
 from gaminghome.doctor.context import CommandResult, Context, FileSystem, Options
 from gaminghome.doctor.model import Status
 from gaminghome.doctor.runner import Check
@@ -141,7 +143,7 @@ class ModelTest(unittest.TestCase):
     def test_needs_root_never_claims_a_result(self):
         outcome = model.needs_root("sudo ufw status numbered verbose")
         self.assertEqual(outcome.status, Status.SKIP)
-        self.assertEqual(outcome.detail, "cannot verify without root - run: sudo ufw status numbered verbose")
+        self.assertEqual(outcome.detail, "cannot verify without root \u2014 run: sudo ufw status numbered verbose")
 
 
 class RedactionTest(unittest.TestCase):
@@ -1078,6 +1080,891 @@ class PingTest(NetCase):
             commands = {pmtu_argv(1200): ping_reply(small), pmtu_argv(1472): ping_reply(large)}
             self.assertEqual(net.check_pmtu(self.ctx(commands=commands)).status, status)
         self.assertEqual(net.check_pmtu(self.ctx()).status, Status.SKIP)
+
+
+# ---- Wi-Fi ------------------------------------------------------------------------
+# Radio facts as captured on the ROG Xbox Ally; the network name and access-point
+# address are replaced by canaries so the real ones are never published.
+
+IW_LINK = (f"Connected to {CANARY_BSSID} (on wlp3s0)\n\tSSID: {CANARY_SSID}\n\tfreq: 5640.0\n\tsignal: -44 dBm\n"
+           "\trx bitrate: 1921.5 MBit/s 160MHz HE-MCS 9 HE-NSS 2 HE-GI 0 HE-DCM 0\n"
+           "\ttx bitrate: 1729.6 MBit/s 160MHz HE-MCS 8 HE-NSS 2 HE-GI 0 HE-DCM 0\n")
+IW_INFO = (f"Interface wlp3s0\n\tifindex 2\n\twdev 0x1\n\taddr {CANARY_MAC}\n\tssid {CANARY_SSID}\n\ttype managed\n"
+           "\twiphy 0\n\tchannel 128 (5640 MHz), width: 160 MHz, center1: 5570 MHz\n\ttxpower 6.00 dBm\n")
+IW_INFO_6GHZ = IW_INFO.replace("channel 128 (5640 MHz), width: 160 MHz, center1: 5570 MHz",
+                               "channel 69 (6295 MHz), width: 160 MHz, center1: 6345 MHz")
+JOURNAL_ARGV = ("journalctl", "-b", "-u", "NetworkManager", "-u", "iwd", "-u", "wpa_supplicant", "--since=-10min",
+                "--no-pager", "-o", "short-unix", "-n", "2000")
+JOURNAL_EVENTS = "\n".join(f"{stamp} {CANARY_HOST} {message}" for stamp, message in (
+    ("1763887000.100000", "NetworkManager[700]: <info>  [1.1] device (wlp3s0): supplicant interface state: "
+                          "completed -> authenticating"),
+    ("1763887000.200000", f"wpa_supplicant[800]: wlp3s0: SME: Trying to authenticate with {CANARY_BSSID} "
+                          f"(SSID='{CANARY_SSID}' freq=5640 MHz)"),
+    ("1763887000.900000", "NetworkManager[700]: <info>  [1.2] device (p2p-dev-wlp3s0): supplicant management "
+                          "interface state: completed -> authenticating"),
+    ("1763887001.500000", f"wpa_supplicant[800]: wlp3s0: CTRL-EVENT-CONNECTED - Connection to {CANARY_BSSID} "
+                          "completed [id=0 id_str=]"),
+    ("1763887100.000000", f"wpa_supplicant[800]: wlp3s0: CTRL-EVENT-DISCONNECTED bssid={CANARY_BSSID} reason=3 "
+                          "locally_generated=1"),
+    ("1763887100.300000", "NetworkManager[700]: <info>  [1.3] device (wlp3s0): supplicant interface state: "
+                          "completed -> disconnected"),
+    ("1763887200.000000", "wpa_supplicant[800]: wlp3s0: CTRL-EVENT-STARTED-CHANNEL-SWITCH freq=5500 ht_enabled=1"),
+    ("1763887200.400000", "wpa_supplicant[800]: wlp3s0: CTRL-EVENT-CHANNEL-SWITCH freq=5500 ht_enabled=1"),
+    ("1763887300.000000", "NetworkManager[700]: <info>  [1.4] policy: set 'Roaming Deauth Radar' (wlp3s0) as "
+                          "default for IPv4 routing and DNS"),
+)) + "\n"
+WIFI_FILES = {"/proc/net/route": WIFI_ROUTES, "/sys/class/net/wlp3s0/wireless/.keep": "", "/sys/class/net/lo/.keep": ""}
+
+
+def iw_commands(link=IW_LINK, info=IW_INFO, power="Power save: off\n", journal=""):
+    return {("iw", "dev", "wlp3s0", "link"): link, ("iw", "dev", "wlp3s0", "info"): info,
+            ("iw", "dev", "wlp3s0", "get", "power_save"): power, JOURNAL_ARGV: journal}
+
+
+class WifiTest(NetCase):
+    def test_link_is_parsed_and_the_network_identity_is_dropped(self):
+        link = wifi.parse_link(IW_LINK)
+        self.assertEqual((link.connected, link.frequency_mhz, link.signal_dbm, link.rx_mbps, link.tx_mbps,
+                          link.width_mhz, link.generation), (True, 5640, -44, 1921.5, 1729.6, 160, "Wi-Fi 6"))
+        self.assertEqual(set(link.private), {CANARY_SSID, CANARY_BSSID})
+        self.assertNotIn(CANARY_SSID, repr(link))
+        self.assertFalse(wifi.parse_link("Not connected.\n").connected)
+        self.assertFalse(wifi.parse_link("").connected)
+
+    def test_sample_link_is_5ghz_160mhz_dfs_with_power_save_off_and_no_ssid(self):
+        ctx = self.ctx(WIFI_FILES, iw_commands())
+        link, power = wifi.check_wifi_link(ctx), wifi.check_wifi_powersave(ctx)
+        self.assertEqual(link.evidence, {
+            "interface": "wlp3s0", "band": "5 GHz", "frequency_mhz": 5640, "channel": 128, "width_mhz": 160,
+            "dfs": True, "signal_dbm": -44, "rx_mbps": 1921.5, "tx_mbps": 1729.6, "generation": "Wi-Fi 6"})
+        self.assertEqual(link.status, Status.WARN)
+        self.assertIn("does not explain a stream that never connects", link.detail)
+        self.assertEqual((power.status, power.evidence["power_save"]), (Status.PASS, False))
+        for outcome in (link, power):
+            text = outcome.detail + outcome.remediation + json.dumps(outcome.evidence)
+            for canary in (CANARY_SSID, CANARY_BSSID, CANARY_MAC):
+                self.assertNotIn(canary, text)
+        self.assertEqual(ctx.redactor.text(f"ssid {CANARY_SSID}"), "ssid <redacted>")
+
+    def test_6ghz_link_is_not_dfs_and_passes(self):
+        outcome = wifi.check_wifi_link(self.ctx(WIFI_FILES, iw_commands(info=IW_INFO_6GHZ)))
+        self.assertEqual((outcome.status, outcome.evidence["band"], outcome.evidence["channel"],
+                          outcome.evidence["dfs"], outcome.evidence["generation"]),
+                         (Status.PASS, "6 GHz", 69, False, "Wi-Fi 6E"))
+
+    def test_channel_and_dfs_math(self):
+        self.assertEqual([wifi.channel_for(f) for f in (2412, 2472, 2484, 5180, 5640, 5825, 5955, 6295, 900)],
+                         [1, 13, 14, 36, 128, 165, 1, 69, None])
+        self.assertEqual([wifi.band_for(f) for f in (2437, 5180, 5825, 5955, 7115, 60480)],
+                         ["2.4 GHz", "5 GHz", "5 GHz", "6 GHz", "6 GHz", "unknown band"])
+        self.assertEqual(wifi.channel_span(5640, 160), (5490, 5650))
+        self.assertEqual(wifi.channel_span(5640, 160, 5570), (5490, 5650))
+        self.assertEqual(wifi.channel_span(6295, 160), (6265, 6425))
+        dfs = {(5180, 20): False, (5180, 80): False, (5180, 160): True, (5260, 20): True, (5500, 80): True,
+               (5640, 160): True, (5720, 20): True, (5745, 80): False, (5825, 20): False, (2437, 20): False,
+               (6295, 160): False}
+        for (frequency, width), expected in dfs.items():
+            self.assertEqual(wifi.uses_dfs(frequency, width), expected, (frequency, width))
+
+    def test_bitrate_line_variants(self):
+        self.assertEqual(wifi._bitrate("866.7 MBit/s VHT-MCS 9 80MHz short GI VHT-NSS 2"), (866.7, 80, "Wi-Fi 5"))
+        self.assertEqual(wifi._bitrate("144.4 MBit/s MCS 15 short GI"), (144.4, 20, "Wi-Fi 4"))
+        self.assertEqual(wifi._bitrate("2882.4 MBit/s 320MHz EHT-MCS 11 EHT-NSS 2"), (2882.4, 320, "Wi-Fi 7"))
+        self.assertEqual(wifi._bitrate("1201.0 MBit/s 80P80MHz HE-MCS 11")[1], 160)
+        legacy = wifi.parse_info("channel 6 (2437 MHz), width: 20 MHz (no HT), center1: 2437 MHz")
+        self.assertEqual(legacy["width_mhz"], 20)
+
+    def test_weak_2_4ghz_link_and_power_save_on_warn(self):
+        link = IW_LINK.replace("5640.0", "2437").replace("-44", "-78").replace("160MHz ", "")
+        info = IW_INFO.replace("channel 128 (5640 MHz), width: 160 MHz, center1: 5570 MHz",
+                               "channel 6 (2437 MHz), width: 20 MHz, center1: 2437 MHz")
+        ctx = self.ctx(WIFI_FILES, iw_commands(link, info, "Power save: on\n"))
+        outcome = wifi.check_wifi_link(ctx)
+        self.assertEqual((outcome.status, outcome.evidence["band"], outcome.evidence["dfs"]),
+                         (Status.WARN, "2.4 GHz", False))
+        self.assertIn("weak", outcome.detail)
+        power = wifi.check_wifi_powersave(ctx)
+        self.assertEqual(power.status, Status.WARN)
+        self.assertIn("`sudo iw dev wlp3s0 set power_save off`", power.remediation)
+
+    def test_wifi_checks_skip_cleanly_when_they_do_not_apply(self):
+        wired = {"/proc/net/route": route_table(("enp5s0", "0.0.0.0", "10.0.0.1", "0003", 100, "0.0.0.0")),
+                 "/sys/class/net/wlp3s0/wireless/.keep": "", "/sys/class/net/enp5s0/.keep": ""}
+        cases = [({"/sys/class/net/enp5s0/.keep": ""}, {}, "No wireless interface"),
+                 (wired, {}, "does not use Wi-Fi"),
+                 (WIFI_FILES, {}, "`iw` tool is not installed"),
+                 (WIFI_FILES, iw_commands(link="Not connected.\n"), "not connected")]
+        for files, commands, phrase in cases:
+            ctx = self.ctx(files, commands)
+            for check in (wifi.check_wifi_link, wifi.check_wifi_powersave, wifi.check_wifi_events):
+                outcome = check(ctx)
+                self.assertEqual(outcome.status, Status.SKIP)
+                self.assertIn(phrase, outcome.detail)
+
+    def test_interface_option_selects_and_validates(self):
+        files = {**WIFI_FILES, "/sys/class/net/wlan1/wireless/.keep": ""}
+        commands = {("iw", "dev", "wlan1", "link"): IW_LINK.replace("wlp3s0", "wlan1"),
+                    ("iw", "dev", "wlan1", "info"): IW_INFO_6GHZ, ("iw", "dev", "wlan1", "get", "power_save"): ""}
+        ctx = self.ctx(files, commands, options=Options(interface="wlan1"))
+        self.assertEqual(wifi.check_wifi_link(ctx).evidence["interface"], "wlan1")
+        self.assertEqual(wifi.check_wifi_powersave(ctx).status, Status.SKIP)
+        missing = wifi.check_wifi_link(self.ctx(WIFI_FILES, iw_commands(), options=Options(interface="eth9")))
+        self.assertEqual(missing.status, Status.SKIP)
+
+    def test_recent_events_are_counted_once_and_never_quoted(self):
+        self.assertEqual(wifi.count_events(JOURNAL_EVENTS), {"roams": 1, "disconnects": 1, "channel_switches": 1})
+        outcome = wifi.check_wifi_events(self.ctx(WIFI_FILES, iw_commands(journal=JOURNAL_EVENTS)))
+        self.assertEqual(outcome.status, Status.WARN)
+        self.assertEqual(outcome.evidence, {"window_minutes": 10, "roams": 1, "disconnects": 1, "channel_switches": 1})
+        text = outcome.detail + outcome.remediation
+        for canary in (CANARY_SSID, CANARY_BSSID, CANARY_HOST, "Roaming Deauth Radar"):
+            self.assertNotIn(canary, text)
+
+    def test_quiet_journal_passes_and_unreadable_journal_skips(self):
+        quiet = wifi.check_wifi_events(self.ctx(WIFI_FILES, iw_commands(journal="-- No entries --\n")))
+        self.assertEqual(quiet.status, Status.PASS)
+        hint = CommandResult(JOURNAL_ARGV, 0, "", "Hint: You are currently not seeing messages from other users and "
+                                                  "the system.\n")
+        self.assertEqual(wifi.check_wifi_events(self.ctx(WIFI_FILES, iw_commands(journal=hint))).status, Status.SKIP)
+        failed = CommandResult(JOURNAL_ARGV, 1, "", "No journal files were found.\n")
+        self.assertEqual(wifi.check_wifi_events(self.ctx(WIFI_FILES, iw_commands(journal=failed))).status, Status.SKIP)
+        no_tool = {key: value for key, value in iw_commands().items() if key != JOURNAL_ARGV}
+        self.assertEqual(wifi.check_wifi_events(self.ctx(WIFI_FILES, no_tool)).status, Status.SKIP)
+
+
+# ---- firewall ---------------------------------------------------------------------
+
+SYSTEMCTL_FIREWALLS = ("systemctl", "is-active", "ufw.service", "firewalld.service", "nftables.service",
+                       "iptables.service")
+UFW_DEFAULTS = ('IPV6=yes\nDEFAULT_INPUT_POLICY="DROP"\nDEFAULT_OUTPUT_POLICY="ACCEPT"\n'
+                'DEFAULT_FORWARD_POLICY="DROP"\n')
+UFW_RULES = f"""*filter
+:ufw-user-input - [0:0]
+### RULES ###
+
+### tuple ### allow udp 53317 0.0.0.0/0 any 0.0.0.0/0 in
+-A ufw-user-input -p udp --dport 53317 -j ACCEPT
+
+### tuple ### allow udp 53 172.17.0.1 any {CANARY_LAN_IP}/12 in comment=616c6c6f772d646f636b65722d646e73
+-A ufw-user-input -p udp -d 172.17.0.1 --dport 53 -s {CANARY_LAN_IP}/12 -j ACCEPT
+
+### tuple ### allow tcp 22 0.0.0.0/0 any 0.0.0.0/0 OpenSSH - in
+-A ufw-user-input -p tcp --dport 22 -j ACCEPT
+
+### END RULES ###
+COMMIT
+"""
+UFW_BLOCK_PORT = "### tuple ### deny udp 3478 0.0.0.0/0 any 0.0.0.0/0 out\n"
+UFW_BLOCK_ALL = "### tuple ### reject_log any any 0.0.0.0/0 any 0.0.0.0/0 out_wlp3s0\n"
+
+
+def firewall_states(*states):
+    return {SYSTEMCTL_FIREWALLS: CommandResult(SYSTEMCTL_FIREWALLS, 3, "\n".join(states) + "\n")}
+
+
+UFW_ACTIVE = firewall_states("active", "inactive", "inactive", "inactive")
+
+
+class FirewallTest(NetCase):
+    def test_ufw_rule_tuples_are_parsed_without_addresses_or_comments(self):
+        rules = firewall.parse_ufw_rules(UFW_RULES + UFW_BLOCK_ALL)
+        self.assertEqual([rule.describe() for rule in rules], [
+            "allow in udp port 53317", "allow in udp port 53", "allow in tcp port 22", "reject out any port any"])
+        self.assertEqual([rule.everywhere for rule in rules], [True, False, True, True])
+        self.assertEqual(firewall.parse_ufw_defaults(UFW_DEFAULTS), {"incoming": "deny", "outgoing": "allow"})
+        self.assertEqual(firewall.parse_ufw_defaults("DEFAULT_OUTPUT_POLICY=REJECT\n"), {"outgoing": "reject"})
+
+    def test_default_ufw_policy_read_without_root_does_not_block_streaming(self):
+        files = {"/etc/default/ufw": UFW_DEFAULTS, "/etc/ufw/user.rules": UFW_RULES, "/etc/ufw/user6.rules": ""}
+        outcome = firewall.check_active_policy(self.ctx(files, UFW_ACTIVE))
+        self.assertEqual(outcome.status, Status.PASS)
+        self.assertEqual(outcome.evidence, {
+            "active": ["ufw"], "ufw_incoming": "deny", "ufw_outgoing": "allow", "ufw_rules_readable": True,
+            "ufw_saved_rules": 3, "ufw_outbound_blocks": []})
+        self.assertNotIn(CANARY_LAN_IP, outcome.detail + json.dumps(outcome.evidence))
+
+    def test_outbound_udp_blocks_are_found_and_only_a_total_block_is_a_failure(self):
+        base = {"/etc/default/ufw": UFW_DEFAULTS}
+        port = firewall.check_active_policy(self.ctx({**base, "/etc/ufw/user.rules": UFW_RULES + UFW_BLOCK_PORT},
+                                                     UFW_ACTIVE))
+        self.assertEqual((port.status, port.evidence["ufw_outbound_blocks"]), (Status.WARN, ["deny out udp port 3478"]))
+        everything = firewall.check_active_policy(self.ctx({**base, "/etc/ufw/user6.rules": UFW_BLOCK_ALL}, UFW_ACTIVE))
+        self.assertEqual(everything.status, Status.FAIL)
+        self.assertIn("`sudo ufw status numbered verbose`", everything.remediation)
+        closed = {"/etc/default/ufw": UFW_DEFAULTS.replace('OUTPUT_POLICY="ACCEPT"', 'OUTPUT_POLICY="DROP"'),
+                  "/etc/ufw/user.rules": UFW_RULES}
+        self.assertEqual(firewall.check_active_policy(self.ctx(closed, UFW_ACTIVE)).status, Status.WARN)
+
+    def test_what_cannot_be_read_is_reported_as_information_not_as_a_pass(self):
+        unreadable = firewall.check_active_policy(self.ctx({"/etc/default/ufw": UFW_DEFAULTS}, UFW_ACTIVE))
+        self.assertEqual((unreadable.status, unreadable.evidence["ufw_rules_readable"]), (Status.INFO, False))
+        self.assertEqual(firewall.check_active_policy(self.ctx({}, UFW_ACTIVE)).status, Status.INFO)
+        firewalld = firewall_states("inactive", "active", "inactive", "inactive")
+        other = firewall.check_active_policy(self.ctx({}, firewalld))
+        self.assertEqual((other.status, other.evidence["active"]), (Status.INFO, ["firewalld"]))
+        nothing = firewall_states("inactive", "inactive", "inactive", "unknown")
+        none = firewall.check_active_policy(self.ctx({}, nothing))
+        self.assertEqual((none.status, none.evidence["active"]), (Status.INFO, []))
+        self.assertEqual(firewall.check_active_policy(self.ctx({})).status, Status.SKIP)
+
+    def test_live_rules_always_need_root_and_the_command_is_only_printed(self):
+        commands = FakeCommands(UFW_ACTIVE)
+        ufw = firewall.check_rules(make_context(commands=commands))
+        self.assertEqual((ufw.status, ufw.root_command), (Status.SKIP, "sudo ufw status numbered verbose"))
+        self.assertEqual(ufw.detail, "cannot verify without root \u2014 run: sudo ufw status numbered verbose")
+        self.assertIn("`sudo nft -a list ruleset`", ufw.remediation)
+        self.assertIn("-g 'UFW (BLOCK|ALLOW)'`", ufw.remediation)
+        self.assertEqual(commands.calls, [SYSTEMCTL_FIREWALLS])
+        firewalld = firewall.check_rules(self.ctx({}, firewall_states("inactive", "active", "inactive", "inactive")))
+        self.assertEqual(firewalld.root_command, "sudo firewall-cmd --list-all")
+        self.assertEqual(firewall.check_rules(self.ctx({})).root_command, "sudo nft -a list ruleset")
+
+
+# ---- console address ----------------------------------------------------------------
+
+CONSOLE_IP = "192.168.77.50"
+ARP_TABLE = ("IP address       HW type     Flags       HW address            Mask     Device\n"
+             f"192.168.77.1     0x1         0x2         {CANARY_BSSID}     *        wlp3s0\n")
+
+
+def arp(flags):
+    return ARP_TABLE + f"{CONSOLE_IP}    0x1         {flags}         {CANARY_MAC}     *        wlp3s0\n"
+
+
+class ConsoleTest(NetCase):
+    def console_ctx(self, files=None, tcp=None, responder=None, address=CONSOLE_IP):
+        self.tcp_targets = []
+
+        def tcp_connect(target, timeout):
+            self.tcp_targets.append(target)
+            if tcp is not None:
+                raise tcp
+            return FakeTcp()
+        self.world = UdpWorld(responder or (lambda *_a: []))
+        files = {"/proc/net/route": WIFI_ROUTES, **(files or {})}
+        return make_context(root=self.tree(files), udp_socket=self.world.socket, tcp_connect=tcp_connect,
+                            options=Options(console_ip=address))
+
+    def test_only_private_rfc1918_unicast_addresses_are_accepted(self):
+        for good in ("10.0.0.5", "172.16.0.1", "172.31.255.254", "192.168.1.10", " 192.168.1.10 "):
+            self.assertEqual(console.private_ipv4(good), good.strip())
+        for bad in ("8.8.8.8", CANARY_PUBLIC_IP, "100.64.1.1", "169.254.1.1", "127.0.0.1", "172.32.0.1", "224.0.0.1",
+                    "255.255.255.255", "0.0.0.0", "192.168.1.300", "192.168.1.1/24", "192.168.01.5", "fe80::1",
+                    "xbox.local", "", "192.168.1.1;id"):
+            with self.assertRaises(ValueError, msg=bad):
+                console.private_ipv4(bad)
+
+    def test_console_on_the_same_subnet_is_reached_directly(self):
+        outcome = console.check_console_route(self.console_ctx())
+        self.assertEqual((outcome.status, outcome.evidence["on_link"]), (Status.PASS, True))
+        self.assertIn("cannot prove that Remote Play works", outcome.detail)
+
+    def test_console_on_another_subnet_or_without_a_route_warns(self):
+        routed = console.check_console_route(self.console_ctx(address="192.168.90.50"))
+        self.assertEqual((routed.status, routed.evidence["on_link"]), (Status.WARN, False))
+        self.assertIn("default gateway", routed.detail)
+        local_only = route_table(("wlp3s0", "192.168.77.0", "0.0.0.0", "0001", 600, "255.255.255.0"))
+        lost = console.check_console_route(self.console_ctx({"/proc/net/route": local_only}, address="10.9.9.9"))
+        self.assertEqual((lost.status, lost.evidence["routed"]), (Status.WARN, False))
+
+    def test_own_broadcast_and_network_addresses_are_not_probed(self):
+        for address in (CANARY_LAN_IP, "192.168.77.255", "192.168.77.0"):
+            ctx = self.console_ctx(address=address)
+            self.assertEqual(console.check_console_route(ctx).status, Status.SKIP)
+            self.assertEqual(console.check_console_reachability(ctx).status, Status.SKIP)
+            self.assertEqual(self.tcp_targets, [])
+            self.assertEqual([sock.sent for sock in self.world.sockets], [[]] * len(self.world.sockets))
+
+    def test_probe_is_one_stun_request_and_one_tcp_attempt_to_that_address_only(self):
+        outcome = console.check_console_reachability(self.console_ctx(tcp=ConnectionRefusedError()))
+        self.assertEqual(outcome.status, Status.PASS)
+        self.assertEqual(outcome.evidence, {"stun_udp_9002": False, "tcp_3074": "refused", "neighbour": "absent"})
+        self.assertEqual(self.tcp_targets, [(CONSOLE_IP, 3074)])
+        sent = self.world.sent()
+        self.assertEqual({destination for _data, destination in sent}, {(CONSOLE_IP, 9002)})
+        for data, _destination in sent:
+            request = stun.decode(data)
+            self.assertEqual((request.method, request.cls, request.attributes), (stun.BINDING, stun.REQUEST, ()))
+        self.assertIn("cannot prove that Remote Play works", outcome.detail)
+
+    def test_stun_answer_or_arp_entry_counts_as_alive(self):
+        answered = console.check_console_reachability(self.console_ctx(tcp=TimeoutError(), responder=nat()))
+        self.assertEqual((answered.status, answered.evidence["stun_udp_9002"]), (Status.PASS, True))
+        neighbour = console.check_console_reachability(self.console_ctx({"/proc/net/arp": arp("0x2")}, TimeoutError()))
+        self.assertEqual((neighbour.status, neighbour.evidence["neighbour"]), (Status.PASS, "resolved"))
+        self.assertNotIn(CANARY_MAC, neighbour.detail + json.dumps(neighbour.evidence))
+
+    def test_silence_is_inconclusive_never_a_failure(self):
+        outcome = console.check_console_reachability(self.console_ctx({"/proc/net/arp": arp("0x0")}, TimeoutError()))
+        self.assertEqual(outcome.status, Status.WARN)
+        self.assertEqual(outcome.evidence, {"stun_udp_9002": False, "tcp_3074": "timeout", "neighbour": "unresolved"})
+        self.assertIn("Silence is not proof", outcome.detail)
+        routed = console.check_console_reachability(self.console_ctx(tcp=TimeoutError(), address="192.168.90.50"))
+        self.assertEqual(routed.evidence["neighbour"], "not-on-link")
+
+    def test_without_an_address_nothing_is_sent(self):
+        ctx = make_context()
+        outcome = console.check_console_reachability(ctx)
+        self.assertEqual(outcome.status, Status.SKIP)
+        self.assertIn("--console-ip", outcome.remediation)
+
+
+# ---- clients, video, system ---------------------------------------------------------
+
+VAINFO = """Trying display: wayland
+vainfo: VA-API version: 1.24 (libva 2.24.0)
+vainfo: Driver version: Mesa Gallium driver 26.2.5-arch1.1 for AMD Ryzen Z2 A (radeonsi, vangogh, ACO, DRM 3.64)
+vainfo: Supported profile and entrypoints
+      VAProfileMPEG2Main              :	VAEntrypointVLD
+      VAProfileH264ConstrainedBaseline:	VAEntrypointVLD
+      VAProfileH264Main               :	VAEntrypointVLD
+      VAProfileH264Main               :	VAEntrypointEncSlice
+      VAProfileH264High               :	VAEntrypointVLD
+      VAProfileH264High               :	VAEntrypointEncSlice
+      VAProfileHEVCMain               :	VAEntrypointVLD
+      VAProfileAV1Profile0            :	VAEntrypointVLD
+      VAProfileNone                   :	VAEntrypointVideoProc
+"""
+CHROMIUM_FLAGS = (f"# flags\n--ozone-platform=wayland\n--password-store=gnome-libsecret\n"
+                  f"--load-extension={CANARY_HOME}/ext/one,{CANARY_HOME}/ext/two\n--no-default-browser-check\n"
+                  f"--user-data-dir={CANARY_HOME}/profile\n--some-future-flag=hunter2\n")
+OS_RELEASE = 'NAME="Omarchy"\nPRETTY_NAME="Omarchy"\nID=omarchy\nVERSION_ID="4.0.6"\n'
+HYPRCTL_VERSION = "Hyprland 0.56.2 built from branch v0.56.2 at commit efb5099 clean.\nDate: Wed Aug 5 2026\n"
+CLIENT_ENV = {"HOME": CANARY_HOME, "XDG_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": "Hyprland"}
+CLIENT_COMMANDS = {
+    ("chromium", "--version"): "Chromium 155.0.8059.84 Arch Linux\n",
+    ("pacman", "-Q", "greenlight-bin", "greenlight"): CommandResult(
+        ("pacman",), 1, "greenlight-bin 2.4.2-1\n", "error: package 'greenlight' was not found\n"),
+    ("pacman", "-Q", "mesa"): "mesa 1:26.2.5-1\n",
+    ("vainfo",): VAINFO,
+    ("omarchy", "version"): "4.0.6-1\n",
+    ("hyprctl", "version"): HYPRCTL_VERSION,
+}
+CLIENT_FILES = {
+    "/usr/share/applications/chromium.desktop": "", "/usr/share/applications/greenlight-desktop.desktop": "",
+    f"{CANARY_HOME}/.config/chromium-flags.conf": CHROMIUM_FLAGS,
+    "/usr/lib/dri/radeonsi_drv_video.so": "", "/usr/lib/dri/radeonsi_dri.so": "",
+    "/etc/os-release": OS_RELEASE, "/proc/sys/kernel/osrelease": "7.2.15-1-omarchy\n",
+    "/proc/sys/kernel/arch": "x86_64\n",
+}
+ALLY_DMI = {f"/sys/class/dmi/id/{name}": value + "\n" for name, value in (
+    ("sys_vendor", "ASUSTeK COMPUTER INC."), ("board_vendor", "ASUSTeK COMPUTER INC."),
+    ("product_name", "ROG Xbox Ally RC73YA_RC73YA"), ("product_family", "ROG Xbox Ally"), ("board_name", "RC73YA"),
+    ("bios_version", "RC73YA.318"), ("product_serial", CANARY_SERIAL), ("board_serial", CANARY_SERIAL),
+    ("product_uuid", "c0ffee00-" + CANARY_SERIAL))}
+
+
+class ClientsTest(NetCase):
+    def client_ctx(self, files=None, commands=None, env=None):
+        return self.ctx(CLIENT_FILES if files is None else files, CLIENT_COMMANDS if commands is None else commands,
+                        env=CLIENT_ENV if env is None else env)
+
+    def test_browser_version_is_read_with_a_bounded_version_call(self):
+        outcome = browser.check_browsers(self.client_ctx())
+        self.assertEqual(outcome.status, Status.INFO)
+        self.assertEqual(outcome.evidence["browsers"], [{"name": "Chromium", "version": "155.0.8059.84",
+                                                         "source": "system"}])
+        flatpak = {"/var/lib/flatpak/exports/share/applications/com.microsoft.Edge.desktop": ""}
+        edge = browser.check_browsers(self.client_ctx(flatpak, {}))
+        self.assertEqual(edge.evidence["browsers"], [{"name": "Microsoft Edge", "version": "", "source": "flatpak"}])
+        self.assertEqual(browser.check_browsers(self.client_ctx({}, {})).status, Status.SKIP)
+
+    def test_greenlight_is_detected_without_ever_being_executed(self):
+        commands = FakeCommands(CLIENT_COMMANDS)
+        ctx = make_context(root=self.tree({**CLIENT_FILES, "/opt/Greenlight/greenlight-desktop": ""}),
+                           commands=commands, env=CLIENT_ENV)
+        outcome = browser.check_greenlight(ctx)
+        self.assertEqual((outcome.status, outcome.evidence), (Status.INFO, {"installed": True, "version": "2.4.2"}))
+        self.assertEqual(commands.calls, [("pacman", "-Q", "greenlight-bin", "greenlight")])
+        user_entry = {f"{CANARY_HOME}/.local/share/applications/Greenlight.desktop": ""}
+        self.assertTrue(browser.greenlight_installed(self.client_ctx(user_entry, {})))
+        missing = browser.check_greenlight(self.client_ctx({}, {}))
+        self.assertEqual((missing.status, missing.evidence["installed"]), (Status.SKIP, False))
+
+    def test_linux_web_client_support_is_always_a_warning(self):
+        for files, phrase in ((CLIENT_FILES, "Use Greenlight"), ({}, "Install Xbox Remote Play")):
+            outcome = browser.check_support_policy(self.client_ctx(files, {}))
+            self.assertEqual(outcome.status, Status.WARN)
+            self.assertIn("does not include desktop Linux", outcome.detail)
+            self.assertIn(phrase, outcome.remediation)
+
+    def test_flag_summary_names_flags_but_never_paths_or_unknown_values(self):
+        outcome = browser.check_browser_flags(self.client_ctx())
+        self.assertEqual(outcome.status, Status.INFO)
+        self.assertEqual(outcome.evidence["files"], [{"file": "chromium-flags.conf", "flags": [
+            "--ozone-platform=wayland", "--password-store=gnome-libsecret", "--load-extension=<2 path(s) not shown>",
+            "--no-default-browser-check", "--user-data-dir=<value not shown>",
+            "--some-future-flag=<value not shown>"]}])
+        self.assertEqual(outcome.evidence["unpacked_extensions"], 2)
+        text = outcome.detail + json.dumps(outcome.evidence)
+        for private in (CANARY_HOME, CANARY_USER, "ext/one", "hunter2"):
+            self.assertNotIn(private, text)
+
+    def test_flags_that_break_streaming_are_called_out(self):
+        flags = ("--no-sandbox\n--disable-gpu\n--force-webrtc-ip-handling-policy=disable_non_proxied_udp\n"
+                 f"--proxy-server=http://bob:hunter2@proxy.{CANARY_DOMAIN}:3128\n")
+        files = {f"{CANARY_HOME}/.config/chromium-flags.conf": flags}
+        outcome = browser.check_browser_flags(self.client_ctx(files, {}))
+        self.assertEqual(outcome.status, Status.WARN)
+        self.assertEqual(len(outcome.evidence["concerns"]), 4)
+        self.assertIn("stops WebRTC from using UDP", outcome.detail)
+        self.assertNotIn("hunter2", outcome.detail + json.dumps(outcome.evidence))
+        self.assertNotIn(CANARY_DOMAIN, outcome.detail + json.dumps(outcome.evidence))
+        xdg = self.client_ctx({"/cfg/chrome-flags.conf": "--disable-gpu\n"}, {}, env={"XDG_CONFIG_HOME": "/cfg"})
+        self.assertEqual(browser.check_browser_flags(xdg).evidence["files"][0]["file"], "chrome-flags.conf")
+        self.assertEqual(browser.check_browser_flags(self.client_ctx({}, {})).status, Status.INFO)
+        self.assertEqual(browser.check_browser_flags(self.client_ctx({}, {}, env={})).status, Status.INFO)
+
+    def test_vaapi_h264_high_decode(self):
+        outcome = browser.check_vaapi(self.client_ctx())
+        self.assertEqual(outcome.status, Status.PASS)
+        self.assertEqual((outcome.evidence["drivers"], outcome.evidence["h264_high"], outcome.evidence["hevc"],
+                          outcome.evidence["av1"], outcome.evidence["decode_profiles"]),
+                         (["radeonsi"], True, True, True, 6))
+        self.assertEqual(browser.parse_vainfo(VAINFO)["driver"][:19], "Mesa Gallium driver")
+
+    def test_vaapi_without_h264_warns_and_missing_tools_skip(self):
+        no_high = VAINFO.replace("      VAProfileH264High               :	VAEntrypointVLD\n", "")
+        encode_only = "\n".join(line for line in VAINFO.splitlines() if "H264" not in line or "EncSlice" in line)
+        for output, phrase in ((no_high, "only below the High profile"), (encode_only, "not at all")):
+            outcome = browser.check_vaapi(self.client_ctx(commands={("vainfo",): output}))
+            self.assertEqual(outcome.status, Status.WARN)
+            self.assertIn(phrase, outcome.detail)
+        no_tool = browser.check_vaapi(self.client_ctx(commands={}))
+        self.assertEqual(no_tool.status, Status.SKIP)
+        self.assertIn("radeonsi", no_tool.detail)
+        self.assertEqual(browser.check_vaapi(self.client_ctx({}, {})).status, Status.SKIP)
+
+    def test_vaapi_falls_back_to_the_render_node_without_a_display(self):
+        commands = {("vainfo",): CommandResult(("vainfo",), 3, "", "error: can't connect to X server!\n"),
+                    ("vainfo", "--display", "drm", "--device", "/dev/dri/renderD128"): VAINFO}
+        outcome = browser.check_vaapi(self.client_ctx({"/dev/dri/renderD128": ""}, commands))
+        self.assertEqual(outcome.status, Status.PASS)
+        failed = browser.check_vaapi(self.client_ctx({}, {("vainfo",): commands[("vainfo",)]}))
+        self.assertEqual(failed.status, Status.SKIP)
+
+
+class SystemTest(NetCase):
+    def test_platform_facts_do_not_include_the_host_name(self):
+        files = {**CLIENT_FILES, "/etc/hostname": CANARY_HOST + "\n", "/proc/sys/kernel/hostname": CANARY_HOST + "\n"}
+        outcome = system.check_platform(self.ctx(files, CLIENT_COMMANDS, env=CLIENT_ENV))
+        self.assertEqual(outcome.status, Status.INFO)
+        expected = {"os": "Omarchy", "os_version": "4.0.6", "kernel": "7.2.15-1-omarchy", "architecture": "x86_64",
+                    "omarchy": "4.0.6-1", "hyprland": "0.56.2", "session_type": "wayland", "desktop": "Hyprland",
+                    "game_mode": "0.1.0"}
+        self.assertEqual({key: outcome.evidence[key] for key in expected}, expected)
+        self.assertEqual(outcome.detail, "Omarchy 4.0.6, Linux 7.2.15-1-omarchy x86_64, Hyprland 0.56.2, wayland "
+                                         "session, Game Mode 0.1.0.")
+        self.assertNotIn(CANARY_HOST, outcome.detail + json.dumps(outcome.evidence))
+        bare = system.check_platform(self.ctx({}, {}, env={}))
+        self.assertEqual((bare.status, bare.evidence["os"], bare.evidence["omarchy"]), (Status.INFO, "Linux", ""))
+
+    def test_device_model_comes_from_dmi_and_serials_are_never_read(self):
+        outcome = system.check_device(self.ctx(ALLY_DMI))
+        self.assertEqual(outcome.status, Status.INFO)
+        evidence = outcome.evidence
+        self.assertEqual((evidence["board"], evidence["handheld"], evidence["handheld_verified"]),
+                         ("RC73YA", "ASUS ROG Xbox Ally", True))
+        self.assertIn("Known handheld: ASUS ROG Xbox Ally.", outcome.detail)
+        self.assertNotIn(CANARY_SERIAL, outcome.detail + json.dumps(outcome.evidence))
+        self.assertFalse(any("serial" in name or "uuid" in name for name in devices.DMI_FIELDS))
+        placeholder = {"/sys/class/dmi/id/product_name": "To Be Filled By O.E.M.\n",
+                       "/sys/class/dmi/id/board_name": "Default string\n"}
+        self.assertEqual(system.check_device(self.ctx(placeholder)).status, Status.SKIP)
+
+    def test_known_handheld_table_matches_field_and_vendor(self):
+        cases = [({"board_name": "RC73YA", "sys_vendor": "ASUSTeK COMPUTER INC."}, "ASUS ROG Xbox Ally", True),
+                 ({"board_name": "RC73XA", "sys_vendor": "ASUSTeK COMPUTER INC."}, "ASUS ROG Xbox Ally X", False),
+                 ({"board_name": "RC71L", "board_vendor": "ASUSTeK COMPUTER INC."}, "ASUS ROG Ally", False),
+                 ({"board_name": "RC72LA", "sys_vendor": "ASUSTeK COMPUTER INC."}, "ASUS ROG Ally X", False),
+                 ({"product_name": "83E1", "sys_vendor": "LENOVO"}, "Lenovo Legion Go", False),
+                 ({"product_name": "83L3", "sys_vendor": "LENOVO"}, "Lenovo Legion Go S", False),
+                 ({"product_name": "Galileo", "sys_vendor": "Valve"}, "Valve Steam Deck", False)]
+        for values, name, verified in cases:
+            handheld = devices.known_handheld(values)
+            self.assertEqual((handheld.name, handheld.verified), (name, verified))
+        self.assertIsNone(devices.known_handheld({"board_name": "RC73YA", "sys_vendor": "Someone Else"}))
+        self.assertIsNone(devices.known_handheld({"product_name": "RC73YA", "sys_vendor": "ASUSTeK COMPUTER INC."}))
+        self.assertIsNone(devices.known_handheld({}))
+        self.assertEqual([handheld.name for handheld in devices.HANDHELDS if handheld.verified], ["ASUS ROG Xbox Ally"])
+
+    def test_gpu_and_mesa(self):
+        files = {"/sys/class/drm/card1/device/vendor": "0x1002\n", "/sys/class/drm/card1/device/device": "0x163f\n",
+                 "/sys/class/drm/card1-eDP-1/status": "connected\n", "/sys/bus/pci/drivers/amdgpu/.keep": ""}
+        root = self.tree(files)
+        (root / "sys/class/drm/card1/device/driver").symlink_to("../../../../bus/pci/drivers/amdgpu")
+        outcome = system.check_gpu(make_context(root=root, commands=FakeCommands(CLIENT_COMMANDS)))
+        self.assertEqual(outcome.evidence, {"gpus": [{"vendor": "AMD", "id": "1002:163f", "driver": "amdgpu"}],
+                                            "mesa": "26.2.5"})
+        self.assertEqual(outcome.detail, "AMD 1002:163f (amdgpu), Mesa 26.2.5.")
+        other = self.ctx({"/sys/class/drm/card0/device/vendor": "0x8086\n",
+                          "/sys/class/drm/card0/device/device": "0x7d55\n", "/usr/lib/libgallium-25.1.4.so": ""})
+        self.assertEqual(system.check_gpu(other).detail, "Intel 8086:7d55, Mesa 25.1.4.")
+        self.assertEqual(system.check_gpu(self.ctx({})).status, Status.SKIP)
+
+
+# ---- controllers: a fake sysfs/dev tree that reproduces the ROG Xbox Ally -------------
+
+# Key bitmaps captured on the device: the raw pad has BTN_SOUTH..BTN_THUMBL but no
+# BTN_THUMBR; InputPlumber's virtual pad has the full set.
+ALLY_RAW_KEYS = "3fff000000000000 0 0 0 0"
+ELITE_PAD_KEYS = "ff 0 0 0 0 0 0 7cdb000000000000 0 8000000000 0 0"
+PAD_AXES = "3003f"
+NKEY_KEYBOARD_KEYS = "1000000000007 ff9f207ac14057ff febeffdfffefffff fffffffffffffffe"
+USB_PARENT = "sys/devices/pci0000:00/0000:00:08.1/0000:04:00.4/usb3/3-6"
+STACK_ACTIVE = ("systemctl", "is-active", "inputplumber.service", "hhd.service")
+STACK_HOOK = ("systemctl", "is-enabled", "inputplumber-suspend.service")
+STACK_BUS = ("busctl", "--system", "status", "org.shadowblip.InputPlumber")
+
+
+def add_input(root, number, name, keys, axes="0", vendor="0b05", product="1b4c", virtual=False, mode=0o660,
+              bus="0003"):
+    """One evdev device laid out like sysfs, with canary serials next to the fields the doctor reads."""
+    parent = "sys/devices/virtual/input" if virtual else f"{USB_PARENT}/3-6:1.5/0003:0B05:1B4C.0006/input"
+    base = root / parent / f"input{number}"
+    for relative, text in (("name", name), ("id/bustype", bus), ("id/vendor", vendor), ("id/product", product),
+                           ("id/version", "0110"), ("capabilities/key", keys), ("capabilities/abs", axes),
+                           ("uniq", CANARY_SERIAL), ("phys", f"usb-0000:04:00.4-6/input5 {CANARY_MAC}")):
+        write(base / relative, text + "\n")
+    event = base / f"event{number}"
+    event.mkdir()
+    (event / "device").symlink_to("..")
+    link = root / "sys/class/input" / f"event{number}"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(os.path.relpath(event, link.parent))
+    write(root / "dev/input" / f"event{number}").chmod(mode)
+
+
+def add_hidraw(root, number, interface, mode, vendor="0B05", product="1B4C"):
+    device = root / USB_PARENT / f"3-6:1.{interface}" / f"0003:{vendor}:{product}.000{number + 1}"
+    write(device / "uevent", f"DRIVER=hid-generic\nHID_ID=0003:0000{vendor}:0000{product}\n"
+                             "HID_NAME=ASUSTeK Computer Inc. N-KEY Device\n"
+                             f"HID_PHYS=usb-0000:04:00.4-6/input{interface}\nHID_UNIQ={CANARY_SERIAL}\n")
+    write(device.parent / "bInterfaceNumber", f"{interface:02x}\n")
+    node = device / "hidraw" / f"hidraw{number}"
+    node.mkdir(parents=True)
+    (node / "device").symlink_to("../..")
+    link = root / "sys/class/hidraw" / f"hidraw{number}"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(os.path.relpath(node, link.parent))
+    write(root / "dev" / f"hidraw{number}").chmod(mode)
+
+
+def stack_commands(inputplumber=False, hhd=False, hook="enabled", bus=True):
+    states = "\n".join("active" if on else "inactive" for on in (inputplumber, hhd)) + "\n"
+    commands = {STACK_ACTIVE: CommandResult(STACK_ACTIVE, 0 if inputplumber and hhd else 3, states)}
+    if inputplumber:
+        commands[STACK_HOOK] = CommandResult(STACK_HOOK, 0 if hook == "enabled" else 1, hook + "\n")
+        commands[STACK_BUS] = CommandResult(STACK_BUS, 0 if bus else 1, f"PID=15029\nUID=0\nOwner={CANARY_USER}\n")
+    return commands
+
+
+class InputCase(ScratchCase):
+    def ally(self, *, inputplumber=False, hide_raw=None, virtual_pad=None, processes=("antimicrox",), **stack):
+        """The Ally's input devices: raw pad (hidden when InputPlumber runs) plus what the daemon adds."""
+        hide_raw = inputplumber if hide_raw is None else hide_raw
+        virtual_pad = inputplumber if virtual_pad is None else virtual_pad
+        shutil.rmtree(SCRATCH, ignore_errors=True)
+        root = SCRATCH
+        for path, text in ALLY_DMI.items():
+            write(root / path.lstrip("/"), text)
+        add_input(root, 5, "ASUSTeK Computer Inc. N-KEY Device", NKEY_KEYBOARD_KEYS, mode=0o000 if hide_raw else 0o660)
+        add_input(root, 6, "ASUSTeK Computer Inc. N-KEY Device", ALLY_RAW_KEYS, PAD_AXES,
+                  mode=0o000 if hide_raw else 0o660)
+        if virtual_pad:
+            add_input(root, 21, "Microsoft X-Box One Elite 2 pad", ELITE_PAD_KEYS, PAD_AXES, "045e", "0b00", True)
+        for pid, name in enumerate((*processes, *(("inputplumber",) if inputplumber else ())), 1100):
+            write(root / f"proc/{pid}/comm", name + "\n")
+        write(root / "proc/self/comm", "python3\n")
+        self.commands = FakeCommands(stack_commands(inputplumber, **stack))
+        return make_context(root=root, commands=self.commands)
+
+
+class InputStackTest(InputCase):
+    def test_capability_bitmaps_and_code_names(self):
+        raw = evdev.parse_bitmap(ALLY_RAW_KEYS)
+        self.assertEqual(raw, set(range(evdev.BTN_SOUTH, evdev.BTN_THUMBL + 1)))
+        self.assertNotIn(evdev.BTN_THUMBR, raw)
+        elite = evdev.parse_bitmap(ELITE_PAD_KEYS)
+        self.assertTrue({evdev.BTN_THUMBR, evdev.BTN_MODE, evdev.BTN_TRIGGER_HAPPY1} <= elite)
+        self.assertEqual(evdev.parse_bitmap("3003f"), {0, 1, 2, 3, 4, 5, 0x10, 0x11})
+        self.assertEqual(evdev.parse_bitmap("zz 1"), {0})
+        self.assertEqual([evdev.code_label(evdev.EV_KEY, code) for code in (314, 316, 318, 184, 191, 148, 0x2c1)],
+                         ["BTN_SELECT (314)", "BTN_MODE (316)", "BTN_THUMBR (318)", "KEY_F14 (184)", "KEY_F21 (191)",
+                          "KEY_PROG1 (148)", "BTN_TRIGGER_HAPPY2 (705)"])
+        self.assertEqual(evdev.code_label(evdev.EV_ABS, 0x11), "ABS_HAT0Y (17)")
+        self.assertEqual((evdev.key_name(0x150), evdev.key_name(250), evdev.abs_name(0x30)),
+                         ("BTN_0x150", "KEY_250", "ABS_0x30"))
+        self.assertEqual({evdev.KEY_NAMES[code] for code in range(183, 195)}, {f"KEY_F{n}" for n in range(13, 25)})
+
+    def test_ally_raw_pad_is_enumerated_without_reading_serials(self):
+        found = evdev.gamepads(self.ally())
+        self.assertEqual(len(found), 1)
+        pad = found[0]
+        self.assertEqual((pad.node, pad.name, pad.bus, pad.vendor_product, pad.virtual, pad.access, pad.has_guide),
+                         ("event6", "ASUSTeK Computer Inc. N-KEY Device", "USB", "0b05:1b4c", False, "readable", True))
+        self.assertEqual(pad.missing_controls(), ["R3 (BTN_THUMBR)"])
+        devices_seen = evdev.input_devices(self.ally())
+        self.assertEqual([(device.node, device.is_gamepad, device.is_keyboard) for device in devices_seen],
+                         [("event5", False, True), ("event6", True, False)])
+        self.assertNotIn(CANARY_SERIAL, repr(devices_seen))
+        self.assertNotIn(CANARY_MAC, repr(devices_seen))
+
+    def test_raw_pad_without_a_daemon_warns_about_the_missing_r3(self):
+        ctx = self.ally()
+        pads = inputstack.check_gamepads(ctx)
+        self.assertEqual(pads.status, Status.WARN)
+        self.assertIn("does not report R3 (BTN_THUMBR)", pads.detail)
+        self.assertEqual(pads.evidence["gamepads"], [{
+            "name": "ASUSTeK Computer Inc. N-KEY Device", "node": "event6", "kind": "physical", "bus": "USB",
+            "id": "0b05:1b4c", "access": "readable", "missing": ["R3 (BTN_THUMBR)"], "guide": True}])
+        verdict = inputstack.check_handheld(ctx)
+        self.assertEqual(verdict.status, Status.WARN)
+        self.assertIn("ASUS ROG Xbox Ally: no handheld input daemon is running", verdict.detail)
+        self.assertIn("does not report R3 (BTN_THUMBR)", verdict.detail)
+        self.assertIn("`omarchy pkg add inputplumber` then `sudo systemctl enable --now inputplumber.service "
+                      "inputplumber-suspend.service`", verdict.remediation)
+        stack = inputstack.check_input_stack(ctx)
+        self.assertEqual((stack.status, stack.evidence["inputplumber"], stack.evidence["antimicrox"]),
+                         (Status.INFO, False, True))
+
+    def test_advice_is_printed_and_nothing_is_installed_or_started(self):
+        ctx = self.ally()
+        for check in (inputstack.check_gamepads, inputstack.check_input_stack, inputstack.check_handheld,
+                      inputstack.check_hidraw_access):
+            check(ctx)
+        self.assertEqual(self.commands.calls, [STACK_ACTIVE])
+
+    def test_inputplumber_with_hidden_raw_pad_and_virtual_pad_passes(self):
+        ctx = self.ally(inputplumber=True)
+        pads = inputstack.check_gamepads(ctx)
+        self.assertEqual(pads.status, Status.PASS)
+        rows = [(row["node"], row["kind"], row["access"], row["missing"]) for row in pads.evidence["gamepads"]]
+        self.assertEqual(rows, [("event6", "physical", "hidden", ["R3 (BTN_THUMBR)"]),
+                                ("event21", "virtual", "readable", [])])
+        verdict = inputstack.check_handheld(ctx)
+        self.assertEqual((verdict.status, verdict.evidence["daemon"]), (Status.PASS, "InputPlumber"))
+        stack = inputstack.check_input_stack(ctx)
+        self.assertEqual((stack.evidence["inputplumber_bus"], stack.evidence["suspend_hook"]), (True, "enabled"))
+        self.assertNotIn(CANARY_USER, stack.detail + json.dumps(stack.evidence))
+
+    def test_handheld_verdicts(self):
+        ally = devices.known_handheld({"board_name": "RC73YA", "sys_vendor": "ASUSTeK COMPUTER INC."})
+        legion = devices.known_handheld({"product_name": "83L3", "sys_vendor": "LENOVO"})
+
+        def pad(virtual, keys, access="readable"):
+            return evdev.InputDevice("event1", "Pad", "USB", "0000:0000", virtual, frozenset(evdev.parse_bitmap(keys)),
+                                     frozenset(evdev.parse_bitmap(PAD_AXES)), access)
+        raw, hidden, full = pad(False, ALLY_RAW_KEYS), pad(False, ALLY_RAW_KEYS, "hidden"), pad(True, ELITE_PAD_KEYS)
+        plumber = inputstack.Stack(inputplumber=True, inputplumber_bus=True, suspend_hook="enabled")
+        cases = [
+            (None, [raw], inputstack.Stack(), Status.INFO, "not a handheld"),
+            (ally, [raw], inputstack.Stack(), Status.WARN, "no handheld input daemon"),
+            (ally, [], inputstack.Stack(antimicrox=True), Status.WARN, "no handheld input daemon"),
+            (ally, [hidden, full], plumber, Status.PASS, "complete virtual controller"),
+            (ally, [hidden], plumber, Status.WARN, "no complete virtual controller"),
+            (ally, [raw, full], plumber, Status.WARN, "still readable"),
+            (ally, [hidden, full], inputstack.Stack(inputplumber=True, suspend_hook="disabled"), Status.WARN,
+             "after sleep"),
+            (ally, [hidden, full], inputstack.Stack(hhd=True), Status.PASS, "Handheld Daemon provides"),
+        ]
+        for handheld, pads, stack, status, phrase in cases:
+            outcome = inputstack.handheld_verdict(handheld, pads, stack)
+            self.assertEqual(outcome.status, status, phrase)
+            self.assertIn(phrase, outcome.detail)
+        untested = inputstack.handheld_verdict(legion, [raw], inputstack.Stack())
+        self.assertIn("this project has not tested it", untested.remediation)
+        self.assertNotIn("has not tested", inputstack.handheld_verdict(ally, [raw], inputstack.Stack()).remediation)
+
+    def test_two_handheld_daemons_conflict_and_no_or_unreadable_pads_are_reported(self):
+        both = inputstack.check_input_stack(self.ally(inputplumber=True, hhd=True))
+        self.assertEqual(both.status, Status.WARN)
+        self.assertIn("competing", both.detail)
+        shutil.rmtree(SCRATCH)
+        SCRATCH.mkdir()
+        self.assertEqual(inputstack.check_gamepads(make_context(root=SCRATCH)).status, Status.SKIP)
+        unreadable = inputstack.check_gamepads(self.ally(hide_raw=True))
+        self.assertEqual(unreadable.status, Status.WARN)
+        self.assertIn("No gamepad is readable", unreadable.detail)
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read every node")
+    def test_node_without_read_permission_is_told_apart_from_a_hidden_one(self):
+        ctx = self.ally()
+        (SCRATCH / "dev/input/event6").chmod(0o200)
+        self.assertEqual(evdev.gamepads(ctx)[0].access, "no-permission")
+        (SCRATCH / "dev/input/event6").unlink()
+        self.assertEqual(evdev.input_devices(ctx)[1].access, "missing")
+
+    def hidraw_ctx(self, modes, rules=(), **ally):
+        ctx = self.ally(**ally)
+        for number, mode in enumerate(modes):
+            add_hidraw(SCRATCH, number, number, mode)
+        add_hidraw(SCRATCH, 9, 0, 0o600, vendor="0603", product="F200")
+        for name in rules:
+            write(SCRATCH / "run/udev/rules.d" / name, "")
+        return ctx
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read every node")
+    def test_hidden_hid_interfaces_are_reported_with_evidence_and_a_manual_command(self):
+        # Write-only stands in for "root only": the test user owns these files.
+        rules = ("50-inputplumber-hide-hidraw2-early.rules", "96-inputplumber-hide-hidraw5-late.rules",
+                 "70-other.rules")
+        outcome = inputstack.check_hidraw_access(self.hidraw_ctx((0o200, 0o200, 0o000, 0o200, 0o200, 0o000), rules,
+                                                                 inputplumber=True))
+        self.assertEqual(outcome.status, Status.WARN)
+        self.assertIn("6 of 6 raw HID interfaces of the built-in controller are not readable by this user "
+                      "(2 hidden with mode 000, 4 readable by root only)", outcome.detail)
+        self.assertIn("Another input daemon may be hiding the controller interfaces: InputPlumber is running; "
+                      "2 temporary udev rules from InputPlumber hide device nodes.", outcome.detail)
+        self.assertIn("stop it yourself (`sudo systemctl stop inputplumber.service`)", outcome.remediation)
+        self.assertIn("The doctor never does this for you.", outcome.remediation)
+        self.assertEqual(outcome.evidence["interfaces"][2], {"node": "hidraw2", "interface": 2, "mode": "000",
+                                                             "access": "hidden"})
+        self.assertEqual((len(outcome.evidence["interfaces"]), outcome.evidence["hide_rules"],
+                          outcome.evidence["inputplumber"]), (6, 2, True))
+        self.assertNotIn(CANARY_SERIAL, outcome.detail + json.dumps(outcome.evidence))
+        self.assertNotIn(("sudo",), [call[:1] for call in self.commands.calls])
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read every node")
+    def test_default_root_only_interfaces_are_not_blamed_on_a_daemon(self):
+        default = inputstack.check_hidraw_access(self.hidraw_ctx((0o200, 0o200)))
+        self.assertEqual(default.status, Status.INFO)
+        self.assertIn("system default", default.detail)
+        shutil.rmtree(SCRATCH)
+        SCRATCH.mkdir()
+        readable = inputstack.check_hidraw_access(self.hidraw_ctx((0o660, 0o660)))
+        self.assertEqual(readable.status, Status.PASS)
+
+    def test_devices_without_asus_interfaces_skip(self):
+        ctx = self.ally()
+        add_hidraw(SCRATCH, 6, 0, 0o600, vendor="0603", product="F200")
+        self.assertEqual(inputstack.check_hidraw_access(ctx).status, Status.SKIP)
+        self.assertEqual([(node.node, node.vendor, node.interface) for node in evdev.hidraw_nodes(ctx)],
+                         [("hidraw6", 0x0603, 0)])
+
+
+# ---- a complete fake device: every input source carries canaries ---------------------
+
+IP_RULES_WITH_ADDRESS = IP_RULES_DEFAULT.replace("32766:", f"100:\tfrom {CANARY_LAN_IP} lookup main\n32766:")
+TIMEDATECTL = ("timedatectl", "show", "-p", "NTP", "-p", "NTPSynchronized")
+
+
+class World(InputCase):
+    """A healthy ROG Xbox Ally behind a home router, as the doctor's primitives would see it."""
+
+    def world(self, options=None, *, console_answers=True, **ally):
+        ctx = self.ally(inputplumber=True, **ally)
+        files = {
+            **CLIENT_FILES, "/proc/net/route": WIFI_ROUTES, "/proc/net/if_inet6": IF_INET6_LOCAL,
+            "/proc/net/ipv6_route": IPV6_ROUTE_NO_DEFAULT, "/proc/net/dev": PROC_NET_DEV,
+            "/proc/net/arp": arp("0x2"), "/etc/resolv.conf": RESOLV_STUB, "/etc/hostname": CANARY_HOST + "\n",
+            "/proc/sys/kernel/hostname": CANARY_HOST + "\n", "/sys/class/net/wlp3s0/wireless/.keep": "",
+            "/sys/class/net/wlp3s0/mtu": "1500\n", "/etc/default/ufw": UFW_DEFAULTS, "/etc/ufw/user.rules": UFW_RULES,
+            "/sys/class/drm/card1/device/vendor": "0x1002\n", "/sys/class/drm/card1/device/device": "0x163f\n",
+            "/run/udev/rules.d/50-inputplumber-hide-hidraw5-early.rules": "",
+        }
+        for path, text in files.items():
+            write(SCRATCH / path.lstrip("/"), text)
+        for number in range(6):
+            add_hidraw(SCRATCH, number, number, 0o000 if number in (2, 5) else 0o200)
+        commands = {
+            **self.commands.table, **CLIENT_COMMANDS, **UFW_ACTIVE, **iw_commands(journal=JOURNAL_EVENTS),
+            ("resolvectl", "status"): RESOLVECTL_STATUS, ("ip", "-4", "rule", "show"): IP_RULES_WITH_ADDRESS,
+            TIMEDATECTL: "NTP=yes\nNTPSynchronized=yes\n", PING_GATEWAY: PING_CLEAN,
+            pmtu_argv(1200): ping_reply(2), pmtu_argv(1472): ping_reply(2),
+        }
+        self.commands = FakeCommands(commands)
+
+        def respond(data, destination, sock):
+            if destination[1] == 123:
+                return ntp_server(0.2)(data, destination, sock)
+            request = stun.decode(data)
+            if request.method == stun.ALLOCATE:
+                return [(allocate_error(request, 401, "Unauthorized"), destination)]
+            if destination[0] == CONSOLE_IP and not console_answers:
+                return []
+            return [(binding_success(request, (CANARY_PUBLIC_IP, sock.local[1])), destination)]
+
+        self.udp = UdpWorld(respond)
+        self.tls = FakeTls()
+        env = {**CLIENT_ENV, "USER": CANARY_USER, "HTTPS_PROXY": f"http://{CANARY_USER}:pw@proxy.{CANARY_DOMAIN}:3128"}
+        return make_context(
+            root=SCRATCH, commands=self.commands, env=env, options=options or Options(),
+            getaddrinfo=fake_dns(ipv6={"www.xbox.com": [CANARY_PUBLIC_IP6]}), udp_socket=self.udp.socket,
+            tcp_connect=lambda address, timeout: FakeTcp(), tls_context=self.tls, redactor=ctx.redactor)
+
+
+class PlanTest(World):
+    def test_scopes_select_checks_and_environment_facts_are_always_included(self):
+        ids = {scope: [check.id for check in checks.plan(Options(scope=scope))] for scope in checks.SCOPES}
+        self.assertEqual(ids["system"], ["system.platform", "system.device", "system.gpu"])
+        self.assertEqual(ids["input"][:3], ids["system"])
+        self.assertEqual(ids["input"][3:], ["input.gamepads", "input.stack", "input.handheld", "input.hidraw-access"])
+        self.assertEqual(ids["all"], ids["streaming"] + ids["input"][3:])
+        self.assertFalse(any(name.startswith("input.") for name in ids["streaming"]))
+        for expected in ("stun.binding", "turn.challenge", "nat.mapping_stability", "dns.required", "tls443.required",
+                         "wifi.link", "wifi.events", "firewall.rules", "browser.support_policy", "video.vaapi",
+                         "console.reachability", "manual.console_account_region", "capture.failed_attempt"):
+            self.assertIn(expected, ids["streaming"])
+        self.assertEqual(len(ids["all"]), len(set(ids["all"])))
+
+    def test_console_route_is_planned_only_with_an_address_and_nothing_discovers_or_launches(self):
+        self.assertNotIn("console.route", [check.id for check in checks.plan(Options())])
+        with_console = [check.id for check in checks.plan(Options(console_ip=CONSOLE_IP))]
+        self.assertLess(with_console.index("console.route"), with_console.index("console.reachability"))
+        everything = " ".join(check.id for check in checks.plan(Options(console_ip=CONSOLE_IP)))
+        for removed in ("lan", "smartglass", "upnp", "webrtc", "deep"):
+            self.assertNotIn(removed, everything)
+
+    def test_decisive_evidence_is_exactly_firewall_console_and_a_live_attempt(self):
+        decisive = [check.id for check in checks.plan(Options()) if check.decisive]
+        self.assertEqual(decisive, ["firewall.rules", "manual.console_account_region", "capture.failed_attempt"])
+
+    def test_every_check_states_what_it_proves_and_does_not_prove(self):
+        for check in checks.plan(Options(console_ip=CONSOLE_IP)):
+            for text in (check.title, check.proves, check.does_not_prove):
+                self.assertTrue(text and len(text) <= 100, check.id)
+            self.assertIn(check.category, checks.CATEGORY_TITLES, check.id)
+
+    def test_every_evidence_field_a_check_emits_is_declared(self):
+        worlds = [(Options(console_ip=CONSOLE_IP), {}), (Options(), {"hide_raw": False, "hook": "disabled"})]
+        for options, ally in worlds:
+            ctx = self.world(options, **ally)
+            for check in checks.plan(options):
+                dropped = []
+                outcome = check.run(ctx)
+                runner.allowlisted(outcome.evidence, (*runner.BASE_FIELDS, *check.fields), dropped)
+                self.assertEqual(dropped, [], check.id)
+
+    def test_healthy_world_has_no_failure_and_only_the_expected_warnings(self):
+        options = Options(console_ip=CONSOLE_IP)
+        results = runner.run_checks(checks.plan(options), self.world(options), workers=1)
+        by_status = collections.defaultdict(list)
+        for result in results:
+            by_status[result.status].append(result.id)
+        self.assertEqual(by_status[Status.FAIL], [])
+        self.assertEqual(by_status[Status.WARN], ["network.vpn_proxy", "dns.resolver", "wifi.link", "wifi.events",
+                                                  "browser.support_policy", "input.hidraw-access"])
+        self.assertEqual(by_status[Status.SKIP], ["firewall.rules", "manual.console_account_region",
+                                                  "capture.failed_attempt"])
+        self.assertEqual([result.id for result in results], [check.id for check in checks.plan(options)])
+
+    def test_the_doctor_runs_only_read_only_commands(self):
+        options = Options(console_ip=CONSOLE_IP)
+        runner.run_checks(checks.plan(options), self.world(options), workers=1)
+        tools = {call[0] for call in self.commands.calls}
+        self.assertEqual(tools, {"omarchy", "hyprctl", "pacman", "ip", "resolvectl", "timedatectl", "iw", "journalctl",
+                                 "ping", "systemctl", "chromium", "vainfo", "busctl"})
+        for call in self.commands.calls:
+            self.assertNotIn(call[0], ("sudo", "pkexec", "su", "doas", "greenlight", "greenlight-desktop", "steam"))
+            if call[0] == "systemctl":
+                self.assertIn(call[1], ("is-active", "is-enabled"))
+            if call[0] == "pacman":
+                self.assertEqual(call[1], "-Q")
+            if call[0] == "omarchy":
+                self.assertEqual(call, ("omarchy", "version"))
+            if call[0] == "busctl":
+                self.assertEqual(call[:3], ("busctl", "--system", "status"))
 
 
 if __name__ == "__main__":

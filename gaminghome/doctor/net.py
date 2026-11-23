@@ -244,7 +244,7 @@ def check_ipv6(ctx: Context) -> Outcome:
             else "an IPv6 default route but no global IPv6 address")
     return warn(f"Half-configured IPv6: {half}. Apps may try IPv6 first and stall before falling back to IPv4.",
                 "Fix IPv6 on the router (router advertisements or DHCPv6), or turn IPv6 off for this connection "
-                "consistently: nmcli connection modify '<connection name>' ipv6.method disabled", **state)
+                "consistently: `nmcli connection modify '<connection name>' ipv6.method disabled`", **state)
 
 
 # ---- VPN, policy routing, proxy -------------------------------------------------
@@ -470,7 +470,7 @@ def check_dns_required(ctx: Context) -> Outcome:
     names = ", ".join(f"{row['host']} ({row['error']})" for row in failed)
     blocked = any(row["error"] == "non-routable-answer" for row in failed)
     hint = ("A non-routable answer means the resolver or a captive portal is blocking the name. " if blocked else "")
-    remedy = (hint + "Check the connection and the resolver; compare with: resolvectl query www.xbox.com")
+    remedy = (hint + "Check the connection and the resolver; compare with: `resolvectl query www.xbox.com`")
     streaming = [row for row in rows if row["role"] == "streaming-service"]
     if len(failed) == len(rows):
         return fail("No Xbox or Microsoft service name resolves: DNS is not working.", remedy, **evidence)
@@ -602,7 +602,7 @@ def check_clock(ctx: Context) -> Outcome:
     synced = state.get("NTPSynchronized")
     evidence = dict(ntp_enabled=state.get("NTP"), ntp_synchronized=synced,
                     offset_ms=None if offset is None else round(offset * 1000), reference=NTP_HOST)
-    fix = "Turn on time synchronisation: sudo timedatectl set-ntp true"
+    fix = "Turn on time synchronisation: `sudo timedatectl set-ntp true`"
     if offset is None and synced is None:
         return skip("Could not read the time-sync state or reach an NTP server.", **evidence)
     if offset is not None and abs(offset) > 30:
