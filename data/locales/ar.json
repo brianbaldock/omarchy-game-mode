@@ -96,6 +96,7 @@
   "inputplumber.device": "يدير ⁦InputPlumber {version}⁩ الجهاز ⁦{name}⁩ بملف التعريف ⁦{profile}⁩.",
   "inputplumber.reading": "يقرأ ⁦Omarchy Game Mode⁩ وحدة التحكم الافتراضية الخاصة به ولا يغيّر شيئًا في ⁦InputPlumber⁩.",
   "inputplumber.noDevice": "يعمل ⁦InputPlumber⁩ لكنه لا يدير أي وحدة تحكم.",
+  "inputplumber.readFailed": "يعمل ⁦InputPlumber⁩ لكن ⁦Omarchy Game Mode⁩ لم يتمكن من قراءة حالته.",
   "inputplumber.unrecognized": "لا يتعرّف ⁦Omarchy Game Mode⁩ على نوع وحدة التحكم الافتراضية الخاصة به (⁦{kinds}⁩). استخدم لوحة المفاتيح أو اللمس هنا.",
   "inputplumber.ambiguous": "عدة وحدات تحكم افتراضية تشبه التي يعلن عنها ⁦InputPlumber⁩، لذلك لا يستخدم ⁦Omarchy Game Mode⁩ أيًّا منها. استخدم لوحة المفاتيح أو اللمس هنا.",
   "inputplumber.hidden": "الجهاز ⁦{name}⁩ موجود، لكن ⁦InputPlumber⁩ يخفيه ولا يستطيع ⁦Omarchy Game Mode⁩ قراءته.",

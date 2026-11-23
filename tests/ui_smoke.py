@@ -51,7 +51,7 @@ class VirtualPadStub(Stub):
 def demo_inputplumber():
     """The client as it looks on a ROG Xbox Ally with evdev sources only; it is never started."""
     client = InputPlumberClient(lambda: None)
-    client.owner, client.version, client.settled = ":demo", "0.82.0", True
+    client.owner, client.version, client.serial = ":demo", "0.82.0", 1
     client.composites = (Composite(
         path="/org/shadowblip/InputPlumber/CompositeDevice0", name="ASUS ROG Xbox Ally", profile="Default",
         targets=("mouse", "xbox-elite", "keyboard"), dbus_targets=1, sources=5, hidraw_sources=False,

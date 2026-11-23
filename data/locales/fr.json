@@ -96,6 +96,7 @@
   "inputplumber.device": "InputPlumber {version} gère {name} avec le profil {profile}.",
   "inputplumber.reading": "Omarchy Game Mode lit sa manette virtuelle et ne modifie rien dans InputPlumber.",
   "inputplumber.noDevice": "InputPlumber est lancé, mais ne gère aucune manette.",
+  "inputplumber.readFailed": "InputPlumber est lancé, mais Omarchy Game Mode n’a pas pu lire son état.",
   "inputplumber.unrecognized": "Omarchy Game Mode ne reconnaît pas son type de manette virtuelle ({kinds}). Utilisez le clavier ou le tactile ici.",
   "inputplumber.ambiguous": "Plusieurs manettes virtuelles ressemblent à celle qu’annonce InputPlumber ; Omarchy Game Mode n’en utilise donc aucune. Utilisez le clavier ou le tactile ici.",
   "inputplumber.hidden": "{name} est présent, mais InputPlumber le masque et Omarchy Game Mode ne peut pas le lire.",

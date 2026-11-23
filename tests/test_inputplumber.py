@@ -185,14 +185,18 @@ class ClientLogicTest(unittest.TestCase):
     def appear(self, owner=":1.42"):
         self.client._appeared(self.bus, BUS_NAME, owner)
 
-    def settle(self):
+    def settle(self, **answers):
         """Answer discoveries until the client only waits for hints."""
         for _ in range(8):
-            self.bus.answer_all()
+            self.bus.answer_all(**answers)
             if self.client.idle:
                 return
             self.fire()
         self.fail("client did not settle")
+
+    def refuse(self):
+        for call in self.bus.pending():
+            self.bus.answer(call, Gio.DBusError.new_for_dbus_error("org.freedesktop.DBus.Error.AccessDenied", "no"))
 
     def test_calls_and_subscriptions_are_pinned_to_the_current_unique_owner(self):
         self.appear()
@@ -219,8 +223,7 @@ class ClientLogicTest(unittest.TestCase):
         self.assertEqual(len(self.bus.unsubscribed), 2)
         self.appear(":1.77")
         self.bus.answer_all(only=old)                      # late replies addressed to the old owner
-        self.assertEqual(self.client.composites, ())
-        self.assertFalse(self.client.settled and self.client.idle)
+        self.assertEqual((self.client.composites, self.client.state), ((), "pending"))
         self.bus.answer_all(composites={f"{ROOT}/CompositeDevice3": composite_properties(name="Second pad")})
         self.assertEqual([composite.name for composite in self.client.composites], ["Second pad"])
         self.assertEqual({call.bus_name for call in self.bus.calls if call not in old}, {":1.77"})
@@ -307,7 +310,7 @@ class ClientLogicTest(unittest.TestCase):
         unexpected = SimpleNamespace(get_size=lambda: 0, unpack=lambda: 1 / 0)         # a reply nobody expected
         self.bus.answer(self.bus.pending()[0], unexpected)
         self.assertIn("ZeroDivisionError", self.client.error)
-        self.assertTrue(self.client.settled and self.client.idle)
+        self.assertEqual((self.client.state, self.client.idle), ("failed", True))
         self.client.on_change = lambda: 1 / 0                                          # a failing consumer
         self.client.hint()
         self.settle()
@@ -396,14 +399,38 @@ class ClientLogicTest(unittest.TestCase):
         self.assertEqual(len(self.bus.calls), sent)
         self.assertTrue(self.client.idle)
 
+    def test_pending_failed_and_empty_are_told_apart(self):
+        client = self.client
+        self.assertEqual((client.state, client.settled), ("unknown", False))
+        client._vanished(None, BUS_NAME)
+        self.assertEqual((client.state, client.settled), ("absent", True))
+        self.appear()                                      # InputPlumber is started later: nothing is read yet
+        self.assertEqual((client.state, client.settled, client.notes()), ("pending", False, []))
+        self.refuse()
+        self.assertEqual((client.state, client.settled, client.notes()), ("failed", False, []))
+        self.assertIn("AccessDenied", client.error)
+        self.fire()                                        # a retry that can read: nothing is managed
+        self.settle(composites={})
+        self.assertEqual((client.state, client.settled, client.notes()), ("empty", True, ["no-device"]))
+        client.hint()
+        self.settle()
+        self.assertEqual((client.state, client.settled, len(client.composites)), ("ready", True, 1))
+        client.hint()
+        self.fire()
+        self.refuse()                                      # the picture is kept, but it is not a current answer
+        self.assertEqual((client.state, client.settled, len(client.composites)), ("failed", False, 1))
+        self.appear(":1.77")                               # another owner: nothing is known about it
+        self.assertEqual((client.state, client.settled, client.composites, client.error),
+                         ("pending", False, (), None))
+
     def test_unowned_name_settles_without_a_single_call(self):
         self.client._vanished(None, BUS_NAME)
         self.client.hint()
         self.assertEqual((self.client.settled, self.client.available, self.bus.calls, self.timers),
                          (True, False, [], {}))
         self.assertEqual(self.client.virtual_gamepads(), VirtualGamepads())
-        self.assertEqual(self.client.status(), {"available": False, "version": None, "settled": True,
-                                                "composites": [], "notes": [], "error": None})
+        self.assertEqual(self.client.status(), {"available": False, "state": "absent", "version": None,
+                                                "settled": True, "composites": [], "notes": [], "error": None})
 
 
 class ClientBusTest(unittest.TestCase):
@@ -458,7 +485,7 @@ class ClientBusTest(unittest.TestCase):
         fake = self.fake(persistent_id="Vendor_Pad_SERIAL123456")
         client = self.client()
         self.settle(client)
-        self.assertEqual(client.status(), {"available": True, "version": "0.82.0", "settled": True,
+        self.assertEqual(client.status(), {"available": True, "state": "ready", "version": "0.82.0", "settled": True,
                                            "composites": [RC73YA_STATUS], "notes": ["evdev-only", "no-r3"],
                                            "error": None})
         self.assertEqual(client.virtual_gamepads(), VirtualGamepads({ELITE: 1}, RC73YA_NODES))
@@ -482,6 +509,25 @@ class ClientBusTest(unittest.TestCase):
         self.assertFalse(client.available)
         self.assertEqual(client.virtual_gamepads(), VirtualGamepads())
         self.assertEqual(bystander.calls, [])
+
+    def test_late_owner_is_pending_until_read_and_a_refused_read_is_not_an_empty_one(self):
+        client = self.client()
+        self.assertTrue(pump(lambda: client.state == "absent"))
+        fake = self.fake(own=False, composite=False)
+        fake.hold = lambda call: True
+        self.assertTrue(fake.own())                        # InputPlumber is started after Game Mode
+        self.assertTrue(pump(lambda: len(fake.held) == 2))
+        self.assertEqual((client.state, client.settled, client.notes()), ("pending", False, []))
+        fake.failures[(ROOT, "Introspect")] = ("org.freedesktop.DBus.Error.AccessDenied", "not allowed")
+        fake.hold = None
+        fake.answer_held()
+        self.assertTrue(pump(lambda: client.state == "failed"))
+        self.assertEqual((client.settled, client.notes(), client.composites), (False, [], ()))
+        self.assertTrue(pump(lambda: client.idle))         # bounded retries, then quiet
+        del fake.failures[(ROOT, "Introspect")]
+        client.hint()
+        self.assertTrue(pump(lambda: client.state == "empty"))
+        self.assertEqual((client.settled, client.notes()), (True, ["no-device"]))
 
     def test_owner_change_drops_the_old_picture_and_reads_only_the_new_owner(self):
         first = self.fake()
@@ -621,9 +667,9 @@ class ClientBusTest(unittest.TestCase):
         fake.root_document = "<node"
         client.hint()
         self.assertTrue(pump(lambda: client.error))
-        self.settle(client)
+        self.assertTrue(pump(lambda: client.idle))
         self.assertEqual(fake.count("Introspect") - asked, 3)
-        self.assertEqual(client.composites, picture)
+        self.assertEqual((client.composites, client.state), (picture, "failed"))
         fake.root_document = None
         client.hint()
         self.assertTrue(pump(lambda: client.error is None))

@@ -291,9 +291,14 @@ class Runtime:
             names = ", ".join(self.t("inputplumber.padName", name=d["name"]) if d.get("virtual") else d["name"]
                               for d in status["devices"])
             return {"label": self.t("status.controllerConnected"), "state": "ok", "tooltip": names}
+        from .inputplumber import STATE_FAILED, STATE_PENDING, STATE_UNKNOWN
+        state = self.inputplumber.state
         # Until InputPlumber has answered, a hidden physical node is not yet known to be hidden on purpose.
-        if self.inputplumber.settled and any("permission" in e["error"] for e in status["errors"]):
-            return {"label": self.t("status.controllerPermission"), "state": "warn", "tooltip": "; ".join(e["error"] for e in status["errors"])}
+        if state not in (STATE_UNKNOWN, STATE_PENDING) and any("permission" in e["error"] for e in status["errors"]):
+            reasons = [e["error"] for e in status["errors"]]
+            if state == STATE_FAILED:
+                reasons.append(self.t("inputplumber.readFailed"))
+            return {"label": self.t("status.controllerPermission"), "state": "warn", "tooltip": "; ".join(reasons)}
         gap = self._inputplumber_gap(status)
         if status.get("unreadable"):
             # Information, not a fault to fix: the controller is there, hidden, and has no virtual twin to read.
@@ -301,10 +306,13 @@ class Runtime:
         return {"label": self.t("status.controllerUnavailable"), "state": None, "tooltip": gap}
 
     def _inputplumber_gap(self, status) -> str:
-        """Why no controller navigates Game Mode although InputPlumber manages one, if that is the case."""
+        """Why no controller navigates Game Mode although InputPlumber is running, as far as that is known."""
+        from .inputplumber import STATE_FAILED
         if not self.inputplumber.available:
             return ""
         parts = []
+        if self.inputplumber.state == STATE_FAILED:
+            parts.append(self.t("inputplumber.readFailed"))
         if status.get("unreadable"):
             parts.append(self.t("inputplumber.hidden", name=", ".join(d["name"] for d in status["unreadable"])))
         kinds = self.inputplumber.unrecognized_targets()
@@ -315,13 +323,15 @@ class Runtime:
         return " ".join(parts)
 
     def inputplumber_summary(self):
-        """Informational text for Settings; None when InputPlumber is not running."""
+        """Informational text for Settings; None while InputPlumber is not running or has not answered yet."""
+        from .inputplumber import NOTE_EVDEV_ONLY, NOTE_NO_R3, STATE_EMPTY, STATE_FAILED, STATE_READY
         client = self.inputplumber
-        if not client.available or not client.settled:
-            return None
-        if not client.composites:
+        if client.state == STATE_FAILED:
+            return self.t("inputplumber.readFailed")
+        if client.state == STATE_EMPTY:
             return self.t("inputplumber.noDevice")
-        from .inputplumber import NOTE_EVDEV_ONLY, NOTE_NO_R3
+        if client.state != STATE_READY:
+            return None
         status = self.input.status()
         version = client.version or "?"
         parts = [self.t("inputplumber.device", version=version, name=c.name or "?", profile=c.profile or "?")

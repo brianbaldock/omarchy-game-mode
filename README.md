@@ -127,7 +127,10 @@ sends no event. It only reads InputPlumber's state over D-Bus, so that
 - Settings and `omarchy-game-mode status` (section `inputplumber`) describe what
   InputPlumber manages: device name, profile name, target types, number of sources,
   whether any source is hidraw, and notes such as `evdev-only` or `no-r3`. No serial
-  or persistent identifier is read into that report.
+  or persistent identifier is read into that report. Its `state` tells an InputPlumber
+  that manages no controller (`empty`) from one that could not be read (`failed`) and
+  from one that has not answered yet (`pending`). Settings says which of the first two
+  it is and shows nothing for the third.
 
 **How the virtual gamepad is recognized.** This is a heuristic, not proof of origin:
 InputPlumber does not say which event node belongs to which target. A virtual node is

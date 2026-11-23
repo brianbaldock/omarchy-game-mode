@@ -96,6 +96,7 @@
   "inputplumber.device": "O InputPlumber {version} gerencia {name} com o perfil {profile}.",
   "inputplumber.reading": "O Omarchy Game Mode lê o controle virtual dele e não altera nada no InputPlumber.",
   "inputplumber.noDevice": "O InputPlumber está em execução, mas não gerencia nenhum controle.",
+  "inputplumber.readFailed": "O InputPlumber está em execução, mas o Omarchy Game Mode não conseguiu ler o estado dele.",
   "inputplumber.unrecognized": "O Omarchy Game Mode não reconhece o tipo de controle virtual dele ({kinds}). Use o teclado ou o toque aqui.",
   "inputplumber.ambiguous": "Vários controles virtuais se parecem com o que o InputPlumber anuncia, então o Omarchy Game Mode não usa nenhum. Use o teclado ou o toque aqui.",
   "inputplumber.hidden": "{name} está presente, mas o InputPlumber o oculta e o Omarchy Game Mode não consegue lê-lo.",

@@ -96,6 +96,7 @@
   "inputplumber.device": "InputPlumber {version} manages {name} with the profile {profile}.",
   "inputplumber.reading": "Game Mode reads its virtual gamepad and changes nothing in InputPlumber.",
   "inputplumber.noDevice": "InputPlumber is running but manages no controller.",
+  "inputplumber.readFailed": "InputPlumber is running, but Game Mode could not read its state.",
   "inputplumber.unrecognized": "Game Mode does not recognize its virtual controller type ({kinds}), so use keyboard or touch here.",
   "inputplumber.ambiguous": "Several virtual controllers look like the one InputPlumber announces, so Game Mode uses none of them. Use keyboard or touch here.",
   "inputplumber.hidden": "{name} is present, but InputPlumber hides it and Game Mode cannot read it.",

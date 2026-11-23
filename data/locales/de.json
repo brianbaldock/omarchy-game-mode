@@ -96,6 +96,7 @@
   "inputplumber.device": "InputPlumber {version} verwaltet {name} mit dem Profil {profile}.",
   "inputplumber.reading": "Omarchy Game Mode liest dessen virtuelles Gamepad und ändert nichts an InputPlumber.",
   "inputplumber.noDevice": "InputPlumber läuft, verwaltet aber keinen Controller.",
+  "inputplumber.readFailed": "InputPlumber läuft, aber Omarchy Game Mode konnte dessen Zustand nicht lesen.",
   "inputplumber.unrecognized": "Omarchy Game Mode erkennt dessen virtuellen Controllertyp ({kinds}) nicht. Benutze hier Tastatur oder Touch.",
   "inputplumber.ambiguous": "Mehrere virtuelle Controller sehen aus wie der von InputPlumber gemeldete, deshalb benutzt Omarchy Game Mode keinen davon. Benutze hier Tastatur oder Touch.",
   "inputplumber.hidden": "{name} ist vorhanden, wird aber von InputPlumber verborgen, und Omarchy Game Mode kann ihn nicht lesen.",

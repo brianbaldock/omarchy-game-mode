@@ -96,6 +96,7 @@
   "inputplumber.device": "InputPlumber {version} gestiona {name} con el perfil {profile}.",
   "inputplumber.reading": "Omarchy Game Mode lee su mando virtual y no cambia nada en InputPlumber.",
   "inputplumber.noDevice": "InputPlumber está en ejecución, pero no gestiona ningún mando.",
+  "inputplumber.readFailed": "InputPlumber está en ejecución, pero Omarchy Game Mode no pudo leer su estado.",
   "inputplumber.unrecognized": "Omarchy Game Mode no reconoce su tipo de mando virtual ({kinds}). Usa el teclado o el toque aquí.",
   "inputplumber.ambiguous": "Varios mandos virtuales se parecen al que anuncia InputPlumber, así que Omarchy Game Mode no usa ninguno. Usa el teclado o el toque aquí.",
   "inputplumber.hidden": "{name} está presente, pero InputPlumber lo oculta y Omarchy Game Mode no puede leerlo.",

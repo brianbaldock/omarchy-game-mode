@@ -92,6 +92,15 @@ GAMEPAD_TARGETS = {
 # Target types InputPlumber itself does not count as gamepads.
 NON_GAMEPAD_TARGETS = frozenset({"dbus", "null", "touchscreen", "touchpad", "mouse", "keyboard", "debug"})
 
+# What is known about InputPlumber. Only "empty" and "ready" come from a
+# complete read of the current owner; "failed" may still hold an older picture.
+STATE_UNKNOWN = "unknown"      # the bus has not said yet whether anyone owns the name
+STATE_ABSENT = "absent"        # nobody owns the name
+STATE_PENDING = "pending"      # InputPlumber is there and has not been read yet
+STATE_FAILED = "failed"        # it is there, and the last attempt to read it failed
+STATE_EMPTY = "empty"          # read: it manages no device
+STATE_READY = "ready"          # read: it manages at least one device
+
 NOTE_NO_DEVICE = "no-device"
 NOTE_UNRECOGNIZED = "unrecognized-target"
 NOTE_EVDEV_ONLY = "evdev-only"
@@ -210,9 +219,9 @@ class _Discovery:
 class InputPlumberClient:
     """Keeps a read-only snapshot of InputPlumber's composite devices.
 
-    ``on_change`` is called whenever the snapshot, availability or ``settled``
-    changed. ``connection`` replaces the system bus in tests; ``schedule`` and
-    ``cancel`` replace GLib timers.
+    ``on_change`` is called whenever the snapshot or ``state`` changed.
+    ``connection`` replaces the system bus in tests; ``schedule`` and ``cancel``
+    replace GLib timers.
     """
 
     def __init__(self, on_change, connection: Gio.DBusConnection | None = None, schedule=None, cancel=None,
@@ -222,8 +231,8 @@ class InputPlumberClient:
         self.version: str | None = None
         self.composites: tuple[Composite, ...] = ()
         self.error: str | None = None
-        # False until the first answer is in: is InputPlumber there, and if so what does it manage.
-        self.settled = False
+        self.name_known = False    # the bus has said whether InputPlumber owns its name
+        self.serial = 0            # number of the last complete read of the current owner; 0 while there is none
         self.discoveries = 0
         self._handler_error: str | None = None
         self._connection = connection
@@ -255,6 +264,7 @@ class InputPlumberClient:
         """Idempotent: forget everything and make every pending callback a no-op."""
         watch, self._watch = self._watch, None
         self._forget()
+        self.name_known = False
         if watch is not None:
             self._unwatch_name(watch)
 
@@ -271,6 +281,21 @@ class InputPlumberClient:
     @property
     def available(self) -> bool:
         return self.owner is not None
+
+    @property
+    def state(self) -> str:
+        if not self.available:
+            return STATE_ABSENT if self.name_known else STATE_UNKNOWN
+        if self.error is not None:
+            return STATE_FAILED
+        if not self.serial:
+            return STATE_PENDING
+        return STATE_READY if self.composites else STATE_EMPTY
+
+    @property
+    def settled(self) -> bool:
+        """Whether InputPlumber is there, and if so what it manages, has a complete and current answer."""
+        return self.state in (STATE_ABSENT, STATE_EMPTY, STATE_READY)
 
     @property
     def idle(self) -> bool:
@@ -306,7 +331,7 @@ class InputPlumberClient:
         if not self.available:
             return []
         if not self.composites:
-            return [NOTE_NO_DEVICE] if self.settled else []
+            return [NOTE_NO_DEVICE] if self.state == STATE_EMPTY else []
         notes = []
         pads = [composite for composite in self.composites if composite.gamepads]
         if self.unrecognized_targets():
@@ -318,7 +343,7 @@ class InputPlumberClient:
         return notes
 
     def status(self) -> dict:
-        return {"available": self.available, "version": self.version, "settled": self.settled,
+        return {"available": self.available, "state": self.state, "version": self.version, "settled": self.settled,
                 "composites": [composite.describe() for composite in self.composites],
                 "notes": self.notes(), "error": self.error or self._handler_error}
 
@@ -328,7 +353,7 @@ class InputPlumberClient:
         if self._watch is None:
             return
         self._forget()
-        self._bus, self.owner = connection, owner
+        self._bus, self.owner, self.name_known = connection, owner, True
         self._cancellable = Gio.Cancellable()
         for interface, path in ((COMPOSITE_IFACE, None), (MANAGER_IFACE, MANAGER)):
             self._subscriptions.append(connection.signal_subscribe(
@@ -341,9 +366,9 @@ class InputPlumberClient:
     def _vanished(self, _connection, _name):
         if self._watch is None:
             return
-        changed = self.available or not self.settled
+        changed = self.state != STATE_ABSENT
         self._forget()
-        self.settled = True
+        self.name_known = True
         if changed:
             self._notify()
 
@@ -360,7 +385,7 @@ class InputPlumberClient:
             for subscription in self._subscriptions:
                 self._bus.signal_unsubscribe(subscription)
         self._subscriptions = []
-        self._bus, self.owner, self.version, self.composites, self.error = None, None, None, (), None
+        self._bus, self.owner, self.version, self.composites, self.error, self.serial = None, None, None, (), None, 0
         self._discovery, self._outstanding, self._dirty = None, 0, False
         self._hinted = self._expecting = False
         self._confirms = self._failures = self._unchanged = 0
@@ -536,16 +561,16 @@ class InputPlumberClient:
 
     def _finish(self):
         discovery, self._discovery = self._discovery, None
-        before = (self.version, self.composites, self.error, self.settled)
+        before = (self.version, self.composites, self.error, self.state)
         if discovery.error is None:
             self._failures = 0
+            self.serial = self._pass
             self.version = discovery.version
             self.composites = tuple(self._composite(path, properties, discovery.kinds)
                                     for path, properties in sorted(discovery.composites.items()))
         # A failed discovery keeps the last complete picture instead of a partial one.
         self.error = discovery.error
-        self.settled = True
-        changed = before != (self.version, self.composites, self.error, self.settled)
+        changed = before != (self.version, self.composites, self.error, self.state)
         self._plan(changed, discovery.error is not None)
         if changed:
             self._notify()
@@ -579,5 +604,4 @@ class InputPlumberClient:
         self.error = _text(f"{type(error).__name__}: {error}")
         self._pass += 1
         self._discovery, self._outstanding, self._expecting = None, 0, False
-        self.settled = True
         self._notify()

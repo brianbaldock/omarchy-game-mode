@@ -22,16 +22,22 @@ RC73YA_STATUS = {"name": "ASUS ROG Xbox Ally", "profile": "Default", "targets": 
                  "sources": 5, "hidraw_sources": False, "dbus_targets": 1, "right_stick_button": False}
 
 
-def client(targets=("mouse", "xbox-elite", "keyboard"), available=True, settled=True) -> InputPlumberClient:
-    """A client that is never started, holding what a discovery on a ROG Xbox Ally leaves behind."""
+def client(targets=("mouse", "xbox-elite", "keyboard"), state="ready") -> InputPlumberClient:
+    """A client that is never started, in one of its states; "ready" is a ROG Xbox Ally after a discovery."""
     result = InputPlumberClient(lambda: None)
-    result.settled = settled
-    if available:
-        result.owner, result.version = ":1.5", "0.82.0"
+    result.name_known = state != "unknown"
+    if state in ("pending", "failed", "empty", "ready"):
+        result.owner = ":1.5"
+    if state == "failed":
+        result.error = "GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: not allowed"
+    if state in ("empty", "ready"):
+        result.serial, result.version = 1, "0.82.0"
+    if state == "ready":
         result.composites = (Composite(
             path=f"{ROOT}/CompositeDevice0", name="ASUS ROG Xbox Ally", profile="Default", targets=tuple(targets),
             dbus_targets=1, sources=5, hidraw_sources=False, event_nodes=frozenset({"/dev/input/event6"}),
             right_stick_button=False),)
+    assert result.state == state
     return result
 
 
@@ -58,7 +64,7 @@ class SurfaceTest(unittest.TestCase):
     def test_status_section_has_a_fixed_shape_without_identifiers(self):
         report = Runtime.inputplumber_status(self.runtime(devices=[PAD]))
         self.assertEqual(report, {
-            "available": True, "version": "0.82.0", "settled": True, "composites": [RC73YA_STATUS],
+            "available": True, "state": "ready", "version": "0.82.0", "settled": True, "composites": [RC73YA_STATUS],
             "notes": ["evdev-only", "no-r3"], "error": None,
             "gamepad_nodes": [{"path": "/dev/input/event21", "name": "Microsoft X-Box One Elite 2 pad"}]})
         text = json.dumps(report).lower()
@@ -80,23 +86,36 @@ class SurfaceTest(unittest.TestCase):
         self.assertIn("ambiguous-gamepad", Runtime.inputplumber_status(runtime)["notes"])
 
     def test_permission_warning_waits_until_inputplumber_has_answered(self):
-        runtime = self.runtime(client(available=False, settled=False), errors=[DENIED])
-        self.assertEqual(Runtime.controller_summary(runtime),
-                         {"label": "Keyboard and touch ready", "state": None, "tooltip": ""})
-        runtime = self.runtime(client(available=False), errors=[DENIED])
+        for state in ("unknown", "pending"):
+            runtime = self.runtime(client(state=state), errors=[DENIED])
+            self.assertEqual(Runtime.controller_summary(runtime),
+                             {"label": "Keyboard and touch ready", "state": None, "tooltip": ""}, state)
+            self.assertIsNone(Runtime.inputplumber_summary(runtime), state)
+        runtime = self.runtime(client(state="absent"), errors=[DENIED])
         summary = Runtime.controller_summary(runtime)
-        self.assertEqual((summary["label"], summary["state"]), ("Controller not readable", "warn"))
+        self.assertEqual((summary["label"], summary["state"], summary["tooltip"]),
+                         ("Controller not readable", "warn", DENIED["error"]))
         self.assertIsNone(Runtime.inputplumber_summary(runtime))
         self.assertEqual(Runtime.inputplumber_status(runtime), {
-            "available": False, "version": None, "settled": True, "composites": [], "notes": [], "error": None,
-            "gamepad_nodes": []})
+            "available": False, "state": "absent", "version": None, "settled": True, "composites": [], "notes": [],
+            "error": None, "gamepad_nodes": []})
 
-    def test_running_inputplumber_without_a_device_says_so(self):
-        idle = client()
-        idle.composites = ()
-        runtime = self.runtime(idle)
+    def test_only_a_successful_read_says_that_no_controller_is_managed(self):
+        runtime = self.runtime(client(state="empty"))
         self.assertEqual(Runtime.inputplumber_summary(runtime), "InputPlumber is running but manages no controller.")
         self.assertEqual(Runtime.inputplumber_status(runtime)["notes"], ["no-device"])
+
+        failed = "InputPlumber is running, but Game Mode could not read its state."
+        runtime = self.runtime(client(state="failed"), errors=[DENIED])
+        self.assertEqual(Runtime.inputplumber_summary(runtime), failed)
+        self.assertEqual(Runtime.controller_summary(runtime), {
+            "label": "Controller not readable", "state": "warn", "tooltip": f"{DENIED['error']}; {failed}"})
+        report = Runtime.inputplumber_status(runtime)
+        self.assertEqual((report["state"], report["settled"], report["notes"]), ("failed", False, []))
+        self.assertIn("AccessDenied", report["error"])
+        # Its virtual gamepad may be right there, but nothing says that it may be read.
+        self.assertEqual(Runtime.controller_summary(self.runtime(client(state="failed"))),
+                         {"label": "Keyboard and touch ready", "state": None, "tooltip": failed})
 
 
 class RuntimeWiringTest(unittest.TestCase):
@@ -119,8 +138,9 @@ class RuntimeWiringTest(unittest.TestCase):
 
     def test_status_reports_inputplumber_and_leaves_the_mapper_report_alone(self):
         status = self.runtime.status()
-        self.assertEqual(status["inputplumber"], {"available": False, "version": None, "settled": False,
-                                                  "composites": [], "notes": [], "error": None, "gamepad_nodes": []})
+        self.assertEqual(status["inputplumber"], {"available": False, "state": "unknown", "version": None,
+                                                  "settled": False, "composites": [], "notes": [], "error": None,
+                                                  "gamepad_nodes": []})
         self.assertEqual(sorted(status["mode"]["mapper"]), ["available", "confirmed", "error", "external",
                                                             "initial_sets", "managed", "requested"])
         self.assertEqual(os.listdir(SCRATCH), [])
