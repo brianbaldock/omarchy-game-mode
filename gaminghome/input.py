@@ -15,6 +15,17 @@ read afterwards: the earlier one may still describe the device that is gone.
 While such a virtual gamepad is in use, the physical nodes that stack reads
 are its duplicates: they are not opened, not kept open and not reported.
 Without one, a hidden node is a controller that is present but unreadable.
+
+A physical controller whose key codes are known to be wrong is read through a
+quirk (see ``gaminghome.quirks``): every key code that reaches the
+interpreter, live or adopted as held, is translated first, and so are the
+buttons a device is judged by. Which quirk applies is decided on the open
+descriptor, never on what its path leads to now: the identity it had when it
+was opened, and the key codes it reports, asked again before each batch of
+events is used, because a udev hwdb entry can correct the codes of a device
+that is already open. When they changed, that batch and whatever else is
+queued may come from either layout: they are dropped and the held state is
+read again. Only a device a quirk could apply to is asked.
 """
 
 from __future__ import annotations
@@ -30,7 +41,7 @@ from typing import Callable, Mapping
 
 from gi.repository import Gio, GLib
 
-from . import core
+from . import core, quirks
 
 try:
     from gi.repository import GLibUnix
@@ -44,6 +55,7 @@ INPUT_ID = struct.Struct("HHHH")
 LONG_BITS = struct.calcsize("l") * 8
 BUS_VIRTUAL = 0x06
 KEY_BYTES = 0x2FF // 8 + 1
+ABS_BYTES = 0x3F // 8 + 1
 NAME_BYTES = 256
 
 
@@ -53,6 +65,10 @@ def _ioc(direction, nr, size):
 
 def EVIOCGKEY(length):
     return _ioc(2, 0x18, length)
+
+
+def EVIOCGBIT(event_type, length):
+    return _ioc(2, 0x20 + event_type, length)
 
 
 def EVIOCGABS(code):
@@ -119,12 +135,21 @@ class VirtualGamepads:
 
 @dataclass
 class Probe:
+    """What sysfs says about an event node. ``keys`` are the key codes exactly as the kernel reports them."""
     node: str
     name: str
     gamepad: bool
     virtual: bool
     identity: GamepadIdentity | None = None
     uinput: bool = False
+    keys: frozenset = frozenset()
+    axes: frozenset = frozenset()
+    quirk: quirks.Quirk | None = None
+
+    @property
+    def buttons(self) -> frozenset:
+        """The key codes as Game Mode reads them: through the quirk, when the device has one."""
+        return self.quirk.translate_all(self.keys) if self.quirk else self.keys
 
 
 def probe(node: str, sysfs_root: str = "/sys/class/input") -> Probe | None:
@@ -146,12 +171,16 @@ def probe(node: str, sysfs_root: str = "/sys/class/input") -> Probe | None:
     if not name and not base.exists():
         return None
     bustype = read_hex("id/bustype")
-    keys = parse_bitmap(read("capabilities/key"))
-    axes = parse_bitmap(read("capabilities/abs"))
+    keys = frozenset(parse_bitmap(read("capabilities/key")))
+    axes = frozenset(parse_bitmap(read("capabilities/abs")))
     device_path = os.path.realpath(base)
     identity = GamepadIdentity(name, bustype, read_hex("id/vendor"), read_hex("id/product"))
-    return Probe(node, name or os.path.basename(node), is_gamepad(keys, axes), is_virtual(device_path, bustype, name),
-                 identity, "/devices/virtual/input/" in device_path)
+    info = Probe(node, name or os.path.basename(node), False, is_virtual(device_path, bustype, name), identity,
+                 "/devices/virtual/input/" in device_path, keys, axes)
+    # A virtual device carries what another program emits: only a physical one is read through a quirk.
+    info.quirk = None if info.virtual else quirks.quirk_for(info)
+    info.gamepad = is_gamepad(info.buttons, axes)
+    return info
 
 
 def evdev_identity(fd: int) -> GamepadIdentity | None:
@@ -167,10 +196,44 @@ def evdev_identity(fd: int) -> GamepadIdentity | None:
     return GamepadIdentity(bytes(name).split(b"\0", 1)[0].decode("utf-8", "replace"), bustype, vendor, product)
 
 
+def evdev_snapshot(fd: int) -> tuple[set[int], dict[int, int]]:
+    """Key codes held and stick and D-pad positions of an open event node; OSError when the keys cannot be read.
+
+    An axis that cannot be read is left out.
+    """
+    buf = bytearray(KEY_BYTES)
+    fcntl.ioctl(fd, EVIOCGKEY(KEY_BYTES), buf, True)
+    pressed = {i for i in range(KEY_BYTES * 8) if buf[i // 8] & (1 << (i % 8))}
+    axes = {}
+    for code in core.DIRECTION_AXES:
+        info = array.array("i", [0] * 6)
+        try:
+            fcntl.ioctl(fd, EVIOCGABS(code), info, True)
+        except OSError:
+            continue
+        axes[code] = info[0]
+    return pressed, axes
+
+
+def evdev_capabilities(fd: int, event_type: int) -> frozenset[int]:
+    """Key or axis codes an open event node reports right now; OSError when it cannot be asked (device gone)."""
+    size = KEY_BYTES if event_type == core.EV_KEY else ABS_BYTES
+    buf = bytearray(size)
+    fcntl.ioctl(fd, EVIOCGBIT(event_type, size), buf, True)
+    return frozenset(i for i in range(size * 8) if buf[i // 8] & (1 << (i % 8)))
+
+
 class _Device:
-    def __init__(self, node, name, fd, source, virtual=False):
-        self.node, self.name, self.fd, self.source, self.virtual = node, name, fd, source, virtual
+    """An open event node. ``keys`` is None unless its layout is watched for a quirk."""
+
+    def __init__(self, node, name, fd, virtual=False):
+        self.node, self.name, self.fd, self.virtual = node, name, fd, virtual
+        self.source = None
         self.reads = 0  # reads of a virtual gamepad's state; events read before one are stale
+        self.identity: GamepadIdentity | None = None     # as the descriptor reported it when it was opened
+        self.axes: frozenset = frozenset()
+        self.keys: frozenset | None = None
+        self.quirk: quirks.Quirk | None = None
 
 
 class ControllerMonitor:
@@ -180,13 +243,16 @@ class ControllerMonitor:
     ``on_candidate`` is told when a virtual gamepad came or went, so the
     provider of that allowlist can look again, and returns the serial of the
     first read that can answer. Both are optional. ``identify`` reads the
-    identity of an opened node and exists so tests need no evdev.
+    identity of an opened node, ``capabilities`` its key or axis codes and
+    ``snapshot`` what is held on it; they exist so tests need no evdev.
     """
 
     def __init__(self, interpreter: core.ControllerInterpreter, on_change, dev_dir="/dev/input",
                  sysfs_root="/sys/class/input", extra_gamepads: Callable[[], VirtualGamepads] | None = None,
                  on_candidate: Callable[[], int | None] | None = None,
-                 identify: Callable[[int], GamepadIdentity | None] = evdev_identity):
+                 identify: Callable[[int], GamepadIdentity | None] = evdev_identity,
+                 snapshot: Callable[..., tuple[set[int], dict[int, int]]] = evdev_snapshot,
+                 capabilities: Callable[[int, int], frozenset[int]] = evdev_capabilities):
         self.interpreter = interpreter
         self.interpreter.on_resync = self.resync
         self.on_change = on_change
@@ -195,6 +261,8 @@ class ControllerMonitor:
         self.extra_gamepads = extra_gamepads
         self.on_candidate = on_candidate
         self.identify = identify
+        self.snapshot = snapshot
+        self.capabilities = capabilities
         self.devices: dict[str, _Device] = {}
         self.errors: dict[str, str] = {}
         self.hidden: dict[str, str] = {}
@@ -227,8 +295,8 @@ class ControllerMonitor:
 
     def status(self) -> dict:
         return {
-            "devices": [{"path": d.node, "name": d.name, **({"virtual": True} if d.virtual else {})}
-                        for d in self.devices.values()],
+            "devices": [{"path": d.node, "name": d.name, "quirk": d.quirk.name if d.quirk else None,
+                         **({"virtual": True} if d.virtual else {})} for d in self.devices.values()],
             "errors": [{"path": p, "error": e} for p, e in self.errors.items()],
             "ambiguous": list(self.ambiguous),
             "unreadable": [{"path": p, "name": n} for p, n in self.hidden.items()],
@@ -273,6 +341,34 @@ class ControllerMonitor:
                 allow = self._allowlist()
                 if not self._duplicate(node, allow) and self._open(node, info, allow):
                     self.on_change()
+
+    def _watch_layout(self, device: _Device):
+        """Decide the quirk of a physical device on its open descriptor; OSError when that cannot be asked."""
+        identity = self.identify(device.fd)
+        if not quirks.might_need_quirk(identity):
+            return
+        device.identity = identity
+        device.axes = self.capabilities(device.fd, core.EV_ABS)
+        self._judge_layout(device)
+
+    def _judge_layout(self, device: _Device) -> bool:
+        """Ask a watched descriptor for its key codes; True when they changed, and the quirk was decided again."""
+        keys = self.capabilities(device.fd, core.EV_KEY)
+        if keys == device.keys:
+            return False
+        device.keys = keys
+        device.quirk = quirks.quirk_for(device)
+        return True
+
+    @staticmethod
+    def _drain(fd):
+        """Throw away what is queued on a descriptor; OSError when the device is gone."""
+        while True:
+            try:
+                if not os.read(fd, EVENT.size * 64):
+                    raise OSError(errno.ENODEV, "end of input")
+            except BlockingIOError:
+                return
 
     def _duplicate(self, node, allow: VirtualGamepads) -> bool:
         """A source of the stack whose virtual gamepad is in use: the same presses, twice."""
@@ -389,6 +485,14 @@ class ControllerMonitor:
             # The node is not the device that was judged in sysfs (replaced in between).
             os.close(fd)
             return self.errors.pop(node, None) is not None
+        device = _Device(node, info.name, fd, info.virtual)
+        if not info.virtual:
+            try:
+                self._watch_layout(device)
+            except OSError as error:
+                os.close(fd)
+                self.hidden.pop(node, None)
+                return self._fail(node, f"{info.name}: {error.strerror}")
         self.errors.pop(node, None)
         self.hidden.pop(node, None)
         # A virtual gamepad is only ever one that an input stack announced.
@@ -401,41 +505,35 @@ class ControllerMonitor:
             except OSError:
                 pass
         condition = GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR
-        source = _fd_add(GLib.PRIORITY_DEFAULT, fd, condition, self._on_readable, node)
-        self.devices[node] = _Device(node, info.name, fd, source, info.virtual)
+        device.source = _fd_add(GLib.PRIORITY_DEFAULT, fd, condition, self._on_readable, node)
+        self.devices[node] = device
         self.resync(node)
         return True
 
     def resync(self, node):
         """Adopt held buttons/axes on connect and when the interpreter asks for it (no actions).
 
-        A virtual gamepad whose keys cannot be read is not taken for one with
-        nothing held: it is read again at its next report. An axis of it that
-        cannot be read keeps its side.
+        Only keys that cannot be read make a read fail: an axis that cannot be
+        read is left out, and the keys and axes read are adopted, the keys of a
+        pad with a quirk through it. A virtual gamepad whose keys cannot be
+        read is not taken for one with nothing held: it is read again at its
+        next report, and an axis of it that cannot be read keeps its side. Any
+        other pad whose keys cannot be read counts as one with nothing held.
         """
         device = self.devices.get(node)
         if device is None:
             return
         if device.virtual:
             device.reads += 1
-        pressed, axes = set(), {}
         try:
-            buf = bytearray(KEY_BYTES)
-            fcntl.ioctl(device.fd, EVIOCGKEY(KEY_BYTES), buf, True)
-            pressed = {i for i in range(KEY_BYTES * 8) if buf[i // 8] & (1 << (i % 8))}
-            for code in (core.ABS_X, core.ABS_Y, core.ABS_HAT0X, core.ABS_HAT0Y):
-                info = array.array("i", [0] * 6)
-                try:
-                    fcntl.ioctl(device.fd, EVIOCGABS(code), info, True)
-                except OSError:
-                    if device.virtual:
-                        continue
-                    raise
-                axes[code] = info[0]
+            pressed, axes = self.snapshot(device.fd)
         except OSError:
             if device.virtual:
                 self.interpreter.distrust(node)
                 return
+            pressed, axes = set(), {}
+        if device.quirk is not None:
+            pressed = device.quirk.translate_all(pressed)
         self.interpreter.sync_state(node, pressed, axes)
 
     def _on_readable(self, fd, condition, node):
@@ -455,8 +553,24 @@ class ControllerMonitor:
             if not data:
                 self._remove(node, source_done=True)
                 return False
+            if device.keys is not None:
+                try:
+                    relaid = self._judge_layout(device)
+                    if relaid:
+                        # Read, or still queued, under either layout: none of it can be trusted.
+                        self._drain(fd)
+                except OSError:
+                    self._remove(node, source_done=True)
+                    return False
+                if relaid:
+                    self.resync(node)
+                    continue
             for offset in range(0, len(data) - EVENT.size + 1, EVENT.size):
                 _sec, _usec, etype, code, value = EVENT.unpack_from(data, offset)
+                if etype == core.EV_KEY and device.quirk is not None:
+                    code = device.quirk.translate(code)
+                    if code is None:
+                        continue
                 reads = device.reads
                 self.interpreter.feed(node, etype, code, value)
                 if node not in self.devices:
