@@ -23,6 +23,7 @@ INSTALL_PREFIXES = (("omarchy", "install"), ("omarchy", "pkg", "add"), ("omarchy
 INSTALL_TOKEN_RE = re.compile(r"^-{0,2}[A-Za-z0-9][A-Za-z0-9._=-]*$")
 DESKTOP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$")
 COMMAND_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+MAX_PATTERN_CHARS = 200
 
 # Launcher UIs that have no controller navigation of their own: they keep
 # desktop (pointer) controls while focused. Everything else that matches a
@@ -65,6 +66,7 @@ class AppEntry:
     availability: tuple[tuple[str, str], ...]
     classes: tuple[str, ...] = ()
     prefixes: tuple[str, ...] = ()
+    patterns: tuple[re.Pattern, ...] = ()
     title_contains: tuple[str, ...] = ()
     default_pinned: bool = False
     information_url: str | None = None
@@ -77,6 +79,8 @@ class AppEntry:
         if classes & set(self.classes):
             return MATCH_CLASS
         if any(c.startswith(p) for c in classes for p in self.prefixes):
+            return MATCH_PREFIX
+        if any(pattern.fullmatch(c) for c in classes for pattern in self.patterns):
             return MATCH_PREFIX
         if self.id not in BROWSER_TITLE_APPS and any(h in c for c in classes for h in BROWSER_HINTS):
             return 0
@@ -106,6 +110,19 @@ def _strings(value, lower=False) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
         raise CatalogError("expected a list of non-empty strings")
     return tuple(v.lower() if lower else v for v in value)
+
+
+def _patterns(value) -> tuple[re.Pattern, ...]:
+    """Regular expressions for window classes; each has to match a whole class, in any case."""
+    patterns = []
+    for text in _strings(value):
+        if len(text) > MAX_PATTERN_CHARS:
+            raise CatalogError("class pattern is too long")
+        try:
+            patterns.append(re.compile(text, re.IGNORECASE))
+        except re.error as error:
+            raise CatalogError(f"invalid class pattern {text!r}: {error}") from None
+    return tuple(patterns)
 
 
 def _argv(value, what: str) -> tuple[str, ...]:
@@ -178,6 +195,7 @@ def parse_entry(raw: dict) -> AppEntry:
             availability=_availability(raw.get("availability")),
             classes=_strings(match.get("classes"), lower=True),
             prefixes=_strings(match.get("prefixes"), lower=True),
+            patterns=_patterns(match.get("patterns")),
             title_contains=_strings(match.get("titleContains"), lower=True),
             default_pinned=bool(raw.get("defaultPinned", False)),
             information_url=url,
@@ -246,7 +264,7 @@ class Catalog:
         return [app.id for app in self.apps]
 
     def match_window(self, wm_class: str, initial_class: str, title: str) -> AppEntry | None:
-        """Exact classes beat prefixes beat titles; ties go to catalog order."""
+        """Exact classes beat prefixes and patterns, which beat titles; ties go to catalog order."""
         best, best_level = None, 0
         for app in self.apps:
             level = app.match_level(wm_class, initial_class, title)

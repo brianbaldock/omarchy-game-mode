@@ -465,22 +465,41 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(catalog.errors, [])
         self.assertEqual(catalog.source, str(DATA / "catalog.json"))
 
-    def test_xbox_web_app_is_a_game_in_any_locale_or_chromium_browser(self):
-        # While a stream runs, the window title is the game's name. Only the
-        # en-US class matched, so other locales and Remote Play counted as
-        # desktop and a desktop mapper took the controller away mid-game.
+    def test_xbox_cloud_web_app_is_a_game_in_any_locale_and_other_xbox_pages_are_not(self):
+        # While a stream runs, the window title is the game's name: only the class tells what it is.
         model = core.HomeModel(core.Classifier(load_catalog(DATA / "catalog.json")))
         model.ipc_restored()
         for cls in ("chrome-www.xbox.com__en-US_play-Default", "chrome-www.xbox.com__de-DE_play-Default",
-                    "msedge-www.xbox.com__en-US_remoteplay-Default", "chromium-www.xbox.com__fr-FR_play-Default"):
+                    "msedge-www.xbox.com__fr-FR_play-Default", "chromium-www.xbox.com__pt-BR_play-Profile_1",
+                    "chrome-www.xbox.com__es-419_play_-Default", "chrome-www.xbox.com__play-Default",
+                    "chrome-www.xbox.com__en-US_play_launch_forza-horizon-5_9NKX70BBCDRN-Default"):
             window = W("0x71", cls, "Forza Horizon 5")
             self.assertEqual(model.service(window), "cloud", cls)
             model.update_windows([window], window)
             self.assertEqual(model.desired_mode(), GAME, cls)
-        other = W("0x72", "chrome-www.example.com__-Default", "Forza Horizon 5")
-        self.assertIsNone(model.service(other))
-        model.update_windows([other], other)
-        self.assertEqual(model.desired_mode(), DESKTOP)
+        for cls in ("chrome-www.xbox.com__en-US_consoles_remote-play-Default",      # a product page
+                    "chrome-www.xbox.com__en-US_games_xbox-play-anywhere-Default",
+                    "chrome-www.xbox.com__en-US_xbox-game-pass-Default", "chrome-www.xbox.com__-Default",
+                    "chrome-www.xbox.com__en-US_play-anywhere-Default",
+                    "chrome-www.xbox.com__en-US_playlists-Default",
+                    "chrome-www.xbox.com__en-US_remoteplay-Default", "chrome-www.xbox.com__en-US_play-Default\n",
+                    "chrome-support.xbox.com__en-US_help_play-Default", "notchrome-www.xbox.com__en-US_play-Default",
+                    "chrome-www.xbox.com.example.org__en-US_play-Default",
+                    "chrome-www.example.com__en-US_play-Default"):
+            window = W("0x72", cls, "Forza Horizon 5")
+            self.assertIsNone(model.service(window), cls)
+            model.update_windows([window], window)
+            self.assertEqual(model.desired_mode(), DESKTOP, cls)
+
+    def test_class_patterns_match_a_whole_class_in_any_case_and_are_checked_at_load(self):
+        entry = parse_entry({**self.BASE, "match": {"patterns": ["app-[0-9]+"]}})
+        self.assertTrue(entry.matches("APP-42", "", ""))
+        self.assertTrue(entry.matches("", "app-7", ""))
+        for cls in ("app-42-helper", "my-app-42", "app-", "app-42\n"):
+            self.assertFalse(entry.matches(cls, "", ""), cls)
+        for bad in (["app-("], [""], "app-[0-9]+", [7], ["x" * 300]):
+            with self.assertRaises(CatalogError, msg=bad):
+                parse_entry({**self.BASE, "match": {"patterns": bad}})
 
 
 class FakeBus:
