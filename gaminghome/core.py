@@ -513,6 +513,8 @@ class ControllerInterpreter:
 
     * Navigation (D-pad / left stick) emits on the edge and repeats only
       while a direction is actively held; timers exist only during a hold.
+      A direction still held when the state is adopted again goes on
+      repeating, without a new edge.
     * A/B/LB/RB fire on press, Menu fires on release when not part of a chord.
     * View+Menu held together for ``chord_ms`` emits HOME once per hold.
     * Guide (BTN_MODE) is ignored entirely.
@@ -591,9 +593,8 @@ class ControllerInterpreter:
             if self.on_resync and not state.guide_chords:
                 self.on_resync(device_id)
                 state = self.devices.get(device_id)
-            if state is not None and state.direction is not None:
-                direction = state.direction
-                state.repeat_token = self.schedule(self.repeat_delay_ms, lambda d=device_id, dr=direction: self._repeat(d, dr))
+            if state is not None and state.direction is not None and state.repeat_token is None:
+                self._repeat_later(device_id, state)
 
     def held(self) -> bool:
         return any(s.pressed or s.direction for s in self.devices.values())
@@ -603,13 +604,16 @@ class ControllerInterpreter:
         state = self.devices.setdefault(device_id, _DeviceState())
         if state.guide_chords:
             self._sync_guide_chords(state, set(pressed), axes)
-            return
-        self._clear(state)
-        state.pressed = set(pressed) & NAV_BUTTONS
-        for code, value in axes.items():
-            self._set_axis(state, code, value)
-        state.direction = self._direction(state)
-        state.chord_consumed = {BTN_SELECT, BTN_START} <= state.pressed
+        else:
+            self._clear(state)
+            state.pressed = set(pressed) & NAV_BUTTONS
+            for code, value in axes.items():
+                self._set_axis(state, code, value)
+            state.direction = self._direction(state)
+            state.chord_consumed = {BTN_SELECT, BTN_START} <= state.pressed
+        if state.direction is not None and self.nav_enabled:
+            # Still held, not pressed anew: no edge, but it goes on repeating.
+            self._repeat_later(device_id, state)
 
     def _sync_guide_chords(self, state, keys, axes):
         """Adopt the state of a pad that sends Guide chords after a gap in what was seen of it.
@@ -796,6 +800,11 @@ class ControllerInterpreter:
         if direction is None or not self.nav_enabled:
             return
         self.emit(direction)
+        self._repeat_later(device_id, state)
+
+    def _repeat_later(self, device_id, state):
+        """Repeat the direction held now after the normal delay."""
+        direction = state.direction
         state.repeat_token = self.schedule(self.repeat_delay_ms, lambda: self._repeat(device_id, direction))
 
     def _repeat(self, device_id, direction):

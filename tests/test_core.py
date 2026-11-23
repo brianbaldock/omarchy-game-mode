@@ -653,6 +653,36 @@ class ControllerTest(unittest.TestCase):
         self.ci.feed("d", EV_SYN, SYN_REPORT, 0)
         self.assertEqual(self.resyncs, ["d"])
 
+    def test_direction_still_held_when_the_state_is_read_again_keeps_repeating(self):
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.ci.feed("d", EV_SYN, SYN_DROPPED, 0)
+        self.ci.feed("d", EV_SYN, SYN_REPORT, 0)
+        self.ci.sync_state("d", set(), {core.ABS_HAT0X: 1})   # read again while right is still held
+        self.assertEqual(self.actions, [core.RIGHT])         # adopting it is no new press
+        self.clock.fire_all()
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [core.RIGHT] * 3)
+        self.ci.set_nav_enabled(False)
+        self.ci.sync_state("d", set(), {core.ABS_HAT0X: 1})
+        self.assertEqual(self.clock.timers, {})              # no repeat while Game Mode is not navigated
+
+    def test_direction_a_read_finds_held_on_a_pad_that_sends_guide_chords_does_not_repeat(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)              # right, repeating
+        self.ci.sync_state("d", set(), {core.ABS_HAT0X: 1})       # read after a gap: it waits for its release
+        self.clock.fire_all()
+        self.assertEqual((self.actions, self.clock.timers), ([core.RIGHT], {}))
+
+    def test_no_repeat_survives_a_distrust_or_a_reset(self):
+        self.ci.add_device("g", guide_chords=True)
+        for dev in ("g", "o"):
+            self.ci.feed(dev, EV_ABS, core.ABS_HAT0X, 1)          # right, repeating on both
+        self.ci.distrust("o")
+        self.assertEqual(len(self.clock.timers), 1)
+        self.ci.reset()
+        self.clock.fire_all()
+        self.assertEqual((self.actions, self.clock.timers), ([core.RIGHT, core.RIGHT], {}))
+
     def test_unplug_clears_held_state(self):
         self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
         self.key(BTN_SELECT, 1)
