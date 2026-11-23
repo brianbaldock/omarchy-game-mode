@@ -518,7 +518,8 @@ class ControllerInterpreter:
     * A device added with ``guide_chords`` is the virtual gamepad of an input
       stack that sends a handheld's vendor buttons as Guide chords. On it,
       every button or direction pressed while Guide is held is ignored as
-      well, until it is let go, and Guide ends a pending Menu or Home hold.
+      well, until it is let go, also across a resync, and Guide ends a
+      pending Menu or Home hold.
     * SYN_DROPPED discards state until the next SYN_REPORT, after which the
       caller resyncs held buttons without generating actions.
     """
@@ -583,10 +584,16 @@ class ControllerInterpreter:
         state.pressed = set(pressed) & {BTN_SOUTH, BTN_EAST, BTN_TL, BTN_TR, BTN_SELECT, BTN_START, BTN_MODE}
         for code, value in axes.items():
             self._set_axis(state, code, value)
-        if state.guide_chords and BTN_MODE in state.pressed:
-            # Whatever is down together with Guide may have been pressed for its chord.
-            state.suppressed, state.pressed = state.pressed - {BTN_MODE}, {BTN_MODE}
-            state.suppressed_directions = self._pushed_directions(state)
+        if state.guide_chords:
+            # What belongs to a Guide chord stays ignored until the state shows it let go.
+            state.suppressed &= set(pressed)
+            state.suppressed_directions = {(code, sign) for code, sign in state.suppressed_directions
+                                           if code not in axes or self._sign(state, code) == sign}
+            if BTN_MODE in state.pressed:
+                # Whatever is down together with Guide may have been pressed for its chord.
+                state.suppressed |= state.pressed - {BTN_MODE}
+                state.suppressed_directions |= self._pushed_directions(state)
+            state.pressed -= state.suppressed
         state.direction = self._direction(state)
         state.chord_consumed = {BTN_SELECT, BTN_START} <= state.pressed
 
@@ -769,11 +776,10 @@ class ControllerInterpreter:
             self.emit(action)
 
     def _clear(self, state):
+        # A Guide chord's buttons and directions stay ignored: only a release or a lost device ends them.
         self._cancel_chord(state)
         self._cancel_repeat(state)
         state.pressed.clear()
-        state.suppressed.clear()
-        state.suppressed_directions.clear()
         state.hat = [0, 0]
         state.stick = [0, 0]
         state.direction = None
