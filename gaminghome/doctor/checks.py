@@ -152,13 +152,14 @@ CONSOLE = (
 
 INPUT = (
     Check("input.gamepads", "Controllers", "input", inputstack.check_gamepads,
-          "Which controls each controller can report, according to the kernel.",
-          "That each physical button sends the code its label suggests.",
+          "Which control codes each controller lists, according to the kernel.",
+          "Which code a physical button really sends (run `doctor buttons` for that).",
           ("gamepads", "gamepads.name", "gamepads.node", "gamepads.kind", "gamepads.bus", "gamepads.id",
-           "gamepads.access", "gamepads.missing", "gamepads.guide")),
+           "gamepads.access", "gamepads.missing", "gamepads.guide", "gamepads.hid_order")),
     Check("input.stack", "Input daemons", "input", inputstack.check_input_stack,
           "Which input daemons and mappers are running.", "That their profiles are right for your games.",
-          ("inputplumber", "inputplumber_bus", "suspend_hook", "hhd", "antimicrox", "steam")),
+          ("inputplumber", "inputplumber_bus", "inputplumber_version", "suspend_hook", "hhd", "antimicrox",
+           "steam")),
     Check("input.handheld", "Handheld controller setup", "input", inputstack.check_handheld,
           "Whether a handheld daemon presents a complete controller.",
           "That games and Steam act on every button.", ("handheld", "verified", "daemon")),

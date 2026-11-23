@@ -180,9 +180,10 @@ What it checks:
   roams and disconnects in the last 10 minutes, loss between the device and the router.
 - **Firewall:** which firewall is active and, for ufw, the saved policy.
 - **Clients and video:** browsers, Greenlight, browser flag files, hardware H.264 decode.
-- **Controller:** which controls each gamepad can report (the ROG Xbox Ally's built-in
-  pad has no R3 without a handheld daemon), InputPlumber, Handheld Daemon and AntiMicroX,
-  and controller interfaces that another daemon has hidden.
+- **Controller:** which control codes each gamepad lists (read without a handheld daemon,
+  the ROG Xbox Ally's built-in pad lists generically numbered buttons and no standard
+  right-stick click), InputPlumber, Handheld Daemon and AntiMicroX, and controller
+  interfaces that another daemon has hidden.
 
 What it never does:
 

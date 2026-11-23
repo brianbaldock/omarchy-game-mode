@@ -1657,9 +1657,25 @@ def stack_commands(inputplumber=False, hhd=False, hook="enabled", bus=True):
     states = "\n".join("active" if on else "inactive" for on in (inputplumber, hhd)) + "\n"
     commands = {STACK_ACTIVE: CommandResult(STACK_ACTIVE, 0 if inputplumber and hhd else 3, states)}
     if inputplumber:
+        commands[("pacman", "-Q", "inputplumber")] = "inputplumber 0.82.0-1\n"
         commands[STACK_HOOK] = CommandResult(STACK_HOOK, 0 if hook == "enabled" else 1, hook + "\n")
         commands[STACK_BUS] = CommandResult(STACK_BUS, 0 if bus else 1, f"PID=15029\nUID=0\nOwner={CANARY_USER}\n")
     return commands
+
+
+def pad(node="event6", name="ASUSTeK Computer Inc. N-KEY Device", keys=ALLY_RAW_KEYS, virtual=False,
+        identity="0b05:1b4c", access="readable"):
+    return evdev.InputDevice(node, name, "USB", identity, virtual, frozenset(evdev.parse_bitmap(keys)),
+                             frozenset(evdev.parse_bitmap(PAD_AXES)), access, 3, 0x0110)
+
+
+def keyboard(node="event5", name="ASUSTeK Computer Inc. N-KEY Device", virtual=False, identity="0b05:1b4c"):
+    return evdev.InputDevice(node, name, "USB", identity, virtual, frozenset(evdev.parse_bitmap(NKEY_KEYBOARD_KEYS)),
+                             frozenset(), "readable", 3, 0x0110)
+
+
+RAW_PAD, ELITE_PAD = pad(), pad("event21", "Microsoft X-Box One Elite 2 pad", ELITE_PAD_KEYS, True, "045e:0b00")
+NKEY_KEYS, PLUMBER_KEYS = keyboard(), keyboard("event20", "InputPlumber Keyboard", True, "1234:5678")
 
 
 class InputCase(ScratchCase):
@@ -1717,19 +1733,30 @@ class InputStackTest(InputCase):
         ctx = self.ally()
         pads = inputstack.check_gamepads(ctx)
         self.assertEqual(pads.status, Status.WARN)
-        self.assertIn("does not report R3 (BTN_THUMBR)", pads.detail)
+        self.assertIn("does not list R3 (BTN_THUMBR)", pads.detail)
+        self.assertIn("numbered by a generic driver, so a press can arrive under another button's code", pads.detail)
+        self.assertIn("`omarchy-game-mode doctor buttons` shows what each press really sends", pads.remediation)
         self.assertEqual(pads.evidence["gamepads"], [{
             "name": "ASUSTeK Computer Inc. N-KEY Device", "node": "event6", "kind": "physical", "bus": "USB",
-            "id": "0b05:1b4c", "access": "readable", "missing": ["R3 (BTN_THUMBR)"], "guide": True}])
+            "id": "0b05:1b4c", "access": "readable", "missing": ["R3 (BTN_THUMBR)"], "guide": True,
+            "hid_order": True}])
         verdict = inputstack.check_handheld(ctx)
         self.assertEqual(verdict.status, Status.WARN)
         self.assertIn("ASUS ROG Xbox Ally: no handheld input daemon is running", verdict.detail)
-        self.assertIn("does not report R3 (BTN_THUMBR)", verdict.detail)
+        self.assertIn("does not list R3 (BTN_THUMBR)", verdict.detail)
         self.assertIn("`omarchy pkg add inputplumber` then `sudo systemctl enable --now inputplumber.service "
                       "inputplumber-suspend.service`", verdict.remediation)
         stack = inputstack.check_input_stack(ctx)
         self.assertEqual((stack.status, stack.evidence["inputplumber"], stack.evidence["antimicrox"]),
                          (Status.INFO, False, True))
+
+    def test_generic_hid_numbering_is_recognised_from_the_capabilities_alone(self):
+        self.assertTrue(RAW_PAD.hid_ordered)
+        self.assertFalse(ELITE_PAD.hid_ordered)
+        complete_but_generic = pad(keys="7fff000000000000 0 0 0 0")
+        self.assertEqual((complete_but_generic.missing_controls(), complete_but_generic.hid_ordered), ([], True))
+        self.assertIn("numbered by a generic driver", inputstack._describe(complete_but_generic))
+        self.assertNotIn("generic driver", inputstack._describe(ELITE_PAD))
 
     def test_advice_is_printed_and_nothing_is_installed_or_started(self):
         ctx = self.ally()
@@ -1748,7 +1775,9 @@ class InputStackTest(InputCase):
         verdict = inputstack.check_handheld(ctx)
         self.assertEqual((verdict.status, verdict.evidence["daemon"]), (Status.PASS, "InputPlumber"))
         stack = inputstack.check_input_stack(ctx)
-        self.assertEqual((stack.evidence["inputplumber_bus"], stack.evidence["suspend_hook"]), (True, "enabled"))
+        self.assertEqual((stack.evidence["inputplumber_bus"], stack.evidence["suspend_hook"],
+                          stack.evidence["inputplumber_version"]), (True, "enabled", "0.82.0"))
+        self.assertIn("InputPlumber: running 0.82.0 (answers on the system bus", stack.detail)
         self.assertNotIn(CANARY_USER, stack.detail + json.dumps(stack.evidence))
 
     def test_handheld_verdicts(self):

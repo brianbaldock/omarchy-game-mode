@@ -8,6 +8,7 @@ is grabbed and nothing is installed; the advice for a handheld is printed text.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -35,6 +36,7 @@ class Stack:
     hhd: bool = False
     antimicrox: bool = False
     steam: bool = False
+    inputplumber_version: str = ""
 
     @property
     def daemons(self) -> list[str]:
@@ -56,15 +58,18 @@ def _probe_stack(ctx: Context) -> Stack:
     states = ctx.command(["systemctl", "is-active", "inputplumber.service", "hhd.service"], 4).stdout.split()
     service = dict(zip(("inputplumber", "hhd"), (state == "active" for state in states)))
     inputplumber = service.get("inputplumber", False) or "inputplumber" in processes
-    hook = "unknown"
+    hook, version = "unknown", ""
     if inputplumber:
         enabled = ctx.command(["systemctl", "is-enabled", "inputplumber-suspend.service"], 4).stdout.split()
         hook = enabled[0] if enabled and enabled[0] in ("enabled", "disabled", "static", "masked") else "unknown"
+        package = ctx.command(["pacman", "-Q", "inputplumber"], 5).stdout
+        listed = re.search(r"(?m)^inputplumber (?:\d+:)?(\d[\w.]*)", package)
+        version = listed.group(1) if listed else ""
     return Stack(
         inputplumber=inputplumber,
         inputplumber_bus=inputplumber and ctx.command(["busctl", "--system", "status", INPUTPLUMBER_BUS_NAME], 4).ok,
         suspend_hook=hook, hhd=service.get("hhd", False) or "hhd" in processes,
-        antimicrox="antimicrox" in processes, steam="steam" in processes)
+        antimicrox="antimicrox" in processes, steam="steam" in processes, inputplumber_version=version)
 
 
 def input_stack(ctx: Context) -> Stack:
@@ -73,7 +78,9 @@ def input_stack(ctx: Context) -> Stack:
 
 def _describe(device: InputDevice) -> str:
     missing = device.missing_controls()
-    state = f"does not report {', '.join(missing)}" if missing else "reports every standard control"
+    state = f"does not list {', '.join(missing)}" if missing else "lists every standard control"
+    if device.hid_ordered:
+        state += "; its buttons are numbered by a generic driver, so a press can arrive under another button's code"
     hidden = {"hidden": "; hidden from apps by an input daemon", "no-permission": "; not readable by this user",
               "missing": "; has no device node"}.get(device.access, "")
     guide = "" if device.has_guide else "; no Guide button (BTN_MODE)"
@@ -83,7 +90,7 @@ def _describe(device: InputDevice) -> str:
 def _rows(devices: Sequence[InputDevice]) -> list[dict[str, object]]:
     return [{"name": device.name, "node": device.node, "kind": device.kind(), "bus": device.bus,
              "id": device.vendor_product, "access": device.access, "missing": device.missing_controls(),
-             "guide": device.has_guide} for device in devices]
+             "guide": device.has_guide, "hid_order": device.hid_ordered} for device in devices]
 
 
 def check_gamepads(ctx: Context) -> Outcome:
@@ -97,26 +104,29 @@ def check_gamepads(ctx: Context) -> Outcome:
         return warn(f"No gamepad is readable by this user: {summary}",
                     "Game Mode reads controllers directly. Your user needs read access to /dev/input/event* "
                     "(usually membership of the `input` group).", **evidence)
-    incomplete = [device for device in usable if device.missing_controls()]
+    incomplete = [device for device in usable if device.missing_controls() or device.hid_ordered]
     if incomplete:
-        return warn(f"Apps see a controller that cannot report every standard control: {summary}",
-                    "A control that the device does not report cannot be used by any game or by Steam. On a "
-                    "handheld, an input daemon such as InputPlumber provides a complete virtual controller.",
-                    **evidence)
-    return ok(f"Every controller apps can see reports the standard controls: {summary}", **evidence)
+        return warn(f"Apps see a controller without the standard control codes: {summary}",
+                    "Games and Steam act on the standard codes, so a control that is not listed, or arrives "
+                    "under another code, does the wrong thing or nothing. `omarchy-game-mode doctor buttons` "
+                    "shows what each press really sends. On a handheld, an input daemon such as InputPlumber "
+                    "provides a controller with the standard codes.", **evidence)
+    return ok(f"Every controller apps can see lists the standard controls: {summary}", **evidence)
 
 
 def check_input_stack(ctx: Context) -> Outcome:
     stack = input_stack(ctx)
     hook = {"enabled": "suspend hook enabled", "static": "suspend hook enabled", "disabled": "suspend hook disabled",
             "masked": "suspend hook masked"}.get(stack.suspend_hook, "suspend hook state unknown")
-    plumber = (f"running ({'answers on the system bus' if stack.inputplumber_bus else 'not on the system bus'}, "
-               f"{hook})" if stack.inputplumber else "not running")
+    version = f" {stack.inputplumber_version}" if stack.inputplumber_version else ""
+    bus = "answers on the system bus" if stack.inputplumber_bus else "not on the system bus"
+    plumber = f"running{version} ({bus}, {hook})" if stack.inputplumber else "not running"
     parts = [f"InputPlumber: {plumber}", f"Handheld Daemon: {'running' if stack.hhd else 'not running'}",
              f"AntiMicroX: {'running' if stack.antimicrox else 'not running'}",
              f"Steam: {'running' if stack.steam else 'not running'}"]
     evidence = dict(inputplumber=stack.inputplumber, inputplumber_bus=stack.inputplumber_bus,
-                    suspend_hook=stack.suspend_hook, hhd=stack.hhd, antimicrox=stack.antimicrox, steam=stack.steam)
+                    inputplumber_version=stack.inputplumber_version, suspend_hook=stack.suspend_hook, hhd=stack.hhd,
+                    antimicrox=stack.antimicrox, steam=stack.steam)
     if stack.inputplumber and stack.hhd:
         return warn("; ".join(parts) + ". Two handheld daemons are competing for the same controller.",
                     "Keep one of InputPlumber and Handheld Daemon and stop the other.", **evidence)
@@ -134,7 +144,7 @@ def handheld_verdict(handheld: Handheld | None, found: Sequence[InputDevice], st
     virtual = [device for device in found if device.virtual and not device.missing_controls()]
     if not stack.daemons:
         missing = next((device.missing_controls() for device in raw if device.missing_controls()), [])
-        gap = f" The built-in controller does not report {', '.join(missing)}." if missing else ""
+        gap = f" The built-in controller does not list {', '.join(missing)}." if missing else ""
         return warn(f"{handheld.name}: no handheld input daemon is running, so apps get the raw built-in "
                     f"controller.{gap} Back paddles and vendor buttons arrive as keyboard keys or not at all.",
                     f"Install InputPlumber, which ships a profile for this device: {INSTALL_INPUTPLUMBER}.{tested}",

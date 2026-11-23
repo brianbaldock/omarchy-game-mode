@@ -106,10 +106,20 @@ class InputDevice:
     keys: frozenset[int]
     axes: frozenset[int]
     access: str
+    bus_type: int = 0
+    version: int = 0
 
     @property
     def path(self) -> str:
         return f"/dev/input/{self.node}"
+
+    @property
+    def vendor(self) -> int:
+        return _hex(self.vendor_product.partition(":")[0])
+
+    @property
+    def product(self) -> int:
+        return _hex(self.vendor_product.partition(":")[2])
 
     @property
     def is_gamepad(self) -> bool:
@@ -124,8 +134,18 @@ class InputDevice:
     def has_guide(self) -> bool:
         return BTN_MODE in self.keys
 
+    @property
+    def hid_ordered(self) -> bool:
+        """Heuristic: buttons numbered in HID order by a generic driver, not by layout.
+
+        Such a pad lists an unbroken run from BTN_SOUTH that includes BTN_C and BTN_Z,
+        codes an Xbox-style driver never uses. Its buttons then arrive, but often under
+        another button's code; only pressing them shows which.
+        """
+        return {BTN_SOUTH, BTN_EAST, BTN_C, BTN_NORTH, BTN_WEST, BTN_Z} <= self.keys
+
     def missing_controls(self) -> list[str]:
-        """Standard gamepad controls this device cannot report, as `R3 (BTN_THUMBR)`."""
+        """Standard gamepad controls this device does not list, as `R3 (BTN_THUMBR)`."""
         missing = [f"{label} ({key_name(code)})" for code, label in STANDARD_BUTTONS if code not in self.keys]
         if not any(codes <= (self.keys if kind == EV_KEY else self.axes) for codes, kind in TRIGGER_SOURCES):
             missing.append("LT/RT (triggers)")
@@ -168,8 +188,17 @@ def input_devices(ctx: Context) -> list[InputDevice]:
             virtual=bus == BUS_VIRTUAL or "/devices/virtual/" in ctx.fs.resolved(base),
             keys=frozenset(parse_bitmap(ctx.fs.read(f"{base}/capabilities/key") or "")),
             axes=frozenset(parse_bitmap(ctx.fs.read(f"{base}/capabilities/abs") or "")),
-            access=_access(ctx, node)))
+            access=_access(ctx, node), bus_type=bus, version=_hex(ctx.fs.line(f"{base}/id/version"))))
     return devices
+
+
+def hid_parent(ctx: Context, sysfs_device: str) -> str:
+    """Path of the HID device (`0003:0B05:1B4C.0006`) above a sysfs node, or empty."""
+    parts = ctx.fs.resolved(sysfs_device).split("/")
+    for index, part in enumerate(parts):
+        if re.fullmatch(r"[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}", part):
+            return "/".join(parts[:index + 1])
+    return ""
 
 
 def gamepads(ctx: Context) -> list[InputDevice]:

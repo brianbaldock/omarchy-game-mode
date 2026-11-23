@@ -40,9 +40,10 @@ def environment(checks: Iterable[CheckResult]) -> dict[str, Any]:
                for row in found.get("client.browsers", {}).get("browsers", [])]
     if found.get("client.greenlight_version", {}).get("installed"):
         clients.append({"name": "Greenlight", "version": found["client.greenlight_version"].get("version", "")})
-    controllers = {**pick("input.stack", "inputplumber", "hhd", "antimicrox", "steam"),
-                   "gamepads": [f"{row['name']} ({row['kind']})"
-                                for row in found.get("input.gamepads", {}).get("gamepads", [])]}
+    controllers = pick("input.stack", "inputplumber", "inputplumber_version", "hhd", "antimicrox", "steam")
+    pads = [f"{row['name']} ({row['kind']})" for row in found.get("input.gamepads", {}).get("gamepads", [])]
+    if pads:
+        controllers["gamepads"] = pads
     for key, value in (("device", device), ("gpu", gpu), ("network", network), ("wireless", wireless),
                        ("clients", clients), ("controllers", controllers if "input.stack" in found else {})):
         if value:
@@ -66,7 +67,8 @@ def environment_lines(env: Mapping[str, Any]) -> list[tuple[str, str]]:
                    f"{wireless['signal_dbm']} dBm" if "signal_dbm" in wireless else "",
                    "DFS" if wireless.get("dfs") else "",
                    "power save on" if wireless.get("power_save") else ""])
-    daemons = _join([name for name, key in (("InputPlumber", "inputplumber"), ("Handheld Daemon", "hhd"),
+    plumber = _join(["InputPlumber", controllers.get("inputplumber_version", "")], " ")
+    daemons = _join([name for name, key in ((plumber, "inputplumber"), ("Handheld Daemon", "hhd"),
                                             ("AntiMicroX", "antimicrox")) if controllers.get(key)]) or "none"
     rows = [
         ("Device", _join([_join([device.get("vendor", ""), device.get("product") or device.get("family", "")], " "),
@@ -98,7 +100,7 @@ def _grouped(report: Report) -> list[tuple[str, list[CheckResult]]]:
     return [(CATEGORY_TITLES.get(category, category.title() or "Other"), groups[category]) for category in order]
 
 
-def _wrap(text: str, first: str, rest: str = INDENT) -> list[str]:
+def wrap_text(text: str, first: str, rest: str = INDENT) -> list[str]:
     return textwrap.wrap(text, TEXT_WIDTH, initial_indent=first, subsequent_indent=rest,
                          break_long_words=False, break_on_hyphens=False) or [first.rstrip()]
 
@@ -112,21 +114,22 @@ def _counts(report: Report) -> str:
 def render_text(report: Report) -> str:
     lines = [f"Omarchy Game Mode doctor ({report.scope})"]
     for label, value in environment_lines(report.environment):
-        lines += _wrap(value, f"{label + ':':<13}", " " * 13)
+        lines += wrap_text(value, f"{label + ':':<13}", " " * 13)
     for title, checks in _grouped(report):
         lines += ["", title]
         for check in checks:
-            lines += _wrap(f"{check.title}: {check.detail}", f"  {check.status.marker} ")
+            lines += wrap_text(f"{check.title}: {check.detail}", f"  {check.status.marker} ")
             if check.remediation and check.status in (Status.WARN, Status.FAIL, Status.SKIP):
-                lines += _wrap(check.remediation, f"{INDENT}fix: ", INDENT + "     ")
+                lines += wrap_text(check.remediation, f"{INDENT}fix: ", INDENT + "     ")
             if check.proves or check.does_not_prove:
-                lines += _wrap(f"{check.proves} Not: {check.does_not_prove}", f"{INDENT}proves: ", INDENT + "        ")
-    lines += [""] + _wrap(report.headline(), "Result: ", "        ")
+                scope = f"{check.proves} Not: {check.does_not_prove}"
+                lines += wrap_text(scope, f"{INDENT}proves: ", INDENT + "        ")
+    lines += [""] + wrap_text(report.headline(), "Result: ", "        ")
     lines.append(_counts(report) + ".")
     if report.privacy.get("redacted", True):
-        lines += _wrap(REDACTION_NOTE + " For a pasteable report: omarchy-game-mode doctor --markdown", "", "")
+        lines += wrap_text(REDACTION_NOTE + " For a pasteable report: omarchy-game-mode doctor --markdown", "", "")
     else:
-        lines += _wrap("Addresses are shown in full (--no-redact): do not post this output.", "", "")
+        lines += wrap_text("Addresses are shown in full (--no-redact): do not post this output.", "", "")
     return "\n".join(lines) + "\n"
 
 
@@ -148,7 +151,7 @@ def markdown_escape(text: str, table: bool = True) -> str:
     return "`".join(parts)
 
 
-def _table(header: tuple[str, ...], rows: Iterable[tuple[str, ...]]) -> list[str]:
+def markdown_table(header: tuple[str, ...], rows: Iterable[tuple[str, ...]]) -> list[str]:
     lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     lines += ["| " + " | ".join(markdown_escape(cell) for cell in row) + " |" for row in rows]
     return lines
@@ -157,9 +160,9 @@ def _table(header: tuple[str, ...], rows: Iterable[tuple[str, ...]]) -> list[str
 def render_markdown(report: Report) -> str:
     """Issue-ready report: environment, results, what each check proves, and the open next steps."""
     lines = ["### Omarchy Game Mode doctor report", "", f"**Result:** {markdown_escape(report.headline(), False)}", ""]
-    lines += _table(("Environment", ""), environment_lines(report.environment))
+    lines += markdown_table(("Environment", ""), environment_lines(report.environment))
     lines += ["", f"**Results** (scope `{report.scope}`, {_counts(report)})", ""]
-    lines += _table(("Status", "Check", "Result"),
+    lines += markdown_table(("Status", "Check", "Result"),
                     ((check.status.name, check.title, check.detail) for check in report.checks))
     todo = [check for check in report.checks if (check.remediation or check.root_command)
             and check.status in (Status.WARN, Status.FAIL, Status.SKIP)]
@@ -170,7 +173,7 @@ def render_markdown(report: Report) -> str:
             lines.append(f"- **{markdown_escape(check.title, False)}** ({check.status.name}): "
                          f"{markdown_escape(command + check.remediation, False)}")
     lines += ["", "<details><summary>What each check proves and does not prove</summary>", ""]
-    lines += _table(("Check", "Proves", "Does not prove"),
+    lines += markdown_table(("Check", "Proves", "Does not prove"),
                     ((f"{check.title} (`{check.id}`)", check.proves, check.does_not_prove) for check in report.checks))
     lines += ["", "</details>", "",
               f"_{markdown_escape(REDACTION_NOTE, False)} Generated by `omarchy-game-mode doctor --markdown`._"]
