@@ -513,9 +513,11 @@ class ControllerInterpreter:
       while a direction is actively held; timers exist only during a hold.
     * A/B/LB/RB fire on press, Menu fires on release when not part of a chord.
     * View+Menu held together for ``chord_ms`` emits HOME once per hold.
-    * Guide (BTN_MODE) is ignored entirely, and so is every button pressed
-      while Guide is held: a Guide chord belongs to Steam, or to an input
-      stack that sends a handheld's vendor buttons as Guide chords.
+    * Guide (BTN_MODE) is ignored entirely.
+    * A device added with ``guide_chords`` is the virtual gamepad of an input
+      stack that sends a handheld's vendor buttons as Guide chords. On it,
+      every button or direction pressed while Guide is held is ignored as
+      well, until it is let go, and Guide ends a pending Menu or Home hold.
     * SYN_DROPPED discards state until the next SYN_REPORT, after which the
       caller resyncs held buttons without generating actions.
     """
@@ -534,8 +536,8 @@ class ControllerInterpreter:
         self.nav_enabled = False
         self.devices: dict[str, _DeviceState] = {}
 
-    def add_device(self, device_id: str):
-        self.devices.setdefault(device_id, _DeviceState())
+    def add_device(self, device_id: str, guide_chords: bool = False):
+        self.devices.setdefault(device_id, _DeviceState()).guide_chords = guide_chords
 
     def remove_device(self, device_id: str):
         state = self.devices.pop(device_id, None)
@@ -578,10 +580,14 @@ class ControllerInterpreter:
         state = self.devices.setdefault(device_id, _DeviceState())
         self._clear(state)
         state.pressed = set(pressed) & {BTN_SOUTH, BTN_EAST, BTN_TL, BTN_TR, BTN_SELECT, BTN_START, BTN_MODE}
-        state.chord_consumed = {BTN_SELECT, BTN_START} <= state.pressed
         for code, value in axes.items():
             self._set_axis(state, code, value)
         state.direction = self._direction(state)
+        if state.guide_chords and BTN_MODE in state.pressed:
+            # Whatever is down together with Guide may have been pressed for its chord.
+            state.suppressed, state.pressed = state.pressed - {BTN_MODE}, {BTN_MODE}
+            state.direction_suppressed, state.direction = state.direction is not None, None
+        state.chord_consumed = {BTN_SELECT, BTN_START} <= state.pressed
 
     def feed(self, device_id: str, etype: int, code: int, value: int):
         state = self.devices.setdefault(device_id, _DeviceState())
@@ -607,6 +613,8 @@ class ControllerInterpreter:
         if value == 2:
             return
         pressed = bool(value)
+        if state.guide_chords and self._in_guide_chord(state, code, pressed):
+            return
         if pressed:
             if code in state.pressed:
                 return
@@ -616,10 +624,12 @@ class ControllerInterpreter:
                 return
             state.pressed.discard(code)
         if code == BTN_MODE:
-            if pressed:
+            if pressed and state.guide_chords:
+                # Guide ends a Menu press or a Home hold that is under way.
                 state.menu_candidate = False
-            return
-        if pressed and BTN_MODE in state.pressed:
+                if state.chord_token is not None:
+                    self._cancel_chord(state)
+                    state.chord_consumed = True
             return
         if code in (BTN_SELECT, BTN_START):
             self._chord(device_id, state, pressed)
@@ -635,6 +645,18 @@ class ControllerInterpreter:
         action = {BTN_SOUTH: ACTIVATE, BTN_EAST: BACK, BTN_TL: PREV_TAB, BTN_TR: NEXT_TAB}.get(code)
         if action:
             self._nav(action)
+
+    @staticmethod
+    def _in_guide_chord(state, code, pressed) -> bool:
+        """A button pressed while Guide is held belongs to that chord until it is let go: it is not tracked."""
+        if code in state.suppressed:
+            if not pressed:
+                state.suppressed.discard(code)
+            return True
+        if pressed and code != BTN_MODE and BTN_MODE in state.pressed and code not in state.pressed:
+            state.suppressed.add(code)
+            return True
+        return False
 
     def _chord(self, device_id, state, pressed):
         both = {BTN_SELECT, BTN_START} <= state.pressed
@@ -652,7 +674,7 @@ class ControllerInterpreter:
         if state is None:
             return
         state.chord_token = None
-        if {BTN_SELECT, BTN_START} <= state.pressed and not state.chord_consumed and BTN_MODE not in state.pressed:
+        if {BTN_SELECT, BTN_START} <= state.pressed and not state.chord_consumed:
             state.chord_consumed = True
             self.emit(HOME)
 
@@ -690,6 +712,14 @@ class ControllerInterpreter:
 
     def _update_direction(self, device_id, state):
         direction = self._direction(state)
+        if state.guide_chords:
+            # A direction taken while Guide is held belongs to that chord until the pad is back at rest.
+            if direction is None:
+                state.direction_suppressed = False
+            elif BTN_MODE in state.pressed and direction != state.direction:
+                state.direction_suppressed = True
+            if state.direction_suppressed:
+                direction = None
         if direction == state.direction:
             return
         state.direction = direction
@@ -722,6 +752,8 @@ class ControllerInterpreter:
         self._cancel_chord(state)
         self._cancel_repeat(state)
         state.pressed.clear()
+        state.suppressed.clear()
+        state.direction_suppressed = False
         state.hat = [0, 0]
         state.stick = [0, 0]
         state.direction = None
@@ -732,7 +764,10 @@ class ControllerInterpreter:
 
 class _DeviceState:
     def __init__(self):
+        self.guide_chords = False
         self.pressed: set[int] = set()
+        self.suppressed: set[int] = set()
+        self.direction_suppressed = False
         self.dropping = False
         self.hat = [0, 0]
         self.stick = [0, 0]

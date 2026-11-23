@@ -390,7 +390,8 @@ class ControllerMonitor:
             return self.errors.pop(node, None) is not None
         self.errors.pop(node, None)
         self.hidden.pop(node, None)
-        self.interpreter.add_device(node)
+        # A virtual gamepad is only ever one that an input stack announced.
+        self.interpreter.add_device(node, guide_chords=info.virtual)
         for code in (core.ABS_X, core.ABS_Y):
             try:
                 buf = array.array("i", [0] * 6)

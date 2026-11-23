@@ -86,6 +86,22 @@ class VirtualGamepadTest(MonitorCase):
         self.assertTrue(pump(lambda: self.actions))
         self.assertEqual(self.actions, [core.ACTIVATE])
 
+    def test_guide_chords_are_ignored_on_the_announced_virtual_pad_only(self):
+        elite, usb = self.tree.add(21, ELITE), self.tree.add(7, PHYSICAL, where=USB)
+        self.allow = VirtualGamepads({ELITE: 1})
+        monitor = self.monitor()
+        self.assertEqual(sorted(monitor.devices), sorted([elite, usb]))
+        presses = ((core.BTN_MODE, 1), (core.BTN_SOUTH, 1), (core.BTN_SOUTH, 0), (core.BTN_MODE, 0), (core.BTN_EAST, 1))
+        chord = b"".join(EVENT.pack(0, 0, core.EV_KEY, code, value) + EVENT.pack(0, 0, core.EV_SYN, core.SYN_REPORT, 0)
+                         for code, value in presses)
+        for node, expected in ((elite, [core.BACK]), (usb, [core.ACTIVATE, core.BACK])):
+            del self.actions[:]
+            writer = os.open(node, os.O_WRONLY | os.O_NONBLOCK)
+            self.addCleanup(os.close, writer)
+            os.write(writer, chord)
+            self.assertTrue(pump(lambda: core.BACK in self.actions))
+            self.assertEqual(self.actions, expected, node)
+
     def test_only_the_announced_identity_is_used(self):
         self.tree.add(20, STEAM_PAD)                 # Steam Input's own virtual pad
         self.tree.add(22, ELITE, where=UHID)         # right identity, but not a uinput device

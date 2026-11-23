@@ -322,8 +322,21 @@ class ControllerTest(unittest.TestCase):
         self.key(core.BTN_MODE, 0)
         self.assertEqual(self.actions, [])
 
-    def test_buttons_pressed_while_guide_is_held_never_act(self):
+    def test_ordinary_pad_still_acts_on_what_is_pressed_while_guide_is_held(self):
+        # Only Guide itself is ignored; what Steam makes of a Guide chord is its own business.
+        self.key(core.BTN_MODE, 1)
+        self.key(BTN_SOUTH, 1)
+        self.key(BTN_START, 1)
+        self.key(BTN_START, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.assertEqual(self.actions, [ACTIVATE, MENU, HOME, core.RIGHT])
+
+    def test_buttons_pressed_while_guide_is_held_never_act_on_a_pad_that_sends_guide_chords(self):
         # InputPlumber's Xbox target sends a handheld's vendor button as Guide + A.
+        self.ci.add_device("d", guide_chords=True)
         self.key(core.BTN_MODE, 1)
         self.key(BTN_SOUTH, 1)
         self.key(BTN_SOUTH, 0)
@@ -339,7 +352,8 @@ class ControllerTest(unittest.TestCase):
         self.key(BTN_SOUTH, 1)
         self.assertEqual(self.actions, [ACTIVATE])
 
-    def test_guide_pressed_during_a_hold_cancels_menu_and_home(self):
+    def test_guide_pressed_during_a_hold_cancels_menu_and_home_on_such_a_pad(self):
+        self.ci.add_device("d", guide_chords=True)
         self.key(BTN_START, 1)
         self.key(core.BTN_MODE, 1)
         self.key(BTN_START, 0)
@@ -347,6 +361,62 @@ class ControllerTest(unittest.TestCase):
         self.key(BTN_SELECT, 1)
         self.key(BTN_START, 1)
         self.key(core.BTN_MODE, 1)
+        self.key(core.BTN_MODE, 0)             # a vendor button tapped during the hold
+        self.clock.fire_all()
+        self.key(BTN_START, 0)
+        self.assertEqual(self.actions, [])
+        self.key(BTN_SELECT, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [HOME])
+
+    def test_button_of_a_guide_chord_stays_ignored_until_it_is_released(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(core.BTN_MODE, 1)
+        self.key(BTN_SELECT, 1)
+        self.key(core.BTN_MODE, 0)
+        self.key(BTN_START, 1)                 # View is still down, but it was pressed for the Guide chord
+        self.assertEqual(self.clock.timers, {})
+        self.key(BTN_START, 0)
+        self.assertEqual(self.actions, [MENU])
+        self.key(BTN_SELECT, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [MENU, HOME])
+
+    def test_direction_taken_while_guide_is_held_is_ignored_until_it_is_released(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(core.BTN_MODE, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_Y, 32767)
+        self.key(core.BTN_MODE, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 1)   # another direction, the same hold
+        self.assertEqual((self.actions, self.clock.timers), ([], {}))
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_Y, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.assertEqual(self.actions, [core.RIGHT])
+
+    def test_direction_held_before_guide_goes_on_and_a_new_one_does_not(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.key(core.BTN_MODE, 1)
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [core.RIGHT, core.RIGHT])
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, -1)
+        self.assertEqual((self.actions, self.clock.timers), ([core.RIGHT, core.RIGHT], {}))
+
+    def test_what_is_held_together_with_guide_when_state_is_adopted_counts_as_its_chord(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.ci.on_resync = lambda dev: self.ci.sync_state(dev, {core.BTN_MODE, BTN_SELECT}, {core.ABS_HAT0X: 1})
+        self.ci.set_nav_enabled(False)
+        self.ci.set_nav_enabled(True)          # Home is shown while Guide, View and a direction are down
+        self.assertEqual(self.clock.timers, {})
+        self.key(core.BTN_MODE, 0)
+        self.key(BTN_START, 1)
         self.clock.fire_all()
         self.assertEqual(self.actions, [])
 

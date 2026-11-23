@@ -55,8 +55,9 @@ Keyboard (arrows, Enter, Escape), mouse and touch work everywhere.
 **About the Home chord.** The global gesture is holding **View (Back) and Menu (Start)
 together for at least 0.8 seconds**. A single or brief press does nothing. The native
 Guide/Xbox button is deliberately left alone, so Steam and other apps keep using it.
-A button pressed while Guide is held is ignored too: such a chord belongs to Steam, or
-to an input stack that sends vendor buttons as Guide chords.
+On InputPlumber's virtual gamepad only, a button or direction pressed while Guide is
+held is ignored too, until it is released: InputPlumber sends vendor buttons as Guide
+chords. On every other controller Game Mode ignores just the Guide button itself.
 Vendor-specific buttons (for example ROG Ally's dedicated keys) are not mapped.
 
 Controller input is read **read-only and non-exclusively** from evdev. Devices that
@@ -168,8 +169,9 @@ asus_rog_ally driver") and runs on evdev sources only. In that state:
   A desktop mapper such as AntiMicroX sees the X or A of such a chord and acts on it.
 
 It only becomes worthwhile there once the kernel has the Ally HID driver; a fuller
-upstream driver series has been posted for kernels after 7.2. Game Mode itself ignores
-buttons pressed while Guide is held, so these chords select nothing in Gaming Home.
+upstream driver series has been posted for kernels after 7.2. On the virtual gamepad,
+Game Mode ignores what is pressed while Guide is held, so these chords select nothing
+in Gaming Home.
 AntiMicroX set switching (above) is unchanged and remains the only desktop-pointer
 route, with or without InputPlumber.
 
@@ -259,8 +261,9 @@ them gone. Game Mode never edits AntiMicroX profiles or any other app's configur
     private bus (owner changes, renumbered devices, targets removed and added again,
     signal floods, late replies, and proof that nothing but reads is ever sent);
     recognition and rejection of virtual gamepads against a mocked sysfs; that buttons
-    pressed while Guide is held do nothing. The Settings text was also rendered
-    headless with GTK Broadway in English and Arabic, which is a manual smoke script.
+    and directions pressed while Guide is held do nothing on the virtual gamepad and
+    still act on every other controller. The Settings text was also rendered headless
+    with GTK Broadway in English and Arabic, which is a manual smoke script.
   - **Verified live on an ASUS ROG Xbox Ally (RC73YA), without physical input:**
     InputPlumber 0.82.0 active; Game Mode's client and controller reader run against
     it read-only: its state read, the virtual `Microsoft X-Box One Elite 2 pad`
