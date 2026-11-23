@@ -475,6 +475,43 @@ class RunnerTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1)
         self.assertEqual((result.status, result.detail), (Status.SKIP, "timed out after 0.05 s; result unknown"))
 
+    def test_an_interrupt_while_the_workers_start_still_stops_every_check(self):
+        running, release, seen, started = threading.Event(), threading.Event(), {}, []
+        self.addCleanup(context.stop_commands)
+        self.addCleanup(lambda: [thread.join(5) for thread in started])
+        self.addCleanup(release.set)
+
+        def first(_ctx):
+            seen["budget"] = runner._BUDGET.get()
+            running.set()
+            release.wait(5)
+            seen["cancelled"] = runner.cancelled()
+            seen["command"] = context._start((sys.executable, "-c", "pass"), None)
+            return model.ok("first")
+
+        def second(_ctx):
+            seen["second ran"] = True
+            return model.ok("second")
+
+        def start_worker(worker):
+            if started:  # Ctrl-C lands before the second worker starts
+                raise context.Interrupted(signal.SIGINT)
+            started.append(threading.Thread(target=worker, daemon=True))
+            started[0].start()
+            running.wait(5)  # the first worker holds the first check, budget and all
+
+        checks_ = [self.check("first", first, timeout=30), self.check("second", second, timeout=30)]
+        with mock.patch.object(runner, "_start_worker", start_worker), self.assertRaises(KeyboardInterrupt):
+            runner.run_checks(checks_, None, workers=2)
+        self.assertTrue(seen["budget"].cancelled)
+        release.set()
+        started[0].join(5)
+        self.assertFalse(started[0].is_alive())
+        # The second check was dropped from the queue, and the first one may start nothing.
+        self.assertEqual(seen, {"budget": seen["budget"], "cancelled": True, "command": None})
+        context.stop_commands()
+        self.assertEqual(context._RUNNING, set())
+
     def test_an_abandoned_check_is_told_to_stop_and_starts_nothing_new(self):
         finished = {name: threading.Event() for name in ("loop", "probes", "late")}
         commands = FakeCommands({("iw", "dev"): "x"})

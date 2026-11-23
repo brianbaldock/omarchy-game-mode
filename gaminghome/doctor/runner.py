@@ -173,6 +173,10 @@ def _execute(check: Check, ctx: Any, budget: Budget | None = None) -> Outcome:
         _BUDGET.reset(token)
 
 
+def _start_worker(worker: Callable[[], None]) -> None:
+    threading.Thread(target=worker, name="doctor-check", daemon=True).start()
+
+
 def run_checks(checks: Sequence[Check], ctx: Any, *, timeout: float = 6.0, deadline: float = 45.0,
                workers: int = 8, monotonic: Callable[[], float] = time.monotonic,
                cap: float | None = None) -> list[CheckResult]:
@@ -207,7 +211,7 @@ def run_checks(checks: Sequence[Check], ctx: Any, *, timeout: float = 6.0, deadl
                 changed.notify_all()
 
     def spawn() -> None:
-        threading.Thread(target=worker, name="doctor-check", daemon=True).start()
+        _start_worker(worker)
 
     def abandon(task: _Task, now: float, detail: str) -> None:
         started = task.started if task.state == _RUNNING else now
@@ -216,9 +220,10 @@ def run_checks(checks: Sequence[Check], ctx: Any, *, timeout: float = 6.0, deadl
         if task.budget is not None:
             task.budget.stop()
 
-    for _ in range(max(1, min(workers, len(tasks)))):
-        spawn()
     try:
+        # Inside the `try`: a Ctrl-C while the workers start must still stop the ones that did.
+        for _ in range(max(1, min(workers, len(tasks)))):
+            spawn()
         with changed:
             while any(task.state != _DONE for task in tasks):
                 now = monotonic()
@@ -243,7 +248,8 @@ def run_checks(checks: Sequence[Check], ctx: Any, *, timeout: float = 6.0, deadl
                         wake = min(wake, task.started + limit)
                 changed.wait(max(0.0, wake - monotonic()))
     finally:
-        # Interrupted or not, no check starts or goes on once the caller has stopped waiting.
+        # Interrupted or not, no check starts or goes on once the caller has stopped waiting. Under the
+        # lock no worker is half-way through taking a check: each one has its budget or none was taken.
         with changed:
             pending.clear()
             for task in tasks:
