@@ -168,6 +168,7 @@ omarchy-game-mode doctor system           Device, system and GPU facts only
 omarchy-game-mode doctor --console-ip 192.168.1.50   Also probe your console's address
 omarchy-game-mode doctor --markdown       Redacted report to paste into an issue
 omarchy-game-mode doctor --json           The same report for tools
+omarchy-game-mode doctor buttons          Guided button test (see below)
 ```
 
 What it checks:
@@ -244,6 +245,41 @@ it into the "Optional redacted evidence" field of the
 
 The doctor's output is English only by design, so reports read the same for everyone who
 helps with them; it adds no strings to the translated interface.
+
+### Hardware button test
+
+`omarchy-game-mode doctor buttons` asks you to press each control once and shows the code
+that really arrives for it: the Xbox button, View, Menu, A, B, X, Y, the bumpers and
+triggers, both stick clicks, the D-pad, both sticks, the back paddles and the two buttons
+under the screen. Run it in a terminal; Enter skips a control and `q` stops the test.
+
+```
+omarchy-game-mode doctor buttons                        Test the controller games see
+omarchy-game-mode doctor buttons --markdown > buttons.md   Prompts stay on the terminal
+omarchy-game-mode doctor buttons --raw                  Also watch the raw HID report
+omarchy-game-mode doctor buttons --device /dev/input/event21   Read only this device
+```
+
+It is read-only. Controllers are opened for reading, never grabbed; nothing is remapped
+and no input is sent, so Steam and your games keep receiving every press, the Xbox
+button included. It tests the controller that games see: the virtual controller of a
+handheld daemon such as InputPlumber when one is running, otherwise the built-in one.
+Devices it is not allowed to read are listed with the reason.
+
+Nothing about your controller is assumed. At the end the test lists where it differs
+from an Xbox-style pad on Linux, for example an Xbox button that sends the View code (so
+Steam does not open its menu), a right-stick click that never arrives, paddles that
+arrive as keyboard keys, or two buttons that send the same code. It also prints an SDL
+mapping line built only from the presses it saw and names the controls it left out.
+
+`--raw` additionally reads the controller's raw HID report, when your user is allowed
+to, and tells you when a press changes bits the controller never declared. That is how a
+button that exists in the hardware but is invisible to the kernel shows up.
+
+To share a result, run it with `--markdown` and paste the file into the
+hardware-validation issue form. It holds the device model, kernel and input-stack
+versions and one row per control (pass, fail or not tested). Serial numbers and device
+addresses are never read.
 
 ## Xbox Remote Play: before you troubleshoot
 

@@ -15,6 +15,7 @@ import shutil
 import signal
 import socket
 import ssl
+import stat
 import subprocess
 import threading
 import time
@@ -61,12 +62,16 @@ class FileSystem:
     def path(self, absolute: str) -> Path:
         return self.root / absolute.lstrip("/")
 
-    def read(self, absolute: str, limit: int = READ_LIMIT) -> str | None:
+    def read_bytes(self, absolute: str, limit: int = READ_LIMIT) -> bytes | None:
         try:
             with open(self.path(absolute), "rb") as handle:
-                return handle.read(limit).decode("utf-8", "replace")
+                return handle.read(limit)
         except OSError:
             return None
+
+    def read(self, absolute: str, limit: int = READ_LIMIT) -> str | None:
+        data = self.read_bytes(absolute, limit)
+        return None if data is None else data.decode("utf-8", "replace")
 
     def line(self, absolute: str) -> str:
         """First line, stripped; empty when the file is missing or unreadable."""
@@ -90,6 +95,10 @@ class FileSystem:
 
     def readable(self, absolute: str) -> bool:
         return os.access(self.path(absolute), os.R_OK)
+
+    def is_char_device(self, absolute: str) -> bool:
+        mode = self.mode(absolute)
+        return mode is not None and stat.S_ISCHR(mode)
 
     def resolved(self, absolute: str) -> str:
         """Symlink-free form of a path, expressed below the root again."""

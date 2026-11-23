@@ -1,6 +1,7 @@
 """Tests for `omarchy-game-mode doctor`: no network, no devices, no root, no GTK."""
 
 import collections
+import heapq
 import io
 import ipaddress
 import json
@@ -17,8 +18,8 @@ import time
 import unittest
 from pathlib import Path
 
-from gaminghome.doctor import (browser, checks, cli, console, context, devices, evdev, firewall, inputstack, model,
-                               net, redact, report, runner, stun, system, udp, wifi)
+from gaminghome.doctor import (browser, buttons, buttonsio, checks, cli, console, context, devices, evdev, firewall,
+                               hid, inputstack, model, net, redact, report, runner, stun, system, udp, wifi)
 from gaminghome.doctor.context import CommandResult, Context, FileSystem, Options
 from gaminghome.doctor.model import Status
 from gaminghome.doctor.runner import Check
@@ -2222,12 +2223,10 @@ class PrivacyTest(CliCase):
                           f"{CANARY_LAN_IP} in {CANARY_HOME}/x token=abc123secret serial")
             return model.warn(everything, everything, declared=everything, undeclared=CANARY_SERIAL,
                               rows=[{"ok": everything, "uniq": CANARY_SERIAL}])
-        rogue = runner.Check("rogue.leak", f"Leak {CANARY_BSSID}", "system", leaky, everything_ok := "p", "n",
+        rogue = runner.Check("rogue.leak", f"Leak {CANARY_BSSID}", "system", leaky, "p", "n",
                              ("declared", "rows", "rows.ok"))
-        original = cli.plan
+        self.addCleanup(setattr, cli, "plan", cli.plan)
         cli.plan = lambda options: [rogue]
-        self.addCleanup(setattr, cli, "plan", original)
-        self.assertEqual(everything_ok, "p")
         for style, output in self.outputs().items():
             self.assert_private(output, f"rogue {style}")
             self.assertNotIn("abc123secret", output)
@@ -2313,7 +2312,7 @@ class EntryPointTest(unittest.TestCase):
             self.assertEqual(application.main(["omarchy-game-mode", "doctor", "--help"]), 0)
             self.assertEqual(application.main(["omarchy-game-mode", "doctor", "--nope"]), 2)
         self.assertIn("usage: omarchy-game-mode doctor", out.getvalue())
-        self.assertIn("doctor [SCOPE]", application.USAGE)
+        self.assertIn("doctor [SCOPE|buttons]", application.USAGE)
         with self.assertRaises(AssertionError):
             application.main(["omarchy-game-mode", "status"])
 
@@ -2322,6 +2321,694 @@ class EntryPointTest(unittest.TestCase):
                   "print(sorted(name for name in sys.modules if name.startswith('gaminghome.doctor')))\n")
         result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, capture_output=True, text=True, timeout=60)
         self.assertEqual((result.returncode, result.stdout.strip()), (0, "[]"), result.stderr)
+
+
+# ---- guided button test: scripted events against a fake clock --------------------------
+
+# Report descriptor of the ROG Xbox Ally's gamepad interface (identical on every unit):
+# report 0x0b declares 14 buttons at bits 96-109, followed by 2 padding bits.
+ALLY_REPORT_DESCRIPTOR = bytes.fromhex(
+    "05010905a101850ba10009300931150026ffff350046ffff950275108102c0a10009330934150026ffff950275108102c0"
+    "05010932150026ff039501750a81021500250075069501810305010935150026ff039501750a810215002500750695018103"
+    "05091901290e150025017501950e810295017502810105010939150125083500463b016514750495018102950175048101"
+    "050f0921850da102099715002501750495019102150025007504950191030970150025647508950491020950660110550e"
+    "150026ff0075089501910209a7150026ff0075089501910265005500097c150026ff00750895019102c0c0")
+STICK = buttons.AxisInfo(0, 65535, 32768)
+TRIGGER = buttons.AxisInfo(0, 1023, 0)
+PAD_AXIS_INFO = {evdev.ABS_X: STICK, evdev.ABS_Y: STICK, evdev.ABS_RX: STICK, evdev.ABS_RY: STICK,
+                 evdev.ABS_Z: TRIGGER, evdev.ABS_RZ: TRIGGER}
+KEY_F14, KEY_F15, KEY_F16, KEY_PROG1 = 184, 185, 186, 148
+
+
+def key(code, device=0, at=0.5, hold=0.1):
+    """A press and release, `at` seconds into the prompt."""
+    return [(at, buttons.Event("input", device, evdev.EV_KEY, code, 1)),
+            (at + hold, buttons.Event("input", device, evdev.EV_KEY, code, 0))]
+
+
+def axis(code, value, device=0, at=0.5):
+    return [(at, buttons.Event("input", device, evdev.EV_ABS, code, value))]
+
+
+def typed(kind, at=0.5):
+    return [(at, buttons.Event(kind))]
+
+
+def raw_report(bits=(), at=0.5):
+    payload = bytearray(15)
+    for bit in bits:
+        payload[bit // 8] |= 1 << bit % 8
+    return [(at, buttons.Event("raw", data=bytes([0x0B]) + bytes(payload)))]
+
+
+# What a standard Xbox-style pad sends for each control.
+STANDARD = {
+    "guide": key(evdev.BTN_MODE), "view": key(evdev.BTN_SELECT), "menu": key(evdev.BTN_START),
+    "a": key(evdev.BTN_SOUTH), "b": key(evdev.BTN_EAST), "x": key(evdev.BTN_NORTH), "y": key(evdev.BTN_WEST),
+    "lb": key(evdev.BTN_TL), "rb": key(evdev.BTN_TR), "l3": key(evdev.BTN_THUMBL), "r3": key(evdev.BTN_THUMBR),
+    "lt": axis(evdev.ABS_Z, 1023) + axis(evdev.ABS_Z, 0, at=0.6),
+    "rt": axis(evdev.ABS_RZ, 1023) + axis(evdev.ABS_RZ, 0, at=0.6),
+    "dpad_up": axis(evdev.ABS_HAT0Y, -1) + axis(evdev.ABS_HAT0Y, 0, at=0.6),
+    "dpad_down": axis(evdev.ABS_HAT0Y, 1) + axis(evdev.ABS_HAT0Y, 0, at=0.6),
+    "dpad_left": axis(evdev.ABS_HAT0X, -1) + axis(evdev.ABS_HAT0X, 0, at=0.6),
+    "dpad_right": axis(evdev.ABS_HAT0X, 1) + axis(evdev.ABS_HAT0X, 0, at=0.6),
+    "ls_right": axis(evdev.ABS_X, 65535) + axis(evdev.ABS_X, 32768, at=0.6),
+    "ls_down": axis(evdev.ABS_Y, 65535) + axis(evdev.ABS_Y, 32768, at=0.6),
+    "rs_right": axis(evdev.ABS_RX, 65535) + axis(evdev.ABS_RX, 32768, at=0.6),
+    "rs_down": axis(evdev.ABS_RY, 65535) + axis(evdev.ABS_RY, 32768, at=0.6),
+}
+
+
+class ScriptedSource:
+    """Plays scripted events against a fake clock: `script[control]` is a list of (seconds into the prompt, event)."""
+
+    def __init__(self, script, keys_down=None, axes=None, loose=()):
+        self.script, self.now, self.queue, self.order = script, 0.0, [], 0
+        self._keys, self._axes = keys_down or {}, axes if axes is not None else {0: PAD_AXIS_INFO}
+        self.prompts, self.closed = [], False
+        for at, event in loose:
+            self._push(at, event)
+
+    def _push(self, at, event):
+        self.order += 1
+        heapq.heappush(self.queue, (at, self.order, event))
+
+    def clock(self):
+        return self.now
+
+    def keys_down(self):
+        return self._keys
+
+    def axes(self):
+        return self._axes
+
+    def begin_prompt(self, control):
+        self.prompts.append((control.key, round(self.now, 3)))
+        for delay, event in self.script.get(control.key, ()):
+            self._push(self.now + delay, event)
+
+    def poll(self, timeout):
+        if self.queue and self.queue[0][0] <= self.now + timeout:
+            at, _order, event = heapq.heappop(self.queue)
+            self.now = max(self.now, at)
+            return [event]
+        self.now += timeout
+        return []
+
+    def close(self):
+        self.closed = True
+
+
+class Recorder(buttons.Listener):
+    def __init__(self):
+        self.lines = []
+
+    def prompt(self, index, total, control):
+        self.lines.append(f"ask {control.key}")
+
+    def observed(self, control, observation):
+        self.lines.append(f"{control.key}: {observation.label()}")
+
+    def finished(self, result):
+        self.lines.append(f"{result.control.key} {result.status}")
+
+
+def run_session(script, *, timeout=12.0, controls=buttons.CONTROLS, watcher=None, **source):
+    scripted = ScriptedSource(script, **source)
+    recorder = Recorder()
+    session = buttons.Session(scripted, buttons.Tracker(scripted.keys_down(), scripted.axes()), scripted.clock,
+                              timeout=timeout, controls=controls, watcher=watcher, listener=recorder)
+    return {result.control.key: result for result in session.run()}, scripted, recorder
+
+
+def only(*keys):
+    return [control for control in buttons.CONTROLS if control.key in keys]
+
+
+class ButtonSessionTest(unittest.TestCase):
+    def test_script_covers_every_requested_control_once(self):
+        keys = [control.key for control in buttons.CONTROLS]
+        self.assertEqual(keys, ["guide", "view", "menu", "a", "b", "x", "y", "lb", "rb", "lt", "rt", "l3", "r3",
+                                "dpad_up", "dpad_down", "dpad_left", "dpad_right", "ls_right", "ls_down", "rs_right",
+                                "rs_down", "paddle_left", "paddle_right", "armoury", "library", "armoury_hold",
+                                "library_hold"])
+        held = [control.key for control in buttons.CONTROLS if control.hold]
+        self.assertEqual(held, ["armoury_hold", "library_hold"])
+        self.assertTrue(all(control.name and control.prompt for control in buttons.CONTROLS))
+
+    def test_standard_pad_passes_every_standard_control(self):
+        results, source, recorder = run_session(STANDARD)
+        standard = [control.key for control in buttons.CONTROLS if control.expected]
+        self.assertEqual({key: buttons.outcome(results[key]) for key in standard}, {key: "pass" for key in standard})
+        self.assertEqual(results["guide"].observations, [buttons.Observation(0, "key", evdev.BTN_MODE)])
+        self.assertEqual(recorder.lines[:3], ["ask guide", "guide: BTN_MODE (316)", "guide observed"])
+        self.assertEqual([buttons.outcome(results[key]) for key in sorted(buttons.EXTRA_BUTTONS)], ["no event"] * 6)
+        self.assertEqual(len(source.prompts), len(buttons.CONTROLS))
+
+    def test_a_press_ends_the_prompt_after_a_short_settle_and_silence_runs_into_the_timeout(self):
+        results, source, _recorder = run_session({"guide": key(evdev.BTN_MODE, at=2.0)}, timeout=5.0,
+                                                 controls=only("guide", "view", "menu"))
+        self.assertEqual([results[name].status for name in ("guide", "view", "menu")],
+                         ["observed", "timeout", "timeout"])
+        self.assertEqual(source.prompts, [("guide", 0.0), ("view", 2.25), ("menu", 7.25)])
+        self.assertEqual(buttons.outcome(results["view"]), "no event")
+
+    def test_enter_skips_a_control_and_quit_leaves_the_rest_untested(self):
+        script = {"guide": typed("skip"), "view": key(evdev.BTN_SELECT), "menu": typed("quit"),
+                  "a": key(evdev.BTN_SOUTH)}
+        results, _source, _recorder = run_session(script, controls=only("guide", "view", "menu", "a"))
+        self.assertEqual([results[name].status for name in ("guide", "view", "menu", "a")],
+                         ["skipped", "observed", "not tested", "not tested"])
+        self.assertEqual([buttons.outcome(results[name]) for name in ("guide", "menu", "a")], ["not tested"] * 3)
+        self.assertEqual(results["a"].observations, [])
+
+    def test_enter_typed_by_a_button_mapper_right_after_a_press_is_not_a_skip(self):
+        script = {"a": key(evdev.BTN_SOUTH, at=0.5) + typed("skip", at=0.52),
+                  "b": typed("skip", at=0.05) + key(evdev.BTN_EAST, at=1.0),
+                  "x": typed("skip", at=3.0)}
+        results, _source, _recorder = run_session(script, controls=only("a", "b", "x"))
+        self.assertEqual([results[name].status for name in ("a", "b", "x")], ["observed", "observed", "skipped"])
+
+    def test_buttons_held_when_the_test_starts_or_across_prompts_are_ignored_until_released(self):
+        held_at_start = {0: {evdev.BTN_SOUTH}}
+        script = {"guide": [(0.2, buttons.Event("input", 0, evdev.EV_KEY, evdev.BTN_SOUTH, 2))],
+                  "view": [(0.2, buttons.Event("input", 0, evdev.EV_KEY, evdev.BTN_SOUTH, 0)),
+                           *key(evdev.BTN_SOUTH, at=0.4, hold=30)],
+                  "menu": [(0.2, buttons.Event("input", 0, evdev.EV_KEY, evdev.BTN_SOUTH, 2)),
+                           *key(evdev.BTN_START, at=0.5)]}
+        results, _source, _recorder = run_session(script, controls=only("guide", "view", "menu"), timeout=3.0,
+                                                  keys_down=held_at_start)
+        self.assertEqual(results["guide"].status, "timeout")
+        self.assertEqual([seen.code for seen in results["view"].observations], [evdev.BTN_SOUTH])
+        self.assertEqual([seen.code for seen in results["menu"].observations], [evdev.BTN_START])
+
+    def test_trigger_counts_only_past_the_threshold_and_once_per_pull(self):
+        tracker = buttons.Tracker(axes={0: PAD_AXIS_INFO})
+        feed = lambda value: tracker.feed(0, evdev.EV_ABS, evdev.ABS_Z, value)  # noqa: E731
+        self.assertEqual([feed(value) for value in (40, 200, 357)], [None, None, None])
+        self.assertEqual(feed(359), buttons.Observation(0, "axis", evdev.ABS_Z, 1))
+        self.assertEqual([feed(value) for value in (700, 1023, 400, 200)], [None, None, None, None])
+        self.assertIsNone(feed(150))
+        self.assertEqual(feed(900), buttons.Observation(0, "axis", evdev.ABS_Z, 1))
+
+    def test_stick_drift_is_ignored_and_direction_is_reported(self):
+        tracker = buttons.Tracker(axes={0: PAD_AXIS_INFO})
+        feed = lambda code, value: tracker.feed(0, evdev.EV_ABS, code, value)  # noqa: E731
+        self.assertEqual([feed(evdev.ABS_X, value) for value in (32768, 33900, 31000, 40000, 26000)], [None] * 5)
+        self.assertEqual(feed(evdev.ABS_X, 65000), buttons.Observation(0, "axis", evdev.ABS_X, 1))
+        self.assertEqual(feed(evdev.ABS_X, 300), buttons.Observation(0, "axis", evdev.ABS_X, -1))
+        self.assertIsNone(feed(evdev.ABS_X, 32768))
+        self.assertIsNone(feed(0x28, 500))
+        self.assertIsNone(buttons.Tracker().feed(0, evdev.EV_ABS, evdev.ABS_X, 65535))
+        self.assertIsNone(buttons.Tracker().feed(0, 0x04, 4, 458756))
+
+    def test_hat_edges(self):
+        tracker = buttons.Tracker()
+        feed = lambda code, value: tracker.feed(0, evdev.EV_ABS, code, value)  # noqa: E731
+        self.assertEqual(feed(evdev.ABS_HAT0Y, -1), buttons.Observation(0, "hat", evdev.ABS_HAT0Y, -1))
+        self.assertIsNone(feed(evdev.ABS_HAT0Y, -1))
+        self.assertEqual(feed(evdev.ABS_HAT0Y, 1), buttons.Observation(0, "hat", evdev.ABS_HAT0Y, 1))
+        self.assertIsNone(feed(evdev.ABS_HAT0Y, 0))
+        self.assertEqual(feed(evdev.ABS_HAT0X, 1).label(), "ABS_HAT0X (16) +")
+        dpad = only("dpad_up", "dpad_down", "dpad_left", "dpad_right")
+        results, _source, _recorder = run_session(STANDARD, controls=dpad)
+        self.assertEqual({buttons.outcome(result) for result in results.values()}, {"pass"})
+
+    def test_one_press_seen_on_two_devices_and_a_long_press_that_changes_code_are_both_kept(self):
+        script = {"paddle_left": key(KEY_F14, device=1) + key(KEY_F14, device=2, at=0.55),
+                  "armoury_hold": key(KEY_F16, device=1, at=0.5, hold=2.0) + key(KEY_PROG1, device=1, at=1.9)}
+        results, source, _recorder = run_session(script, controls=only("paddle_left", "armoury_hold"))
+        self.assertEqual([(seen.device, seen.code) for seen in results["paddle_left"].observations],
+                         [(1, KEY_F14), (2, KEY_F14)])
+        self.assertEqual([seen.code for seen in results["armoury_hold"].observations], [KEY_F16, KEY_PROG1])
+        self.assertEqual(source.prompts[1][1], 0.75)
+        self.assertEqual(buttons.outcome(results["paddle_left"]), "recorded")
+
+
+class ButtonVerdictTest(unittest.TestCase):
+    def verdicts(self, script, devices=(RAW_PAD, NKEY_KEYS), primary=RAW_PAD, **kw):
+        results, _source, _recorder = run_session(script, **kw)
+        ordered = [results[control.key] for control in kw.get("controls", buttons.CONTROLS)]
+        return {verdict.key: verdict for verdict in buttons.verdicts(ordered, list(devices), primary)}, ordered
+
+    def test_xbox_button_reported_as_select_is_explained_with_a_text_only_suggestion(self):
+        found, _results = self.verdicts({**STANDARD, "guide": key(evdev.BTN_SELECT)})
+        guide = found["guide"]
+        self.assertEqual(guide.status, Status.WARN)
+        self.assertIn("The Xbox button reports BTN_SELECT (314), the code of View/Back, instead of BTN_MODE (316). "
+                      "Steam will treat it as View/Back and will not open its menu; a handheld daemon profile can "
+                      "remap it.", guide.detail)
+        self.assertIn("View reports the same code", guide.detail)
+        self.assertIn("nothing is written", guide.advice)
+        self.assertIn("Xbox and View both report BTN_SELECT (314)", found["duplicates"].detail)
+
+    def test_xbox_button_verdict_follows_only_what_was_observed(self):
+        mode, _results = self.verdicts(STANDARD)
+        self.assertEqual((mode["guide"].status, "duplicates" in mode), (Status.PASS, False))
+        other, _results = self.verdicts({**STANDARD, "guide": key(KEY_F16, device=1), "view": typed("skip")})
+        self.assertIn("reports KEY_F16 (186) instead of BTN_MODE (316)", other["guide"].detail)
+        self.assertNotIn("View reports the same code", other["guide"].detail)
+        silent, _results = self.verdicts({key_: value for key_, value in STANDARD.items() if key_ != "guide"})
+        self.assertIn("sent nothing on the watched devices", silent["guide"].detail)
+        skipped, _results = self.verdicts({**STANDARD, "guide": typed("skip")})
+        self.assertNotIn("guide", skipped)
+
+    def test_r3_missing_from_the_raw_ally_pad(self):
+        script = {key_: value for key_, value in STANDARD.items() if key_ != "r3"}
+        found, results = self.verdicts(script)
+        self.assertEqual(found["r3"].status, Status.WARN)
+        self.assertIn("R3 unavailable (needs the Ally HID kernel driver)", found["r3"].detail)
+        self.assertIn("does not list BTN_THUMBR", found["r3"].detail)
+        self.assertEqual(buttons.outcome(next(r for r in results if r.control.key == "r3")), "no event")
+        virtual, _results = self.verdicts(script, devices=(ELITE_PAD,), primary=ELITE_PAD)
+        self.assertIn("R3 was not seen, although the controller lists BTN_THUMBR", virtual["r3"].detail)
+        other_vendor, _results = self.verdicts(script, primary=pad(identity="1234:0001"))
+        self.assertIn("R3 unavailable (its driver does not expose it)", other_vendor["r3"].detail)
+        ok, _results = self.verdicts(STANDARD, devices=(ELITE_PAD,), primary=ELITE_PAD)
+        self.assertEqual(ok["r3"].status, Status.PASS)
+        wrong, _results = self.verdicts({**STANDARD, "r3": key(evdev.BTN_THUMBL)})
+        self.assertIn("R3 reports BTN_THUMBL (317) instead of BTN_THUMBR (318)", wrong["r3"].detail)
+
+    def test_paddles_and_vendor_buttons_arriving_as_keys_on_a_readable_keyboard_leak(self):
+        script = {**STANDARD, "paddle_left": key(KEY_F14, device=1), "paddle_right": key(KEY_F15, device=1),
+                  "armoury": key(KEY_F16, device=1), "library": key(KEY_PROG1, device=1)}
+        found, _results = self.verdicts(script)
+        leak = found["extra_keys"]
+        self.assertEqual(leak.status, Status.WARN)
+        self.assertIn("the keys leak into applications; use InputPlumber", leak.detail)
+        for expected in ("Left back paddle: KEY_F14 (184)", "Right back paddle: KEY_F15 (185)",
+                         "Command Center button: KEY_F16 (186)", "Library button: KEY_PROG1 (148)"):
+            self.assertIn(expected, leak.detail)
+        routed, _results = self.verdicts(script, devices=(ELITE_PAD, PLUMBER_KEYS), primary=ELITE_PAD)
+        self.assertEqual(routed["extra_keys"].status, Status.INFO)
+        self.assertIn("virtual keyboard", routed["extra_keys"].detail)
+        on_pad = {**STANDARD, "paddle_left": key(evdev.BTN_TRIGGER_HAPPY1), "paddle_right": key(0x2C1)}
+        self.assertNotIn("extra_keys", self.verdicts(on_pad, devices=(ELITE_PAD,), primary=ELITE_PAD)[0])
+
+    def test_two_buttons_with_one_code_are_ambiguous_but_a_short_and_long_press_of_one_button_are_not(self):
+        script = {**STANDARD, "paddle_left": key(KEY_F14, device=1), "paddle_right": key(KEY_F14, device=1),
+                  "armoury": key(KEY_F16, device=1), "armoury_hold": key(KEY_F16, device=1, hold=2.0)}
+        found, _results = self.verdicts(script)
+        self.assertEqual(found["duplicates"].status, Status.WARN)
+        self.assertIn("Left back paddle and Right back paddle both report KEY_F14 (184)", found["duplicates"].detail)
+        self.assertNotIn("Command Center", found["duplicates"].detail)
+        same_code_other_device = {**STANDARD, "armoury": key(KEY_F16, device=1), "library": key(KEY_F16, device=0)}
+        self.assertNotIn("duplicates", self.verdicts(same_code_other_device)[0])
+
+    def test_unexpected_codes_and_silent_controls_are_listed(self):
+        script = {**STANDARD, "lb": key(evdev.BTN_TR), "ls_right": axis(evdev.ABS_X, 0)}
+        del script["menu"]
+        found, results = self.verdicts(script)
+        self.assertIn("LB reports BTN_TR (311), expected BTN_TL (310)", found["mismatch"].detail)
+        self.assertIn("Left stick right reports ABS_X (0) -, expected ABS_X (0) +", found["mismatch"].detail)
+        self.assertIn("Menu", found["silent"].detail)
+        self.assertNotIn("held", found["silent"].detail)
+        by_key = {result.control.key: buttons.outcome(result) for result in results}
+        self.assertEqual((by_key["lb"], by_key["menu"], by_key["x"]), ("differs", "no event", "pass"))
+        self.assertEqual(buttons.expected_label(buttons.CONTROLS[0]), "BTN_MODE (316)")
+        self.assertEqual(buttons.expected_label(only("paddle_left")[0]), "no standard code")
+
+    def test_buttons_numbered_in_hid_order_are_diagnosed_and_still_get_a_correct_sdl_line(self):
+        order = ("a", "b", "x", "y", "lb", "rb", "view", "menu", "l3", "r3", "guide")
+        script = {**STANDARD, **{name: key(evdev.BTN_SOUTH + index) for index, name in enumerate(order)}}
+        found, results = self.verdicts(script)
+        self.assertEqual(found["hid_order"].status, Status.WARN)
+        self.assertIn("a generic driver numbered them without knowing the layout", found["hid_order"].detail)
+        self.assertIn("The Xbox button reports BTN_SELECT (314), the code of View/Back", found["guide"].detail)
+        self.assertNotIn("View reports the same code", found["guide"].detail)
+        self.assertIn("R3 reports BTN_TR2 (313) instead of BTN_THUMBR (318)", found["r3"].detail)
+        self.assertIn("X reports BTN_C (306), expected BTN_NORTH (307)", found["mismatch"].detail)
+        self.assertNotIn("duplicates", found)
+        line, missing = buttons.sdl_mapping(results, RAW_PAD, 0)
+        self.assertIn(",guide:b10,back:b6,start:b7,a:b0,b:b1,x:b2,y:b3,leftshoulder:b4,rightshoulder:b5,", line)
+        self.assertIn(",leftstick:b8,rightstick:b9,", line)
+        self.assertEqual(missing, ["paddle2 (Left back paddle)", "paddle1 (Right back paddle)"])
+        self.assertNotIn("hid_order", self.verdicts(STANDARD)[0])
+        few = {name: key(evdev.BTN_SOUTH + index) for index, name in enumerate(order[:5])}
+        self.assertNotIn("hid_order", self.verdicts(few, controls=only(*order[:5]))[0])
+
+    def test_sdl_mapping_is_built_only_from_observed_presses(self):
+        script = {key_: value for key_, value in STANDARD.items() if key_ not in ("r3", "menu")}
+        _found, results = self.verdicts(script)
+        line, missing = buttons.sdl_mapping(results, RAW_PAD, 0)
+        self.assertEqual(line, "03000000050b00004c1b000010010000,ASUSTeK Computer Inc. N-KEY Device,guide:b12,"
+                               "back:b10,a:b0,b:b1,x:b3,y:b4,leftshoulder:b6,rightshoulder:b7,lefttrigger:a2,"
+                               "righttrigger:a5,leftstick:b13,dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,"
+                               "leftx:a0,lefty:a1,rightx:a3,righty:a4,platform:Linux,")
+        self.assertEqual(missing, ["start (Menu)", "rightstick (R3)", "paddle2 (Left back paddle)",
+                                   "paddle1 (Right back paddle)"])
+        self.assertNotIn("rightstick", line)
+        self.assertEqual(buttons.sdl_guid(ELITE_PAD), "030000005e040000000b000010010000")
+
+    def test_sdl_mapping_ignores_other_devices_and_marks_inverted_axes(self):
+        script = {"a": key(evdev.BTN_SOUTH), "paddle_left": key(KEY_F14, device=1),
+                  "paddle_right": key(evdev.BTN_TRIGGER_HAPPY1), "ls_right": axis(evdev.ABS_X, 0),
+                  "lt": key(evdev.BTN_TL2)}
+        results, _source, _recorder = run_session(script, controls=only("a", "lt", "ls_right", "paddle_left",
+                                                                        "paddle_right"))
+        ordered = [results[name] for name in ("a", "lt", "ls_right", "paddle_left", "paddle_right")]
+        line, missing = buttons.sdl_mapping(ordered, ELITE_PAD, 0)
+        self.assertEqual(line, "030000005e040000000b000010010000,Microsoft X-Box One Elite 2 pad,a:b0,leftx:a0~,"
+                               "paddle1:b11,platform:Linux,")
+        self.assertEqual(missing, ["lefttrigger (LT)", "paddle2 (Left back paddle)"])
+
+
+class RawHidTest(unittest.TestCase):
+    def test_descriptor_declares_fourteen_buttons_then_two_padding_bits(self):
+        fields = hid.parse_report_descriptor(ALLY_REPORT_DESCRIPTOR)
+        self.assertEqual([(item.offset, item.bits, item.constant) for item in fields], [
+            (0, 32, False), (32, 32, False), (64, 10, False), (74, 6, True), (80, 10, False), (90, 6, True),
+            (96, 14, False), (110, 2, True), (112, 4, False), (116, 4, True)])
+        self.assertEqual({item.report_id for item in fields}, {0x0B})
+        button_field = next(item for item in fields if item.is_buttons)
+        self.assertEqual((button_field.usage_min, button_field.usage_max, button_field.bits), (1, 14, 14))
+        self.assertTrue(hid.uses_report_ids(fields))
+        self.assertEqual(hid.RawWatcher(fields).summary(), {"report_id": 0x0B, "declared_buttons": 14})
+
+    def test_malformed_descriptors_do_not_raise(self):
+        for data in (b"", b"\x05", b"\xfe", b"\xfe\x03\x00", ALLY_REPORT_DESCRIPTOR[:37], bytes(range(256)),
+                     b"\x75\x08\x95\xff\x81\x02" * 2000):
+            self.assertIsInstance(hid.parse_report_descriptor(data), list)
+        four_buttons = bytes.fromhex("05091901290475019504810295048101")
+        self.assertEqual(hid.parse_report_descriptor(four_buttons),
+                         [hid.Field(0, 0, 4, False, 9, 1, 4), hid.Field(0, 4, 4, True, 9, 0, 0)])
+
+    def test_only_bits_outside_the_declared_fields_are_reported_and_only_once(self):
+        watcher = hid.RawWatcher(hid.parse_report_descriptor(ALLY_REPORT_DESCRIPTOR))
+
+        def report(*bits):
+            return raw_report(bits)[0][1].data
+        self.assertEqual(watcher.feed(report()), [])
+        self.assertEqual(watcher.feed(report(96, 109, 0, 40, 112)), [])
+        found = watcher.feed(report(110))
+        self.assertEqual([(bit.report_id, bit.bit) for bit in found], [(0x0B, 110)])
+        self.assertEqual(found[0].where, "padding right after the 14 declared buttons (where button 15 would be)")
+        self.assertEqual(watcher.feed(report(110)), [])
+        self.assertEqual([bit.where for bit in watcher.feed(report(111, 75))],
+                         ["padding between declared fields",
+                          "padding right after the 14 declared buttons (where button 16 would be)"])
+        self.assertEqual(watcher.feed(b""), [])
+        unnumbered = hid.RawWatcher([hid.Field(0, 0, 4, False, 9, 1, 4), hid.Field(0, 4, 4, True, 9)])
+        self.assertEqual(unnumbered.feed(b"\x00"), [])
+        self.assertEqual([bit.bit for bit in unnumbered.feed(b"\x1f")], [4])
+
+    def test_r3_found_in_a_padding_bit_of_the_raw_report_ends_the_prompt_and_explains_itself(self):
+        watcher = hid.RawWatcher(hid.parse_report_descriptor(ALLY_REPORT_DESCRIPTOR))
+        script = {"l3": raw_report(at=0.1) + key(evdev.BTN_THUMBL) + raw_report((109,), at=0.5),
+                  "r3": raw_report((110,), at=0.7) + raw_report(at=0.9)}
+        results, source, _recorder = run_session(script, controls=only("l3", "r3"), watcher=watcher)
+        self.assertEqual(results["l3"].raw_bits, [])
+        self.assertEqual([(bit.bit, bit.report_id) for bit in results["r3"].raw_bits], [(110, 0x0B)])
+        self.assertEqual((results["r3"].status, buttons.outcome(results["r3"])), ("observed", "no event"))
+        verdict = buttons.verdicts([results["l3"], results["r3"]], [RAW_PAD], RAW_PAD)[0]
+        self.assertIn("pressing it changed bit 110 of raw HID report 0x0b, padding right after the 14 declared "
+                      "buttons", verdict.detail)
+        self.assertIn("The button exists in the hardware", verdict.detail)
+        rows = buttons.control_rows([results["r3"]], [RAW_PAD])
+        self.assertEqual(rows[0]["observed"], [{"node": "hidraw", "event": "raw HID bit 110 of report 0x0b",
+                                                "type": "raw", "event_code": 110, "direction": 0}])
+
+    def test_raw_reports_without_a_watcher_are_ignored(self):
+        results, _source, _recorder = run_session({"r3": raw_report((110,))}, controls=only("r3"), timeout=2.0)
+        self.assertEqual((results["r3"].status, results["r3"].raw_bits), ("timeout", []))
+
+
+class FakeDevFS(FileSystem):
+    """The scratch tree cannot hold real device nodes: treat its files under /dev as character devices."""
+
+    def is_char_device(self, absolute):
+        return absolute.startswith("/dev/") and self.mode(absolute) is not None
+
+
+class ButtonCommandTest(InputCase):
+    """`doctor buttons` end to end on a fake sysfs/dev tree, with scripted presses instead of hardware."""
+
+    def device_ctx(self, **ally):
+        self.ally(**ally)
+        if ally.get("inputplumber"):
+            add_input(SCRATCH, 20, "InputPlumber Keyboard", NKEY_KEYBOARD_KEYS, vendor="1234", product="5678",
+                      virtual=True)
+        add_input(SCRATCH, 1, "AT Translated Set 2 keyboard", NKEY_KEYBOARD_KEYS, vendor="0001", product="0001",
+                  bus="0011")
+        for path, text in CLIENT_FILES.items():
+            write(SCRATCH / path.lstrip("/"), text)
+        self.commands.table.update(CLIENT_COMMANDS)
+        return make_context(fs=FakeDevFS(SCRATCH), commands=self.commands, env=CLIENT_ENV)
+
+    def run_buttons(self, ctx, script, *argv, terminal=True, **source):
+        out, err = io.StringIO(), io.StringIO()
+        self.sources = []
+
+        def factory(selection, raw_node):
+            self.selection, self.raw_node = selection, raw_node
+            self.sources.append(ScriptedSource(script, **source))
+            return self.sources[-1]
+        tty = (lambda _stream: True) if terminal is True else terminal
+        code = buttonsio.main(list(argv), out, err, ctx=ctx, stdin=io.StringIO(), is_terminal=tty,
+                              source_factory=factory)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_refuses_to_run_without_a_terminal_and_opens_nothing(self):
+        ctx = self.device_ctx()
+        code, out, err = self.run_buttons(ctx, {}, terminal=lambda _stream: False)
+        self.assertEqual((code, out, self.sources), (2, "", []))
+        self.assertIn("is interactive: run it in a terminal", err)
+        out_stream, err_stream = io.StringIO(), io.StringIO()
+        self.assertEqual(cli.main(["buttons"], stdout=out_stream, stderr=err_stream), 2)
+        self.assertIn("is interactive", err_stream.getvalue())
+        self.assertEqual(self.commands.calls, [])
+
+    def test_report_can_be_redirected_only_when_the_prompts_still_reach_a_terminal(self):
+        ctx = self.device_ctx()
+        out, err, stdin = io.StringIO(), io.StringIO(), io.StringIO()
+        sources = []
+
+        def factory(_selection, _raw):
+            sources.append(ScriptedSource(STANDARD))
+            return sources[-1]
+
+        def run(*argv, terminals):
+            return buttonsio.main(list(argv), out, err, ctx=ctx, stdin=stdin, source_factory=factory,
+                                  is_terminal=lambda stream: any(stream is terminal for terminal in terminals))
+        self.assertEqual(run(terminals=(stdin, err)), 2)
+        self.assertEqual(run("--json", terminals=(out, err)), 2)
+        self.assertEqual((sources, out.getvalue()), ([], ""))
+        self.assertEqual(run("--json", terminals=(stdin, err)), 0)
+        self.assertIn("[1/27] Press: Xbox (center) button   [Enter = skip]", err.getvalue())
+        self.assertNotIn("[1/27]", out.getvalue())
+        self.assertEqual(json.loads(out.getvalue())["mode"], "buttons")
+
+    def test_usage_errors_and_help(self):
+        ctx = self.device_ctx()
+        for argv in (["--timeout", "1"], ["--timeout", "x"], ["--json", "--markdown"], ["--nope"], ["extra"]):
+            code, out, err = self.run_buttons(ctx, {}, *argv)
+            self.assertEqual((code, out, self.sources), (2, "", []), argv)
+            self.assertIn("usage: omarchy-game-mode doctor buttons", err)
+        code, out, _err = self.run_buttons(ctx, {}, "--help")
+        self.assertEqual(code, 0)
+        for phrase in ("--device", "--raw", "--timeout", "Read-only", "nothing is grabbed"):
+            self.assertIn(phrase, out)
+        out_stream = io.StringIO()
+        self.assertEqual(cli.main(["buttons", "--help"], stdout=out_stream), 0)
+        self.assertIn("usage: omarchy-game-mode doctor buttons", out_stream.getvalue())
+        self.assertIn("doctor buttons", cli.EPILOG)
+
+    def test_device_argument_must_be_an_evdev_character_device(self):
+        ctx = self.device_ctx()
+        write(SCRATCH / "dev/input/js0")
+        write(SCRATCH / "etc/passwd", "root:x:0:0\n")
+        (SCRATCH / "dev/input/by-id").mkdir()
+        (SCRATCH / "dev/input/by-id/usb-pad-event-joystick").symlink_to("../event6")
+        (SCRATCH / "dev/input/evil").symlink_to("../../etc/passwd")
+        (SCRATCH / "dev/input/event77").symlink_to(SCRATCH / "etc/passwd")
+        self.assertEqual(buttonsio.validate_device_path(ctx, "/dev/input/event6"), "event6")
+        self.assertEqual(buttonsio.validate_device_path(ctx, "/dev/input/by-id/usb-pad-event-joystick"), "event6")
+        for bad in ("/etc/passwd", "event6", "/dev/input/js0", "/dev/input/evil", "/dev/input/event77",
+                    "/dev/input/../../etc/passwd", "/dev/input/event99", "/dev/input/", "/dev/input/event6/../js0",
+                    "/dev/hidraw5", ""):
+            with self.assertRaises(ValueError, msg=bad):
+                buttonsio.validate_device_path(ctx, bad)
+        plain_files = make_context(root=SCRATCH)
+        with self.assertRaisesRegex(ValueError, "not a character device"):
+            buttonsio.validate_device_path(plain_files, "/dev/input/event6")
+        code, out, err = self.run_buttons(ctx, {}, "--device", "/dev/input/evil")
+        self.assertEqual((code, out, self.sources), (2, "", []))
+        self.assertIn("error: --device must resolve to /dev/input/eventN", err)
+
+    def test_explicit_device_is_the_only_one_read_and_a_hidden_one_is_refused_plainly(self):
+        ctx = self.device_ctx()
+        selection = buttonsio.select_devices(ctx, "/dev/input/event5")
+        self.assertEqual(([item.node for item in selection.watched], selection.primary), (["event5"], None))
+        code, out, _err = self.run_buttons(ctx, {"paddle_left": key(KEY_F14)}, "--device", "/dev/input/event5")
+        self.assertEqual(code, 0)
+        self.assertIn("not a gamepad, so its codes are recorded but not judged", out)
+        self.assertIn("Left back paddle             no standard code  KEY_F14 (184) on event5", out)
+        self.assertNotIn("SDL mapping", out)
+        hidden = self.device_ctx(inputplumber=True)
+        with self.assertRaisesRegex(ValueError, "cannot be read: an input daemon hides it"):
+            buttonsio.select_devices(hidden, "/dev/input/event6")
+        with self.assertRaisesRegex(ValueError, "not a known input device"):
+            write(SCRATCH / "dev/input/event88")
+            buttonsio.select_devices(hidden, "/dev/input/event88")
+
+    def test_physical_pad_and_its_key_interface_are_read_when_no_daemon_runs(self):
+        selection = buttonsio.select_devices(self.device_ctx())
+        self.assertEqual([item.node for item in selection.candidates], ["event6", "event5"])
+        self.assertEqual(([item.node for item in selection.watched], selection.primary.node),
+                         (["event6", "event5"], "event6"))
+        self.assertEqual(selection.notes, [])
+
+    def test_with_inputplumber_the_virtual_pad_is_judged_and_hidden_nodes_are_named(self):
+        selection = buttonsio.select_devices(self.device_ctx(inputplumber=True))
+        self.assertEqual(([item.node for item in selection.watched], selection.primary.node),
+                         (["event21", "event20"], "event21"))
+        self.assertEqual(selection.notes, [
+            '/dev/input/event6 "ASUSTeK Computer Inc. N-KEY Device" (physical controller) cannot be read: an input '
+            "daemon hides it (mode 000).",
+            '/dev/input/event5 "ASUSTeK Computer Inc. N-KEY Device" (physical key device) cannot be read: an input '
+            "daemon hides it (mode 000)."])
+        self.assertNotIn("event1", [item.node for item in selection.candidates])
+
+    def test_nothing_readable_ends_with_an_explanation(self):
+        ctx = self.device_ctx(hide_raw=True)
+        code, out, err = self.run_buttons(ctx, {})
+        self.assertEqual((code, self.sources), (1, []))
+        self.assertIn("cannot be read: an input daemon hides it", out)
+        self.assertIn("No readable controller was found", out)
+
+    def test_end_to_end_with_inputplumber_json_report(self):
+        ctx = self.device_ctx(inputplumber=True)
+        script = {**STANDARD, "guide": key(evdev.BTN_SELECT), "paddle_left": key(evdev.BTN_TRIGGER_HAPPY1),
+                  "paddle_right": key(0x2C1), "armoury": key(KEY_F16, device=1), "library": typed("skip")}
+        code, out, err = self.run_buttons(ctx, script, "--json")
+        self.assertEqual(code, 0)
+        self.assertTrue(self.sources[0].closed)
+        self.assertIn('-> BTN_SELECT (314) on /dev/input/event21 "Microsoft X-Box One Elite 2 pad"', err)
+        self.assertIn("read  /dev/input/event21  Microsoft X-Box One Elite 2 pad (virtual controller, USB 045e:0b00)",
+                      err)
+        self.assertIn("skip  /dev/input/event6  ASUSTeK Computer Inc. N-KEY Device (physical controller", err)
+        self.assertIn("(skipped)", err)
+        self.assertIn("(nothing arrived within 12 s)", err)
+        document = json.loads(out)
+        self.assertEqual((document["schema"], document["schema_version"], document["mode"], document["scope"]),
+                         ("omarchy-game-mode.doctor/v1", 1, "buttons", "buttons"))
+        self.assertEqual(sorted(document), [
+            "checks", "controls", "devices", "duration_ms", "environment", "finished_at", "mode", "privacy", "raw",
+            "run_id", "schema", "schema_version", "scope", "sdl_mapping", "started_at", "summary"])
+        self.assertEqual([(row["node"], row["access"], row["watched"]) for row in document["devices"]], [
+            ("event6", "hidden", False), ("event21", "readable", True), ("event5", "hidden", False),
+            ("event20", "readable", True)])
+        self.assertEqual(document["devices"][1], {
+            "node": "event21", "name": "Microsoft X-Box One Elite 2 pad", "kind": "virtual", "role": "gamepad",
+            "bus": "USB", "id": "045e:0b00", "access": "readable", "watched": True})
+        for row in document["devices"]:
+            self.assertEqual(sorted(row), ["access", "bus", "id", "kind", "name", "node", "role", "watched"])
+        controls = {row["control"]: row for row in document["controls"]}
+        self.assertEqual(len(controls), 27)
+        self.assertEqual(controls["guide"], {
+            "control": "guide", "label": "Xbox", "status": "observed", "result": "differs",
+            "expected": "BTN_MODE (316)",
+            "observed": [{"node": "event21", "event": "BTN_SELECT (314)", "type": "key", "event_code": 314,
+                          "direction": 0}]})
+        self.assertEqual((controls["r3"]["result"], controls["library"]["result"], controls["armoury"]["result"],
+                          controls["library_hold"]["result"]), ("pass", "not tested", "recorded", "no event"))
+        self.assertEqual(controls["armoury"]["observed"][0]["node"], "event20")
+        mapping = document["sdl_mapping"]
+        self.assertEqual(mapping["device"], "event21")
+        self.assertTrue(mapping["line"].startswith("030000005e040000000b000010010000,Microsoft X-Box One Elite 2 pad,"))
+        self.assertIn("rightstick:b10", mapping["line"])
+        self.assertIn("guide:b6,back:b6", mapping["line"])
+        self.assertEqual(mapping["missing"], [])
+        self.assertEqual(document["raw"], {"status": "not requested"})
+        verdicts_found = {check["id"]: check for check in document["checks"]}
+        self.assertEqual(verdicts_found["buttons.guide"]["status"], "warn")
+        self.assertEqual(verdicts_found["buttons.r3"]["status"], "pass")
+        self.assertIn("virtual keyboard", verdicts_found["buttons.extra_keys"]["detail"])
+        self.assertEqual(document["summary"]["exit_code"], 0)
+        self.assertEqual(document["privacy"], {"redacted": True, "root_used": False, "devices_grabbed": False,
+                                               "events_injected": False, "serials_read": False, "raw_hid_read": False})
+        self.assertEqual(document["environment"]["device"]["board"], "RC73YA")
+        self.assertEqual(document["environment"]["controllers"]["inputplumber_version"], "0.82.0")
+        for canary in (CANARY_SERIAL, CANARY_MAC, CANARY_USER, CANARY_HOME, '"uniq"', '"phys"', '"serial"'):
+            self.assertNotIn(canary, out)
+
+    def test_end_to_end_raw_pad_markdown_report_with_raw_hid(self):
+        ctx = self.device_ctx()
+        add_hidraw(SCRATCH, 5, 5, 0o660)
+        (SCRATCH / USB_PARENT / "3-6:1.5/0003:0B05:1B4C.0006/report_descriptor").write_bytes(ALLY_REPORT_DESCRIPTOR)
+        add_hidraw(SCRATCH, 2, 2, 0o660)
+        script = {key_: value for key_, value in STANDARD.items() if key_ != "r3"}
+        script.update(r3=raw_report(at=0.1) + raw_report((110,), at=0.6), paddle_left=key(KEY_F14, device=1),
+                      paddle_right=key(KEY_F15, device=1), view=key(evdev.BTN_SELECT) + raw_report(at=0.3))
+        code, out, err = self.run_buttons(ctx, script, "--markdown", "--raw", "--timeout", "5")
+        self.assertEqual(code, 0)
+        self.assertEqual((self.raw_node.path, len(self.raw_node.fields)), ("/dev/hidraw5", 10))
+        self.assertIn("-> raw HID report 0x0b: bit 110 changed (padding right after the 14 declared buttons", err)
+        self.assertIn("(nothing arrived within 5 s)", err)
+        self.assertTrue(out.startswith("### Omarchy Game Mode button test\n\n| Environment |  |"))
+        for line in ("| Device | ASUSTeK COMPUTER INC. ROG Xbox Ally RC73YA_RC73YA, board RC73YA, BIOS RC73YA.318 |",
+                     "| System | Omarchy 4.0.6, Linux 7.2.15-1-omarchy x86_64 |",
+                     "| Node | Name | Kind | ID | Access | Read |",
+                     "| event6 | ASUSTeK Computer Inc. N-KEY Device | physical gamepad | USB 0b05:1b4c | readable | "
+                     "yes |",
+                     "| Control | Expected | Observed | Result |",
+                     "| Xbox | BTN_MODE (316) | BTN_MODE (316) on event6 | pass |",
+                     "| R3 | BTN_THUMBR (318) | raw HID bit 110 of report 0x0b on hidraw | fail (no event) |",
+                     "| Left back paddle | no standard code | KEY_F14 (184) on event5 | pass (recorded) |",
+                     "| Library button | no standard code | - | fail (no event) |",
+                     "**SDL mapping from the presses that were seen**", "```",
+                     "Not seen and left out: rightstick (R3), paddle2 (Left back paddle), paddle1 (Right back paddle).",
+                     "Raw HID: report 0x0b declares 14 buttons; changed: bit 110 during R3"):
+            self.assertIn(line, out)
+        self.assertIn("- **R3 (right stick click)** (WARN): R3 unavailable to apps: pressing it changed bit 110", out)
+        self.assertIn("- **Paddles and vendor buttons** (WARN): These buttons arrive as keyboard keys", out)
+        self.assertIn("03000000050b00004c1b000010010000,ASUSTeK Computer Inc. N-KEY Device,guide:b12,back:b10,", out)
+        for canary in (CANARY_SERIAL, CANARY_MAC, CANARY_USER, CANARY_HOME):
+            self.assertNotIn(canary, out)
+
+    def test_text_report_and_silent_skip_of_unreadable_raw_hid(self):
+        ctx = self.device_ctx()
+        add_hidraw(SCRATCH, 5, 5, 0o000)
+        script = {name: events for name, events in STANDARD.items() if name != "r3"}
+        code, out, _err = self.run_buttons(ctx, {**script, "guide": key(evdev.BTN_SELECT)}, "--raw")
+        self.assertEqual(code, 0)
+        self.assertIsNone(self.raw_node)
+        self.assertNotIn("Raw HID", out)
+        self.assertNotIn("hidraw", out)
+        for line in ("[1/27] Press: Xbox (center) button   [Enter = skip]", "Omarchy Game Mode button test",
+                     "  Control", "  Xbox ", "BTN_SELECT (314) on event6", "Findings",
+                     "  [WARN] Xbox button: The Xbox button reports BTN_SELECT (314), the code of View/Back",
+                     "  [WARN] R3 (right stick click): R3 unavailable (needs the Ally HID kernel driver)",
+                     "SDL mapping built only from the presses seen on event6:",
+                     "  Not seen and left out: rightstick (R3), paddle2 (Left back paddle), paddle1 (Right back",
+                     "Read-only test: no device was grabbed and no input was sent."):
+            self.assertIn(line, out)
+        self.assertIn("[26/27] Hold: Left button under the screen again, held for two seconds (optional)", out)
+
+    def test_names_that_identify_the_user_are_scrubbed_from_the_report(self):
+        ctx = self.device_ctx()
+        add_input(SCRATCH, 30, f"{CANARY_USER}'s Controller", ELITE_PAD_KEYS, PAD_AXES, "045e", "0b13", bus="0005")
+        ctx = make_context(fs=FakeDevFS(SCRATCH), commands=self.commands, env=CLIENT_ENV)
+        code, out, _err = self.run_buttons(ctx, STANDARD, "--device", "/dev/input/event30", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["devices"][0]["name"], "<user>'s Controller")
+        self.assertNotIn(CANARY_USER, out)
+
+    def test_event_reader_parses_kernel_events_and_survives_a_node_that_is_not_evdev(self):
+        read_end, write_end = os.pipe()
+        self.addCleanup(os.close, read_end)
+        os.set_blocking(read_end, False)
+        reader = object.__new__(buttonsio.EvdevReader)
+        reader.fd = read_end
+        self.assertEqual(reader.read(), [])
+        events = [(evdev.EV_KEY, evdev.BTN_SELECT, 1), (0, 0, 0), (evdev.EV_ABS, evdev.ABS_Z, 900)]
+        os.write(write_end, b"".join(buttonsio.EVENT.pack(1, 2, *event) for event in events))
+        self.assertEqual(reader.read(), events)
+        self.assertEqual((reader.keys_down(), reader.axes([evdev.ABS_X])), (set(), {}))
+        os.close(write_end)
+        self.assertEqual(reader.read(), [])
+        self.assertEqual((buttonsio.EVENT.size, buttonsio.ABSINFO.size), (24, 24))
+        self.assertEqual((buttonsio._eviocgkey(96), buttonsio._eviocgabs(0)), (0x80604518, 0x80184540))
 
 
 if __name__ == "__main__":

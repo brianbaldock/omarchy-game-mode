@@ -5,8 +5,8 @@ instance and never imports GTK. Exit codes: 0 no failed check (warnings and
 inconclusive results included), 1 at least one failed check, 2 usage error.
 
 Other doctor commands plug in through `COMMANDS` (name -> `main(argv, stdout, stderr)`),
-reusing the model, runner, redactor and renderers; a failed-attempt `capture`
-command is the planned first one.
+reusing the model, runner, redactor and `render`; `buttons` is one, and a
+failed-attempt `capture` command is the planned next one.
 """
 
 from __future__ import annotations
@@ -36,6 +36,10 @@ scopes:
   streaming   network path, UDP/STUN/TURN, Wi-Fi, firewall, clients, video decode
   input       controllers and input daemons
   system      environment facts only
+
+other commands:
+  omarchy-game-mode doctor buttons    guided, read-only physical button test
+                                      (see doctor buttons --help)
 
 The doctor is read-only: no root, no installs, no configuration changes, no sign-in.
 It sends anonymous probes to Microsoft's relay and service names, two public STUN
@@ -137,13 +141,20 @@ def diagnose(ctx: Context) -> Report:
                   duration_ms=round((ctx.monotonic() - started) * 1000))
 
 
-def render(report: Report, redactor: Redactor, style: str) -> str:
-    """Redact the report, render it, then scrub the rendered output once more."""
+def render(report: Report, redactor: Redactor, style: str, *, text: Callable[[Report], str] | None = None,
+           markdown: Callable[[Report], str] | None = None) -> str:
+    """Redact the report, render it, then scrub the rendered output once more.
+
+    `text` and `markdown` let another doctor command supply its own layout while
+    keeping this exact redaction path.
+    """
     safe = report.transformed(redactor.text, redactor.data)
     if style == "json":
         # Scrubbing string by string keeps the document valid JSON.
         return json.dumps(redactor.data(json.loads(render_json(safe))), indent=2, ensure_ascii=False) + "\n"
-    return redactor.text(render_markdown(safe) if style == "markdown" else render_text(safe))
+    if style == "markdown":
+        return redactor.text((markdown or render_markdown)(safe))
+    return redactor.text((text or render_text)(safe))
 
 
 def _diagnose_command(argv: Sequence[str], stdout: IO[str], stderr: IO[str],
@@ -160,7 +171,12 @@ def _diagnose_command(argv: Sequence[str], stdout: IO[str], stderr: IO[str],
     return report.exit_code()
 
 
-COMMANDS: dict[str, Callable[[Sequence[str], IO[str], IO[str]], int]] = {}
+def _buttons_command(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
+    from . import buttonsio
+    return buttonsio.main(argv, stdout, stderr)
+
+
+COMMANDS: dict[str, Callable[[Sequence[str], IO[str], IO[str]], int]] = {"buttons": _buttons_command}
 
 
 def main(argv: Sequence[str] | None = None, *, stdout: IO[str] | None = None, stderr: IO[str] | None = None,

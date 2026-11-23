@@ -34,7 +34,7 @@ USAGE = """Usage: omarchy-game-mode [COMMAND]
   autostart on|off|status Login autostart (owned XDG entry)
   mapper on|off|status    Let Game Mode switch AntiMicroX sets (off by default)
   status                  Print JSON status
-  doctor [SCOPE]          Read-only streaming and controller checks (see doctor --help)
+  doctor [SCOPE|buttons]  Read-only streaming and controller checks (see doctor --help)
   quit                    Restore controller sets and exit
   --version, help"""
 
