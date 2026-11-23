@@ -13,7 +13,9 @@ Never printed, whatever the options:
   vouched for them itself with `trust` (model names, versions, its own run id);
 - three or more groups of two to four hex digits joined by `-`, `_`, `:` or `.`, even
   glued to a word (`Controller-02-AA-BB-CC-DD-EE`, `AB12_CD34_EF56`), apart from IP
-  addresses, times, dates and short version numbers;
+  addresses, times, dates and short version numbers, and apart from groups inside a value
+  the doctor vouched for with `trust` (a kernel release such as `6.12.12-200.fc41.x86_64`)
+  where that value stands whole, unless they are shaped like a MAC address;
 - the home directory, other users' homes and the per-user runtime and media
   directories, each together with everything below them;
 - user and host names, e-mail addresses, and the user info, query and fragment of URLs;
@@ -118,6 +120,7 @@ _ADDRESS = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f.]{0,16}(?::[0-9A-Fa-f.]{0,16}
 # start, so it misses one glued to a word by a joiner; this one only refuses to start inside a word.
 _JOINED_HEX = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f]{2,4}(?:[-_:.][0-9A-Fa-f]{2,4}){2,15}(?![0-9A-Za-z])")
 _JOINER = re.compile(r"[-_:.]")
+_VOUCHED_LIMIT = 64  # values kept for the rule above; a report vouches for a handful
 _ADDRESS_CHARS = frozenset("0123456789abcdefABCDEF:.")
 _SERIAL = re.compile(r"(?<![A-Za-z0-9])(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{8,}(?![A-Za-z0-9])")
 # Kernel device nodes are numbered, not named after anything: `event100` is not a serial number.
@@ -155,7 +158,20 @@ def _inside_address(match: re.Match[str]) -> bool:
     return False
 
 
-def _joined_hex(match: re.Match[str]) -> str:
+def _standing_whole(text: str, literals: list[str]) -> list[tuple[int, int]]:
+    """Where each literal stands in `text` as a whole, not run together with a letter or digit."""
+    found = []
+    for literal in literals:
+        start = text.find(literal)
+        while start >= 0:
+            end = start + len(literal)
+            if not (start and text[start - 1].isalnum()) and not (end < len(text) and text[end].isalnum()):
+                found.append((start, end))
+            start = text.find(literal, start + 1)
+    return found
+
+
+def _joined_hex(match: re.Match[str], vouched: list[tuple[int, int]] | None = None) -> str:
     token = match.group(0)
     groups = _JOINER.split(token)
     if len(groups) in (6, 8) and all(len(group) == 2 for group in groups):
@@ -163,6 +179,11 @@ def _joined_hex(match: re.Match[str]) -> str:
     # Times (`00:46:05`), dates and short version numbers: three groups of decimal digits.
     if len(groups) == 3 and "".join(groups).isdigit():
         return token
+    for start, end in vouched or ():
+        if start <= match.start() < end:
+            # Kept up to the end of the vouched value; whatever runs on past it is judged on its own.
+            cut = end - match.start()
+            return token[:cut] + _JOINED_HEX.sub(_joined_hex, token[cut:])
     return token if _inside_address(match) else MASKED_ID
 
 
@@ -185,6 +206,7 @@ class Redactor:
         self._host = _word(host) if _identifying(host) else None
         self._secrets: dict[str, tuple[re.Pattern[str], str]] = {}
         self._trusted: set[str] = set()
+        self._vouched: set[str] = set()
         self._public: dict[str, str] = {}
         self._aliases: dict[str, str] = {}
         self._lock = threading.Lock()
@@ -212,16 +234,23 @@ class Redactor:
         return shown
 
     def trust(self, value: str) -> None:
-        """Vouch for the long tokens of a value the doctor produced or validated itself.
+        """Vouch for a value the doctor produced or validated itself.
 
         A board name, a version or the run id looks like a serial number to the rule above
-        and would be masked. Only ever call this with such values, never with free-form
-        input: a device name, tool output or anything the user typed.
+        and would be masked, and a kernel release such as `6.12.12-200.fc41.x86_64` holds
+        joined hex groups. Its long tokens are kept wherever they appear; its joined hex
+        groups only where the whole value stands, so the same groups next to it, or a MAC
+        address, are still masked. Only ever call this with such values, never with
+        free-form input: a device name, tool output or anything the user typed.
         """
-        tokens = _SERIAL.findall(str(value))
-        if tokens:
+        whole = str(value).strip()
+        tokens = _SERIAL.findall(whole)
+        vouched = bool(_JOINED_HEX.search(whole)) and len(whole) <= 200
+        if tokens or vouched:
             with self._lock:
                 self._trusted.update(tokens)
+                if vouched and len(self._vouched) < _VOUCHED_LIMIT:
+                    self._vouched.add(whole)
 
     def text(self, value: str) -> str:
         try:
@@ -248,6 +277,7 @@ class Redactor:
         with self._lock:
             secrets = sorted(self._secrets.items(), key=lambda item: -len(item[0]))
             trusted = frozenset(self._trusted)
+            vouched = sorted(self._vouched, key=len, reverse=True)
         for _literal, (pattern, label) in secrets:
             value = pattern.sub(label, value)
         value = _HEADER.sub(rf"\1\2{REDACTED}", value)
@@ -267,7 +297,8 @@ class Redactor:
         value = _UUID.sub(MASKED_UUID, value)
         value = _MAC.sub(MASKED_MAC, value)
         value = _ADDRESS.sub(self._address, value)
-        value = _JOINED_HEX.sub(_joined_hex, value)
+        spans = _standing_whole(value, vouched)
+        value = _JOINED_HEX.sub(lambda match: _joined_hex(match, spans), value)
         if self._user:
             value = self._user.sub("<user>", value)
         if self._host:

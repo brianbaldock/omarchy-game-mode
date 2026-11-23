@@ -303,6 +303,19 @@ class ValueScrubTest(unittest.TestCase):
             self.assertEqual(shown.text(address), address)
         self.assertEqual(shown.text(f"Controller-{CANARY_GLUED_MAC}"), "Controller-<mac>")
 
+    def test_a_vouched_kernel_release_keeps_its_hex_groups_and_ids_beside_it_do_not(self):
+        kernel = "6.12.12-200.fc41.x86_64"
+        self.assertEqual(self.r.text(f"Linux {kernel} x86_64"), "Linux 6.<id>.x86_64 x86_64")  # not vouched for
+        self.r.trust(kernel)
+        line = (f"Linux {kernel} x86_64, pad {CANARY_TAG}, Controller-{CANARY_GLUED_MAC}, {kernel}-{CANARY_TAG}, "
+                f"{kernel}_{CANARY_TAG_UNDERSCORE} {kernel}-{CANARY_GLUED_MAC.lower()} x{kernel} 6.12.12-200.fc41")
+        scrubbed = self.r.text(line)
+        self.assertEqual(scrubbed, f"Linux {kernel} x86_64, pad <id>, Controller-<mac>, {kernel}-<id>, {kernel}_<id> "
+                                   f"{kernel}-<mac> x6.<id>.x86_64 6.<id>")
+        self.assertEqual(self.r.text(scrubbed), scrubbed)
+        self.r.trust(f"firmware {CANARY_GLUED_MAC}")  # a MAC stays masked even inside a vouched value
+        self.assertEqual(self.r.text(f"firmware {CANARY_GLUED_MAC}"), "firmware <mac>")
+
     def test_ipv6_zone_ids_leave_with_their_address(self):
         self.assertEqual(self.r.text(f"fe80::c0de:1%{CANARY_ZONE} and [fe80::1%25{CANARY_ZONE}]:3478"),
                          "<lan-ipv6> and [<lan-ipv6>]:3478")
@@ -2956,6 +2969,16 @@ class PrivacyTest(CliCase):
         # The planted values really were there to find.
         self.assertIn(CANARY_ZONE, ROGUE_PAD_NAME + private + ROGUE_IW_LINK)
         self.assertIn(CANARY_SUFFIX, private + ROGUE_JOURNAL)
+
+    def test_a_fedora_kernel_release_is_printed_whole_in_every_style(self):
+        kernel = "6.12.12-200.fc41.x86_64"
+        for style in ((), ("--json",), ("--markdown",)):
+            code, out, _err = self.run_cli(*style, world={"rogue": True,
+                                                          "files": {"/proc/sys/kernel/osrelease": kernel + "\n"}})
+            self.assertEqual(code, 0, style)
+            self.assertIn(f"Linux {kernel} x86_64", out, style)
+            for canary in VALUE_CANARIES:
+                self.assertNotIn(canary, out, style)
 
     def test_serial_and_address_attributes_are_never_opened(self):
         options = Options(console_ip=CONSOLE_IP)
