@@ -556,8 +556,9 @@ def describe_os_error(exc: BaseException) -> str:
         return "reset"
     if isinstance(exc, ssl.SSLError):
         reason = getattr(exc, "reason", None)
-        return reason.lower().replace("_", " ") if isinstance(reason, str) and re.fullmatch(r"[A-Z0-9_]{3,60}", reason) \
-            else type(exc).__name__
+        if isinstance(reason, str) and re.fullmatch(r"[A-Z0-9_]{3,60}", reason):
+            return reason.lower().replace("_", " ")
+        return type(exc).__name__
     number = getattr(exc, "errno", None)
     return os.strerror(number).lower() if isinstance(number, int) and number > 0 else type(exc).__name__
 

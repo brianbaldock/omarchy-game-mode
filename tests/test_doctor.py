@@ -2322,8 +2322,8 @@ class RecordingFS(FileSystem):
 
 
 ROGUE_IW_LINK = IW_LINK + f"\tbeacon source: {CANARY_DOTTED_MAC} fe80::c0de:2%{CANARY_ZONE} {CANARY_PAD_SERIAL}\n"
-ROGUE_JOURNAL = JOURNAL_EVENTS + (f"\n1800000301.5 {CANARY_HOST} wpa_supplicant[812]: wlp3s0: roam to {CANARY_CISCO_MAC} "
-                                  f"{CANARY_PAD_SERIAL} {CANARY_HOME}/{CANARY_SUFFIX}")
+ROGUE_JOURNAL = JOURNAL_EVENTS + (f"\n1800000301.5 {CANARY_HOST} wpa_supplicant[812]: wlp3s0: roam to "
+                                  f"{CANARY_CISCO_MAC} {CANARY_PAD_SERIAL} {CANARY_HOME}/{CANARY_SUFFIX}")
 
 
 class World(InputCase):
@@ -2350,7 +2350,8 @@ class World(InputCase):
             add_hidraw(SCRATCH, number, number, 0o000 if number in (2, 5) else 0o200)
         commands = {
             **self.commands.table, **CLIENT_COMMANDS, **UFW_ACTIVE,
-            **(iw_commands(link=ROGUE_IW_LINK, journal=ROGUE_JOURNAL) if rogue else iw_commands(journal=JOURNAL_EVENTS)),
+            **(iw_commands(link=ROGUE_IW_LINK, journal=ROGUE_JOURNAL) if rogue
+               else iw_commands(journal=JOURNAL_EVENTS)),
             ("resolvectl", "status"): RESOLVECTL_STATUS, ("ip", "-4", "rule", "show"): IP_RULES_WITH_ADDRESS,
             RESOLVED_ACTIVE: "active\n", **TIMESYNCD, TIMEDATECTL: "NTP=yes\nNTPSynchronized=yes\n",
             PING_GATEWAY: PING_CLEAN,
@@ -2441,7 +2442,8 @@ class PlanTest(World):
         ctx.tcp_connect = lambda address, _timeout: connected.append(address) or FakeTcp()
         ctx.getaddrinfo = lambda host, *rest: looked_up.append(host) or resolve(host, *rest)
         runner.run_checks(checks.plan(options), ctx, workers=1)
-        names = {*(host.name for host in net.REQUIRED_HOSTS), *(server.host for server in udp.STUN_SERVERS), net.NTP_HOST}
+        names = {*(host.name for host in net.REQUIRED_HOSTS), *(server.host for server in udp.STUN_SERVERS),
+                 net.NTP_HOST}
         self.assertEqual(set(looked_up), names)
         self.assertEqual({destination for _data, destination in self.udp.sent()},
                          {(RELAY_IP, 3478), (CLOUDFLARE_IP, 3478), (GOOGLE_IP, 19302), (NTP_IP, 123),
@@ -2554,7 +2556,8 @@ class CliTest(CliCase):
                 self.assertNotIn(canary, err.getvalue(), argv)
         messages = [self.run_cli(*argv)[2].splitlines()[-1] for argv in
                     (["--console-ip", CANARY_PUBLIC_IP], [CANARY_PUBLIC_IP], ["all", "--deep", CANARY_PUBLIC_IP])]
-        self.assertEqual(messages, ["omarchy-game-mode doctor: error: argument --console-ip: not a private IPv4 address",
+        self.assertEqual(messages, ["omarchy-game-mode doctor: error: argument --console-ip: not a private IPv4 "
+                                    "address",
                                     "omarchy-game-mode doctor: error: argument SCOPE: not one of streaming, input, "
                                     "system, all",
                                     "omarchy-game-mode doctor: error: unrecognized arguments: --deep"])
