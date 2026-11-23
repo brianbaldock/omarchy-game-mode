@@ -26,7 +26,6 @@ ATTR_REALM = 0x0014
 ATTR_NONCE = 0x0015
 ATTR_REQUESTED_TRANSPORT = 0x0019
 ATTR_XOR_MAPPED_ADDRESS = 0x0020
-ATTR_ALTERNATE_SERVER = 0x8023
 TRANSPORT_UDP = 17
 FAMILY_IPV4, FAMILY_IPV6 = 0x01, 0x02
 
@@ -146,12 +145,6 @@ def mapped_address(message: Message) -> tuple[str, int] | None:
 def encode_plain_address(address: str, port: int) -> bytes:
     parsed = ipaddress.ip_address(address)
     return struct.pack("!BBH", 0, FAMILY_IPV4 if parsed.version == 4 else FAMILY_IPV6, port) + parsed.packed
-
-
-def alternate_server(message: Message) -> tuple[str, int] | None:
-    """Where a `300 Try Alternate` answer says to ask instead."""
-    value = message.first(ATTR_ALTERNATE_SERVER)
-    return decode_plain_address(value) if value is not None else None
 
 
 def encode_error_code(code: int, reason: str = "") -> bytes:

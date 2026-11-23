@@ -3,13 +3,13 @@
 Xbox Remote Play and cloud gaming carry media over UDP negotiated with ICE. These
 checks send the same first packets a WebRTC client would, to Microsoft's relay and
 two public STUN servers, and stop there: no credentials, no allocation, no media.
-Microsoft's relay answers the TURN request with a redirect to a regional relay; that
-one redirect is followed, and only to a public unicast IPv4 address on UDP 3478.
+Microsoft's relay usually answers the one TURN request with a redirect to a regional
+relay. That answer is reported, and the redirect is never followed: an answer can be
+forged, and the doctor only ever sends TURN to the documented relay name.
 """
 
 from __future__ import annotations
 
-import ipaddress
 import socket
 from dataclasses import dataclass
 from typing import Any, Sequence
@@ -17,7 +17,7 @@ from typing import Any, Sequence
 from . import stun
 from .context import Context
 from .model import Outcome, fail, ok, skip, warn
-from .net import local_ipv4, public_unicast, resolve_cached
+from .net import local_ipv4, resolve_cached
 from .runner import check_cancelled, time_left
 
 
@@ -34,8 +34,6 @@ STUN_SERVERS = (
     StunServer("Cloudflare", "stun.cloudflare.com", 3478),
     StunServer("Google", "stun.l.google.com", 19302),
 )
-# The one port a Microsoft relay redirect may point to: TURN over UDP.
-TURN_PORTS = frozenset({3478})
 UDP_BLOCKED_FIX = ("Look for a VPN, a captive portal, or a router or firewall rule that blocks outbound UDP "
                    "(ports 3478 and 19302 here).")
 
@@ -160,57 +158,36 @@ def _allocate(ctx: Context, address: str, port: int) -> StunReply | None:
     return reply if reply is not None and reply.message.method == stun.ALLOCATE else None
 
 
-def _regional_relay(message: stun.Message) -> tuple[str, int] | None:
-    """The alternate server of a 300 answer, accepted only as a public unicast IPv4 address on the TURN port.
-
-    The redirect comes from the network, so it is not trusted to point anywhere else: never into
-    private, carrier-grade NAT, loopback, link-local, multicast or reserved space.
-    """
-    try:
-        alternate = stun.alternate_server(message)
-    except stun.StunError:
-        return None
-    if alternate is None:
-        return None
-    address, port = alternate
-    public_ipv4 = ipaddress.ip_address(address).version == 4 and public_unicast(address)
-    return alternate if public_ipv4 and port in TURN_PORTS else None
-
-
 def check_turn_challenge(ctx: Context) -> Outcome:
-    server = MICROSOFT_RELAY
-    addresses = _addresses(ctx, server)
+    """One unauthenticated TURN Allocate to the first public address of Microsoft's relay.
+
+    The answer is the evidence: the 401 challenge, or the 300 redirect to a regional relay that
+    Microsoft's front door usually sends. The redirect is reported, never followed.
+    """
+    addresses = _addresses(ctx, MICROSOFT_RELAY)
     if not addresses:
         return skip("The relay name did not resolve, so TURN could not be tested (see the DNS checks).",
                     answered=False)
-    for address in addresses:
-        reply = _allocate(ctx, address, server.port)
-        if reply is None:
-            continue
-        error = stun.error_code(reply.message)
-        redirected = False
-        # Microsoft's anycast front door answers 300 and names a regional relay; ask that one once.
-        if error and error[0] == 300 and (regional := _regional_relay(reply.message)):
-            redirected = True
-            second = _allocate(ctx, *regional)
-            if second is None:
-                return warn("Microsoft's relay answered and pointed to a regional relay, but that one did not "
-                            "answer on UDP 3478.", UDP_BLOCKED_FIX, answered=True, redirected=True,
-                            rtt_ms=reply.rtt_ms, error_code=300, challenge=bool(stun.realm(reply.message)))
-            reply, error = second, stun.error_code(second.message)
-        # Whether the answer carries a realm is a fact about the relay; the realm text itself is never reported.
-        evidence = dict(answered=True, redirected=redirected, rtt_ms=reply.rtt_ms,
-                        error_code=error[0] if error else None, challenge=bool(stun.realm(reply.message)))
-        via = "regional relay (after the expected redirect)" if redirected else "relay"
-        if error and error[0] == 401:
-            return ok(f"Microsoft's {via} answered the unauthenticated TURN request with the expected 401 "
-                      f"challenge ({reply.rtt_ms} ms).", **evidence)
-        answer = f"error {error[0]}" if error else "an unexpected reply"
-        return warn(f"Microsoft's {via} is reachable but answered the TURN request with {answer} instead of "
-                    "the usual 401 challenge.", "Run the doctor again later; the relay may be busy.", **evidence)
-    return fail("Microsoft's relay did not answer a TURN request on UDP 3478 from this network. Relayed streams "
-                "use that path, so they are likely to fail; silence alone does not prove that streaming is "
-                "impossible.", UDP_BLOCKED_FIX, answered=False)
+    reply = _allocate(ctx, addresses[0], MICROSOFT_RELAY.port)
+    if reply is None:
+        return fail("Microsoft's relay did not answer a TURN request on UDP 3478 from this network. Relayed "
+                    "streams use that path, so they are likely to fail; silence alone does not prove that "
+                    "streaming is impossible.", UDP_BLOCKED_FIX, answered=False)
+    error = stun.error_code(reply.message)
+    code = error[0] if error else None
+    # Whether the answer carries a realm is a fact about the relay; the realm text itself is never reported.
+    evidence = dict(answered=True, redirected=code == 300, rtt_ms=reply.rtt_ms, error_code=code,
+                    challenge=bool(stun.realm(reply.message)))
+    if code == 401:
+        return ok("Microsoft's relay answered the unauthenticated TURN request with the expected 401 challenge "
+                  f"({reply.rtt_ms} ms).", **evidence)
+    if code == 300:
+        return ok(f"Microsoft's relay answered the unauthenticated TURN request ({reply.rtt_ms} ms) with the "
+                  "usual redirect to a regional relay, so it is reachable over UDP 3478. The regional relay was "
+                  "not contacted.", **evidence)
+    answer = f"error {code}" if error else "an unexpected reply"
+    return warn(f"Microsoft's relay is reachable but answered the TURN request with {answer} instead of the usual "
+                "401 challenge or redirect.", "Run the doctor again later; the relay may be busy.", **evidence)
 
 
 def classify_mapping(rounds: Sequence[Sequence[tuple[str, int] | None]]) -> str:

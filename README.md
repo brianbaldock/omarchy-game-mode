@@ -207,9 +207,9 @@ What it sends, only while you run it: DNS lookups for the names below, and TLS h
 `xsts.auth.xboxlive.com`, `www.xbox.com`, `xhome.gssv-play-prod.xboxlive.com` and
 `gssv-play-prod.xboxlive.com`; anonymous STUN to `relay.communication.microsoft.com`,
 `stun.cloudflare.com` and `stun.l.google.com`; one unauthenticated TURN request to
-Microsoft's relay, plus one to the regional Microsoft relay it redirects to (followed once,
-and only to a public address on UDP 3478); one time query to `time.cloudflare.com`; and a
-few pings to your router and to `stun.cloudflare.com`. Names are only probed at public
+Microsoft's relay (its answer, usually a redirect to a regional relay, is reported; the
+regional relay is never contacted); one time query to `time.cloudflare.com`; and a few
+pings to your router and to `stun.cloudflare.com`. Names are only probed at public
 unicast addresses, whatever the resolver answers. With `--console-ip`, the console
 probes described above go to that one address.
 

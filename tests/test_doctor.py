@@ -636,6 +636,7 @@ class ContextTest(ScratchCase):
 
 # ---- fakes for the network layer ------------------------------------------------
 
+ATTR_ALTERNATE_SERVER = 0x8023  # where a 300 Try Alternate answer points
 RELAY_IP, CLOUDFLARE_IP, GOOGLE_IP, REGIONAL_IP, NTP_IP = "20.202.24.10", "162.159.207.1", "74.125.250.129", \
     "20.202.99.7", "162.159.200.1"
 SERVICE_IP = "40.90.8.20"
@@ -763,12 +764,10 @@ class StunCodecTest(unittest.TestCase):
                                               [(stun.ATTR_XOR_MAPPED_ADDRESS, encoded)]))
             self.assertEqual(stun.mapped_address(message), (ipaddress.ip_address(address).compressed, port))
 
-    def test_plain_mapped_address_and_alternate_server(self):
+    def test_plain_mapped_address(self):
         message = stun.decode(stun.encode(stun.BINDING, stun.SUCCESS, self.TID, [
-            (stun.ATTR_MAPPED_ADDRESS, stun.encode_plain_address("198.51.100.7", 4000)),
-            (stun.ATTR_ALTERNATE_SERVER, stun.encode_plain_address(REGIONAL_IP, 3478))]))
+            (stun.ATTR_MAPPED_ADDRESS, stun.encode_plain_address("198.51.100.7", 4000))]))
         self.assertEqual(stun.mapped_address(message), ("198.51.100.7", 4000))
-        self.assertEqual(stun.alternate_server(message), (REGIONAL_IP, 3478))
         self.assertIsNone(stun.mapped_address(stun.decode(stun.binding_request(self.TID))))
 
     def test_turn_401_challenge_parses(self):
@@ -859,39 +858,24 @@ class UdpChecksTest(unittest.TestCase):
             self.assertEqual((request.method, request.cls), (stun.ALLOCATE, stun.REQUEST))
             self.assertEqual([kind for kind, _value in request.attributes], [stun.ATTR_REQUESTED_TRANSPORT])
 
-    def test_turn_follows_one_redirect_to_a_public_regional_relay(self):
-        alternate = [(stun.ATTR_ALTERNATE_SERVER, stun.encode_plain_address(REGIONAL_IP, 3478))]
-        answers = {RELAY_IP: (300, "Try Alternate", alternate), REGIONAL_IP: (401, "Unauthorized")}
-        outcome = udp.check_turn_challenge(self.ctx(self.turn(answers)))
-        self.assertEqual((outcome.status, outcome.evidence["redirected"], outcome.evidence["error_code"]),
-                         (Status.PASS, True, 401))
-        self.assertEqual([destination for _data, destination in self.world.sent()],
-                         [(RELAY_IP, 3478), (REGIONAL_IP, 3478)])
-        silent = udp.check_turn_challenge(self.ctx(self.turn({RELAY_IP: (300, "Try Alternate", alternate)})))
-        self.assertEqual(silent.status, Status.WARN)
-
-    def test_turn_follows_a_redirect_only_to_a_public_unicast_ipv4_address_on_the_turn_port(self):
-        refused = [("192.168.77.1", 3478), ("100.64.1.1", 3478), ("127.0.0.1", 3478), ("169.254.9.9", 3478),
-                   ("224.0.0.1", 3478), ("239.255.255.250", 3478), ("240.0.0.1", 3478), ("0.0.0.0", 3478),
-                   ("255.255.255.255", 3478), (REGIONAL_IP, 443), (REGIONAL_IP, 19302), ("2603:1061:14::1", 3478)]
-        for address, port in refused:
-            alternate = [(stun.ATTR_ALTERNATE_SERVER, stun.encode_plain_address(address, port))]
-            answers = {RELAY_IP: (300, "Try Alternate", alternate), address: (401, "Unauthorized")}
+    def test_a_redirect_proves_the_relay_answered_and_is_never_followed(self):
+        for alternate in (REGIONAL_IP, "192.168.77.1", "224.0.0.1"):
+            redirect = [(ATTR_ALTERNATE_SERVER, stun.encode_plain_address(alternate, 3478))]
+            answers = {RELAY_IP: (300, "Try Alternate", redirect), alternate: (401, "Unauthorized")}
             outcome = udp.check_turn_challenge(self.ctx(self.turn(answers)))
-            self.assertEqual((outcome.status, outcome.evidence["error_code"]), (Status.WARN, 300), address)
-            self.assertEqual([destination for _data, destination in self.world.sent()], [(RELAY_IP, 3478)], address)
+            self.assertEqual((outcome.status, outcome.evidence["redirected"], outcome.evidence["error_code"]),
+                             (Status.PASS, True, 300), alternate)
+            self.assertIn("The regional relay was not contacted.", outcome.detail)
+            self.assertEqual([destination for _data, destination in self.world.sent()], [(RELAY_IP, 3478)])
 
-    def test_turn_follows_at_most_one_redirect(self):
-        onward = "20.202.99.8"
-        answers = {RELAY_IP: (300, "Try Alternate",
-                              [(stun.ATTR_ALTERNATE_SERVER, stun.encode_plain_address(REGIONAL_IP, 3478))]),
-                   REGIONAL_IP: (300, "Try Alternate",
-                                 [(stun.ATTR_ALTERNATE_SERVER, stun.encode_plain_address(onward, 3478))]),
-                   onward: (401, "Unauthorized")}
-        outcome = udp.check_turn_challenge(self.ctx(self.turn(answers)))
-        self.assertEqual((outcome.status, outcome.evidence["error_code"]), (Status.WARN, 300))
-        self.assertEqual([destination for _data, destination in self.world.sent()],
-                         [(RELAY_IP, 3478), (REGIONAL_IP, 3478)])
+    def test_exactly_one_turn_request_goes_to_the_relay(self):
+        second = "20.202.24.11"
+        dns = fake_dns({**DNS_TABLE, udp.MICROSOFT_RELAY.host: [RELAY_IP, second]})
+        outcome = udp.check_turn_challenge(self.ctx(self.turn({second: (401, "Unauthorized")}), dns=dns))
+        self.assertEqual(outcome.status, Status.FAIL)
+        sent = self.world.sent()
+        self.assertEqual({destination for _data, destination in sent}, {(RELAY_IP, 3478)})
+        self.assertEqual(len({stun.decode(data).transaction_id for data, _destination in sent}), 1)
 
     def test_dns_answers_outside_the_public_internet_are_never_probed(self):
         local = ["224.0.0.251", "239.1.2.3", "100.64.0.9", "240.0.0.1", "0.0.0.0", "127.0.0.1", "169.254.1.1",
