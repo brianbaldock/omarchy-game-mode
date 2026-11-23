@@ -340,12 +340,19 @@ def _guide_verdict(results: Mapping[str, ControlResult]) -> Verdict | None:
     if BTN_SELECT in codes:
         view = results.get("view")
         same = view is not None and any(obs.kind == KEY and obs.code == BTN_SELECT for obs in view.observations)
-        clash = (" View reports the same code, so a remap of that code would change both buttons: they cannot be "
-                 "told apart at this layer." if same else "")
+        if same:
+            # A remap of the shared code would turn View into Guide as well: suggest nothing of the kind.
+            return Verdict("guide", title, Status.WARN,
+                           f"The Xbox button reports {seen}, the code of View/Back, instead of BTN_MODE (316), and "
+                           "View reports the same code, so the two buttons cannot be told apart at this layer. "
+                           "Steam will treat both as View/Back and will not open its menu.",
+                           "Remapping that code cannot help: it would change View as well. Only something that "
+                           "reads the controller's raw HID report, such as a handheld daemon with a profile for "
+                           "this device or a kernel driver for it, can tell the two buttons apart.")
         return Verdict("guide", title, Status.WARN,
                        f"The Xbox button reports {seen}, the code of View/Back, instead of BTN_MODE (316). Steam "
-                       f"will treat it as View/Back and will not open its menu; a handheld daemon profile can "
-                       f"remap it.{clash}",
+                       "will treat it as View/Back and will not open its menu; a handheld daemon profile can "
+                       "remap it.",
                        "Suggested profile entry for a handheld daemon such as InputPlumber (a description only; "
                        "nothing is written): map the source gamepad button `Select` to the target gamepad button "
                        "`Guide`.")

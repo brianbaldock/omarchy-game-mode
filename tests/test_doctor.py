@@ -3129,14 +3129,22 @@ class ButtonVerdictTest(unittest.TestCase):
         return {verdict.key: verdict for verdict in buttons.verdicts(ordered, list(devices), primary)}, ordered
 
     def test_xbox_button_reported_as_select_is_explained_with_a_text_only_suggestion(self):
-        found, _results = self.verdicts({**STANDARD, "guide": key(evdev.BTN_SELECT)})
+        found, _results = self.verdicts({**STANDARD, "guide": key(evdev.BTN_SELECT), "view": typed("skip")})
         guide = found["guide"]
         self.assertEqual(guide.status, Status.WARN)
         self.assertIn("The Xbox button reports BTN_SELECT (314), the code of View/Back, instead of BTN_MODE (316). "
                       "Steam will treat it as View/Back and will not open its menu; a handheld daemon profile can "
                       "remap it.", guide.detail)
-        self.assertIn("View reports the same code", guide.detail)
-        self.assertIn("nothing is written", guide.advice)
+        self.assertIn("nothing is written): map the source gamepad button `Select` to the target gamepad button "
+                      "`Guide`.", guide.advice)
+
+    def test_no_remap_is_suggested_when_the_xbox_button_and_view_share_a_code(self):
+        found, _results = self.verdicts({**STANDARD, "guide": key(evdev.BTN_SELECT)})
+        guide = found["guide"]
+        self.assertEqual(guide.status, Status.WARN)
+        self.assertIn("and View reports the same code, so the two buttons cannot be told apart", guide.detail)
+        self.assertIn("Remapping that code cannot help: it would change View as well.", guide.advice)
+        self.assertNotIn("`Guide`", guide.detail + guide.advice)
         self.assertIn("Xbox and View both report BTN_SELECT (314)", found["duplicates"].detail)
 
     def test_xbox_button_verdict_follows_only_what_was_observed(self):
