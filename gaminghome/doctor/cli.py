@@ -15,10 +15,11 @@ import argparse
 import datetime
 import json
 import os
+import re
 import socket
 import sys
 import uuid
-from typing import IO, Any, Callable, Sequence
+from typing import IO, Any, Callable, NoReturn, Sequence
 
 from . import console
 from .checks import SCOPES, plan
@@ -30,6 +31,10 @@ from .report import environment, render_json, render_markdown, render_text
 from .runner import run_checks
 
 OVERALL_DEADLINE_S = 45.0
+# What an error message may still name: a long option or a single-letter short one.
+_OPTION_NAME = re.compile(r"--[a-z][a-z-]{0,30}|-[A-Za-z]")
+# argparse messages that end with the rejected value.
+_VALUE_AT_END = re.compile(r"(invalid choice|ignored explicit argument|invalid [\w ]{1,30} value)\b.*", re.S)
 EPILOG = """\
 scopes:
   all         everything below (default)
@@ -48,8 +53,13 @@ servers, one NTP server and your own gateway. Exit status: 0 no failed check,
 """
 
 
-class _Parser(argparse.ArgumentParser):
-    """argparse that writes to the streams the caller chose instead of the process streams."""
+class Parser(argparse.ArgumentParser):
+    """argparse that writes to the streams the caller chose and never repeats a rejected value.
+
+    argparse quotes what it rejects (`invalid choice: '...'`, `unrecognized arguments: ...`).
+    A mistyped address or path would then end up in a terminal log or an issue report, so
+    error messages keep option names and the parser's own words only.
+    """
 
     def __init__(self, *args: Any, stdout: IO[str], stderr: IO[str], **kwargs: Any):
         super().__init__(*args, **kwargs)
@@ -59,12 +69,35 @@ class _Parser(argparse.ArgumentParser):
         if message:
             (self._stdout if file is sys.stdout else self._stderr).write(message)
 
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(self._stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {system_redactor().text(without_values(message))}\n")
+
+
+def without_values(message: str) -> str:
+    """An argparse error message with everything the user typed taken out, option names apart."""
+    head, found, rest = message.partition("unrecognized arguments: ")
+    if found:
+        names = [token.split("=", 1)[0] for token in rest.split()]
+        named = list(dict.fromkeys(name for name in names if _OPTION_NAME.fullmatch(name)))
+        return head + "unrecognized arguments" + (f": {' '.join(named)}" if named else "")
+    head, found, matches = message.rpartition(" could match ")
+    if found and "ambiguous option" in head:
+        return f"ambiguous option: could match {matches}"
+    return _VALUE_AT_END.sub(r"\1", message)
+
+
+def _scope(text: str) -> str:
+    if text not in SCOPES:
+        raise argparse.ArgumentTypeError(f"not one of {', '.join(SCOPES)}")
+    return text
+
 
 def _console_ip(text: str) -> str:
     try:
         return console.private_ipv4(text)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"{exc} (got {text!r})") from None
+    except ValueError:
+        raise argparse.ArgumentTypeError("not a private IPv4 address") from None
 
 
 def _interface(text: str) -> str:
@@ -84,11 +117,12 @@ def _timeout(text: str) -> float:
 
 
 def build_parser(stdout: IO[str], stderr: IO[str]) -> argparse.ArgumentParser:
-    parser = _Parser(prog="omarchy-game-mode doctor", stdout=stdout, stderr=stderr, epilog=EPILOG,
-                     formatter_class=argparse.RawDescriptionHelpFormatter,
-                     description="Check what Xbox streaming and the controller need on this device, and say "
-                                 "what each result proves and does not prove.")
-    parser.add_argument("scope", nargs="?", choices=SCOPES, default="all", help="what to check (default: all)")
+    parser = Parser(prog="omarchy-game-mode doctor", stdout=stdout, stderr=stderr, epilog=EPILOG,
+                    formatter_class=argparse.RawDescriptionHelpFormatter,
+                    description="Check what Xbox streaming and the controller need on this device, and say "
+                                "what each result proves and does not prove.")
+    parser.add_argument("scope", nargs="?", type=_scope, default="all", metavar="SCOPE",
+                        help="what to check: streaming, input, system or all (default: all)")
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true", help="machine-readable report")
     output.add_argument("--markdown", action="store_true", help="redacted report to paste into a GitHub issue")

@@ -29,6 +29,7 @@ from typing import IO, Any, Callable, Sequence
 from . import buttons, evdev, hid
 from .buttons import AxisInfo, Control, ControlResult, Event, Observation
 from .checks import INPUT, SYSTEM
+from .cli import Parser
 from .context import Context, Options
 from .evdev import InputDevice
 from .inputstack import input_stack
@@ -415,16 +416,6 @@ def render_markdown(report: Report) -> str:
 
 # ---- command -------------------------------------------------------------------------
 
-class _Parser(argparse.ArgumentParser):
-    def __init__(self, *args: Any, stdout: IO[str], stderr: IO[str], **kwargs: Any):
-        super().__init__(*args, **kwargs)
-        self._stdout, self._stderr = stdout, stderr
-
-    def _print_message(self, message: str, file: IO[str] | None = None) -> None:
-        if message:
-            (self._stdout if file is sys.stdout else self._stderr).write(message)
-
-
 def _timeout(text: str) -> float:
     try:
         seconds = float(text)
@@ -436,7 +427,7 @@ def _timeout(text: str) -> float:
 
 
 def build_parser(stdout: IO[str], stderr: IO[str]) -> argparse.ArgumentParser:
-    parser = _Parser(
+    parser = Parser(
         prog="omarchy-game-mode doctor buttons", stdout=stdout, stderr=stderr,
         description="Guided physical button test. Press each control when asked; the test records the codes "
                     "that really arrive and compares them with an Xbox-style pad on Linux. Read-only: nothing "

@@ -2311,6 +2311,31 @@ class CliTest(CliCase):
         for phrase in ("streaming", "input", "system", "--console-ip", "--markdown", "no root", "Exit status"):
             self.assertIn(phrase, out)
 
+    def test_rejected_values_are_never_repeated(self):
+        cases = (["--console-ip", CANARY_PUBLIC_IP], [f"--console-ip={CANARY_PUBLIC_IP}"], [CANARY_PUBLIC_IP],
+                 ["all", CANARY_PUBLIC_IP], [f"--json={CANARY_PUBLIC_IP}"], ["--timeout", CANARY_PAD_SERIAL],
+                 [f"--x={CANARY_PUBLIC_IP}"], [f"-x{CANARY_PAD_SERIAL}"], ["--interface", f"{CANARY_HOME}/x"],
+                 ["streaming", f"{CANARY_HOME}/{CANARY_SUFFIX}"])
+        for argv in cases:
+            code, out, err = self.run_cli(*argv)
+            self.assertEqual((code, out), (2, ""), argv)
+            self.assertIn("usage: omarchy-game-mode doctor", err)
+            for canary in (CANARY_PUBLIC_IP, CANARY_PAD_SERIAL, CANARY_HOME, CANARY_SUFFIX):
+                self.assertNotIn(canary, err, argv)
+        for argv in (["buttons", CANARY_PUBLIC_IP], ["buttons", f"--raw={CANARY_PUBLIC_IP}"],
+                     ["buttons", "--timeout", CANARY_PAD_SERIAL]):
+            err = io.StringIO()
+            self.assertEqual(cli.main(argv, stdout=io.StringIO(), stderr=err), 2)
+            self.assertIn("usage: omarchy-game-mode doctor buttons", err.getvalue())
+            for canary in (CANARY_PUBLIC_IP, CANARY_PAD_SERIAL):
+                self.assertNotIn(canary, err.getvalue(), argv)
+        messages = [self.run_cli(*argv)[2].splitlines()[-1] for argv in
+                    (["--console-ip", CANARY_PUBLIC_IP], [CANARY_PUBLIC_IP], ["all", "--deep", CANARY_PUBLIC_IP])]
+        self.assertEqual(messages, ["omarchy-game-mode doctor: error: argument --console-ip: not a private IPv4 address",
+                                    "omarchy-game-mode doctor: error: argument SCOPE: not one of streaming, input, "
+                                    "system, all",
+                                    "omarchy-game-mode doctor: error: unrecognized arguments: --deep"])
+
     def test_options_reach_the_checks(self):
         code, _out, _err = self.run_cli("streaming", "--console-ip", CONSOLE_IP, "--timeout", "9", "--interface",
                                         "wlp3s0", "--json")
