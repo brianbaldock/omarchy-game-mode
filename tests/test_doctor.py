@@ -3699,14 +3699,41 @@ class ButtonCommandTest(InputCase):
         self.assertEqual((code, out, self.sources), (2, "", []))
         self.assertIn("/dev/input/event21 is a virtual device, so it has no raw HID report of its own", err)
 
-    def test_text_report_and_silent_skip_of_unreadable_raw_hid(self):
+    def test_without_a_chosen_device_the_raw_report_never_comes_from_another_controller(self):
+        ctx = self.device_ctx()
+        add_hidraw(SCRATCH, 5, 5, 0o000)  # the judged pad's own interface, hidden
+        add_input(SCRATCH, 30, "Microsoft X-Box One Elite 2 pad", ELITE_PAD_KEYS, PAD_AXES, "045e", "0b13", usb="3-2",
+                  interface=0)
+        add_hidraw(SCRATCH, 7, 0, 0o660, vendor="045E", product="0B13", usb="3-2")
+        (SCRATCH / USB_ROOT / "3-2/3-2:1.0/0003:045E:0B13.0001/report_descriptor").write_bytes(ALLY_REPORT_DESCRIPTOR)
+        code, out, _err = self.run_buttons(ctx, STANDARD, "--raw", "--json")
+        self.assertEqual((code, self.selection.primary.node, self.raw_node), (0, "event6", None))
+        self.assertEqual(json.loads(out)["raw"], {
+            "status": "unavailable", "reason": "no raw HID interface of the device behind /dev/input/event6 is "
+                                               "readable: an input daemon hides it (mode 000)"})
+        self.run_buttons(ctx, STANDARD, "--device", "/dev/input/event30", "--raw", "--json")
+        self.assertEqual(self.raw_node.path, "/dev/hidraw7")  # the other pad's own report, read only for that pad
+        virtual = self.device_ctx(inputplumber=True)
+        add_hidraw(SCRATCH, 5, 5, 0o660)
+        (SCRATCH / USB_PARENT / "3-6:1.5/0003:0B05:1B4C.0006/report_descriptor").write_bytes(ALLY_REPORT_DESCRIPTOR)
+        code, out, _err = self.run_buttons(virtual, STANDARD, "--raw")
+        self.assertEqual((code, self.selection.primary.node, self.raw_node), (0, "event21", None))
+        self.assertIn("  note: raw report unavailable: cannot tell which interface belongs to this controller; the "
+                      "test goes on without it.\n", out)
+        self.assertIn("Raw HID report unavailable: cannot tell which interface belongs to this controller.",
+                      " ".join(out.split()))
+
+    def test_text_report_says_why_a_raw_report_that_cannot_be_read_is_left_out(self):
         ctx = self.device_ctx()
         add_hidraw(SCRATCH, 5, 5, 0o000)
         script = {name: events for name, events in STANDARD.items() if name != "r3"}
         code, out, _err = self.run_buttons(ctx, {**script, "guide": key(evdev.BTN_SELECT)}, "--raw")
         self.assertEqual(code, 0)
         self.assertIsNone(self.raw_node)
-        self.assertNotIn("Raw HID", out)
+        self.assertIn("  note: raw report unavailable: no raw HID interface of the device behind /dev/input/event6 is "
+                      "readable: an input daemon hides it (mode 000); the test goes on without it.\n", out)
+        self.assertIn("Raw HID report unavailable: no raw HID interface of the device behind /dev/input/event6 is "
+                      "readable: an input daemon hides it (mode 000).", " ".join(out.split()))
         self.assertNotIn("hidraw", out)
         for line in ("[1/27] Press: Xbox (center) button   [Enter = skip]", "Omarchy Game Mode button test",
                      "  Control", "  Xbox ", "BTN_SELECT (314) on event6", "Findings",

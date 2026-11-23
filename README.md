@@ -296,9 +296,11 @@ mapping line built only from the presses it saw and names the controls it left o
 
 `--raw` additionally reads the controller's raw HID report, when your user is allowed
 to, and tells you when a press changes bits the controller never declared. That is how a
-button that exists in the hardware but is invisible to the kernel shows up. Together with
-`--device`, only a raw interface of that same device (the same USB device in sysfs) is
-read; when there is none the test does not start, rather than mix up two controllers.
+button that exists in the hardware but is invisible to the kernel shows up. Only a raw
+interface of the same physical device as the controller under test (the same USB device
+in sysfs) is ever read, never another controller's. When there is no such interface, or
+the controller under test is a daemon's virtual one, the test says `raw report
+unavailable` and why, and goes on without it; with `--device` it does not start.
 
 To share a result, run it with `--markdown` and paste the file into the
 hardware-validation issue form. It holds the device model, kernel and input-stack

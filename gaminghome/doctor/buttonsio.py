@@ -3,7 +3,8 @@
 Device nodes are opened O_RDONLY|O_NONBLOCK and only read. There is no EVIOCGRAB,
 no write and no uinput, so every other program (Steam, games, input daemons) keeps
 receiving the same events, the Guide button included. Raw HID reads (`--raw`) are
-the same: read-only, and skipped without a word when the node is not readable.
+the same: read-only, and only from the judged controller's own physical device; when
+that has no readable raw interface, the test says why and goes on without one.
 Everything that was opened is closed, and the terminal mode restored, on exit, on
 Ctrl-C and when the test is ended by SIGTERM or a hang-up: those signals are turned
 into an exception for the duration of the test, so the clean-up always runs.
@@ -50,6 +51,7 @@ UNREADABLE = {"hidden": "an input daemon hides it (mode 000)",
               "no-permission": "this user may not read it (key devices are normally readable only by root and "
                                "the `input` group)",
               "missing": "it has no device node"}
+RAW_UNTIED = "cannot tell which interface belongs to this controller"
 NOT_A_TERMINAL = ("omarchy-game-mode doctor buttons is interactive: run it in a terminal. With --json or --markdown "
                   "the prompts go to stderr, so the report itself can be redirected.\n")
 
@@ -180,38 +182,15 @@ def _with_buttons(ctx: Context, node: evdev.HidrawNode) -> RawNode | None:
     return RawNode(node.path, fields) if any(item.is_buttons for item in fields) else None
 
 
-def find_raw_node(ctx: Context, selection: Selection) -> RawNode | None:
-    """The readable hidraw node of the physical gamepad's own HID interface, with its parsed descriptor.
-
-    The judged controller comes first when it is a physical one; nothing found means no raw report.
-    """
-    pads = sorted((item for item in evdev.gamepads(ctx) if not item.virtual), key=lambda pad: pad != selection.primary)
-    for pad in pads:
-        parent = evdev.hid_parent(ctx, f"/sys/class/input/{pad.node}/device")
-        for node in evdev.hidraw_nodes(ctx) if parent else ():
-            if node.access != "readable" or evdev.hid_parent(ctx, f"/sys/class/hidraw/{node.node}/device") != parent:
-                continue
-            found = _with_buttons(ctx, node)
-            if found:
-                return found
-    return None
-
-
-def raw_node_of(ctx: Context, chosen: InputDevice) -> RawNode:
-    """The raw HID report of the device chosen with `--device`, from that same physical device only.
+def _own_raw_node(ctx: Context, pad: InputDevice) -> RawNode:
+    """The raw HID report of `pad`'s own physical device, or a ValueError that says why there is none.
 
     A HID interface counts only when sysfs shows it under the same USB device (or, on another
-    bus, the same HID device) as the chosen node; the chosen node's own interface comes first.
-    Anything else would attribute another controller's bits to this one, so it is refused
-    with a ValueError that says why.
+    bus, the same HID device) as the pad's node; the pad's own interface comes first.
+    Anything else would attribute another controller's bits to this one.
     """
-    if chosen.virtual:
-        raise ValueError(f"--raw: {chosen.path} is a virtual device, so it has no raw HID report of its own")
-    own = evdev.hid_parent(ctx, f"/sys/class/input/{chosen.node}/device")
-    device = evdev.physical_device(ctx, f"/sys/class/input/{chosen.node}/device")
-    if not device:
-        raise ValueError(f"--raw: {chosen.path} is not a USB, Bluetooth or I2C HID device, so it has no raw HID "
-                         "report")
+    own = evdev.hid_parent(ctx, f"/sys/class/input/{pad.node}/device")
+    device = evdev.physical_device(ctx, f"/sys/class/input/{pad.node}/device")
     nodes = [node for node in evdev.hidraw_nodes(ctx)
              if evdev.physical_device(ctx, f"/sys/class/hidraw/{node.node}/device") == device]
     readable = sorted((node for node in nodes if node.access == "readable"),
@@ -221,11 +200,47 @@ def raw_node_of(ctx: Context, chosen: InputDevice) -> RawNode:
         if found:
             return found
     if not nodes:
-        raise ValueError(f"--raw: the device behind {chosen.path} has no raw HID interface")
+        raise ValueError(f"the device behind {pad.path} has no raw HID interface")
     if not readable:
         reasons = "; ".join(sorted({UNREADABLE.get(node.access, node.access) for node in nodes}))
-        raise ValueError(f"--raw: no raw HID interface of the device behind {chosen.path} is readable: {reasons}")
-    raise ValueError(f"--raw: no readable raw HID interface of the device behind {chosen.path} declares buttons")
+        raise ValueError(f"no raw HID interface of the device behind {pad.path} is readable: {reasons}")
+    raise ValueError(f"no readable raw HID interface of the device behind {pad.path} declares buttons")
+
+
+def _tied_to_hardware(ctx: Context, pad: InputDevice) -> bool:
+    return not pad.virtual and bool(evdev.physical_device(ctx, f"/sys/class/input/{pad.node}/device"))
+
+
+def find_raw_node(ctx: Context, selection: Selection) -> tuple[RawNode | None, str]:
+    """The raw HID report of the judged controller itself, or None and the reason there is none.
+
+    Only an interface of the judged controller's own physical device counts. A virtual
+    controller, or one sysfs does not tie to a device, is tested without a raw report rather
+    than with one that may belong to another controller.
+    """
+    pad = selection.primary
+    if pad is None or not _tied_to_hardware(ctx, pad):
+        return None, RAW_UNTIED
+    try:
+        return _own_raw_node(ctx, pad), ""
+    except ValueError as exc:
+        return None, str(exc)
+
+
+def raw_node_of(ctx: Context, chosen: InputDevice) -> RawNode:
+    """The raw HID report of the device chosen with `--device`, from that same physical device only.
+
+    Without one the test does not start: a ValueError says why.
+    """
+    if chosen.virtual:
+        raise ValueError(f"--raw: {chosen.path} is a virtual device, so it has no raw HID report of its own")
+    if not _tied_to_hardware(ctx, chosen):
+        raise ValueError(f"--raw: {chosen.path} is not a USB, Bluetooth or I2C HID device, so it has no raw HID "
+                         "report")
+    try:
+        return _own_raw_node(ctx, chosen)
+    except ValueError as exc:
+        raise ValueError(f"--raw: {exc}") from None
 
 
 # ---- live event source ----------------------------------------------------------------
@@ -418,6 +433,8 @@ def _mapping_lines(mapping: dict[str, Any]) -> tuple[str, str]:
 
 
 def _raw_line(raw: dict[str, Any]) -> str:
+    if raw.get("status") == "unavailable":
+        return f"Raw HID report unavailable: {raw.get('reason') or 'none found'}."
     if raw.get("status") != "watched":
         return ""
     changes = raw.get("undeclared_changes", [])
@@ -511,8 +528,9 @@ def build_parser(stdout: IO[str], stderr: IO[str]) -> argparse.ArgumentParser:
     parser.add_argument("--timeout", metavar="SECONDS", type=_timeout, default=12.0,
                         help="time to wait for each control, 2-120 (default: 12)")
     parser.add_argument("--raw", action="store_true",
-                        help="also watch the controller's raw HID report for buttons the kernel does not expose; "
-                             "with --device, only a raw interface of that same device, or the test does not start")
+                        help="also watch the raw HID report of the controller under test, from an interface of "
+                             "that same physical device only, for buttons the kernel does not expose; with "
+                             "--device, the test does not start without one")
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true", help="machine-readable report (prompts go to stderr)")
     output.add_argument("--markdown", action="store_true", help="report to paste into an issue (prompts go to stderr)")
@@ -526,9 +544,10 @@ def _is_terminal(stream: Any) -> bool:
         return False
 
 
-def _raw_info(node: RawNode | None, results: Sequence[ControlResult], requested: bool) -> dict[str, Any]:
+def _raw_info(node: RawNode | None, results: Sequence[ControlResult], requested: bool,
+              reason: str = "") -> dict[str, Any]:
     if node is None:
-        return {"status": "unavailable" if requested else "not requested"}
+        return {"status": "unavailable", "reason": reason} if requested else {"status": "not requested"}
     summary = hid.RawWatcher(node.fields).summary()
     changes = [{"control": result.control.name, "bit": bit.bit, "report_id": bit.report_id, "where": bit.where}
                for result in results for bit in result.raw_bits]
@@ -575,13 +594,17 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str], *, ctx: Context 
     prompts, stderr = Scrubbed(prompts, ctx.redactor.text), Scrubbed(stderr, ctx.redactor.text)
     try:
         selection = select_devices(ctx, args.device)
+        raw_node: RawNode | None = None
+        raw_reason = ""
         if args.raw and args.device:
-            raw_node: RawNode | None = raw_node_of(ctx, selection.watched[0])
-        else:
-            raw_node = find_raw_node(ctx, selection) if args.raw else None
+            raw_node = raw_node_of(ctx, selection.watched[0])
+        elif args.raw:
+            raw_node, raw_reason = find_raw_node(ctx, selection)
     except ValueError as exc:
         stderr.write(f"omarchy-game-mode doctor buttons: error: {exc}\n")
         return EXIT_USAGE
+    if raw_reason:
+        selection.notes.append(f"raw report unavailable: {raw_reason}; the test goes on without it.")
     prompts.write("Omarchy Game Mode button test: read-only, nothing is grabbed or remapped.\n")
     for device in selection.candidates:
         mark = "read " if device in selection.watched else "skip "
@@ -607,7 +630,7 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str], *, ctx: Context 
     except NotOpened as exc:
         stderr.write(f"omarchy-game-mode doctor buttons: could not open the controller for reading: {exc}\n")
         return 1
-    report = build_report(ctx, selection, results, _raw_info(raw_node, results, args.raw), started)
+    report = build_report(ctx, selection, results, _raw_info(raw_node, results, args.raw, raw_reason), started)
     style = "json" if args.json else "markdown" if args.markdown else "text"
     emit(stdout, render(report, ctx.redactor, style, text=render_text, markdown=render_markdown))
     return 0
