@@ -369,10 +369,10 @@ class ValueScrubTest(unittest.TestCase):
             self.assertNotIn(canary, once)
 
     def test_scrubbing_time_stays_linear_whatever_the_text_looks_like(self):
-        for text in ("serial_" * 400, "a_" * 3000, "-a" * 3000, "1." * 10000, "a." * 12000):
+        for text in ("serial_" * 300, "a_" * 2000, "-a" * 2000, "1." * 5000, "a." * 8000):
             started = time.perf_counter()
             self.r.text(text)
-            self.assertLess(time.perf_counter() - started, 0.5, text[:12])
+            self.assertLess(time.perf_counter() - started, 0.25, text[:12])
         self.assertEqual(self.r.text("x" * 70 + "_token=abc1"), "x" * 70 + "_token=<redacted>")
 
     def test_no_evidence_field_the_doctor_declares_is_mistaken_for_a_secret(self):
@@ -555,7 +555,8 @@ class ContextTest(ScratchCase):
 
     def test_run_command_kills_a_command_that_overruns(self):
         started = time.monotonic()
-        result = context.run_command([sys.executable, "-c", "import time; print('a', flush=True); time.sleep(30)"], 0.3)
+        sleeper = [sys.executable, "-c", "import time; print('a', flush=True); time.sleep(30)"]
+        result = context.run_command(sleeper, 0.15)
         self.assertLess(time.monotonic() - started, 3)
         self.assertEqual((result.error, result.returncode, result.ok), ("timeout", None, False))
 
