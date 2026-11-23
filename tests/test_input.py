@@ -102,6 +102,42 @@ class VirtualGamepadTest(MonitorCase):
             self.assertTrue(pump(lambda: core.BACK in self.actions))
             self.assertEqual(self.actions, expected, node)
 
+    def test_virtual_pad_keeps_its_state_when_it_cannot_be_read_again(self):
+        # These nodes are FIFOs, so reading what is held fails, as it does on a node that is going away.
+        elite, usb = self.tree.add(21, ELITE), self.tree.add(7, PHYSICAL, where=USB)
+        self.allow = VirtualGamepads({ELITE: 1})
+        monitor = self.monitor()
+        writers = {node: os.open(node, os.O_WRONLY | os.O_NONBLOCK) for node in (elite, usb)}
+        for writer in writers.values():
+            self.addCleanup(os.close, writer)
+
+        def press(node, *keys):
+            os.write(writers[node], b"".join(EVENT.pack(0, 0, core.EV_KEY, code, value)
+                                             + EVENT.pack(0, 0, core.EV_SYN, core.SYN_REPORT, 0) for code, value in keys))
+
+        def read_again(code):
+            self.assertTrue(pump(lambda: all(code in monitor.interpreter.devices[node].pressed for node in writers)))
+            monitor.interpreter.set_nav_enabled(False)
+            monitor.interpreter.set_nav_enabled(True)   # focused again: both are read, and the reads fail
+
+        for node in writers:
+            press(node, (core.BTN_MODE, 1))
+        read_again(core.BTN_MODE)
+        press(elite, (core.BTN_SOUTH, 1), (core.BTN_SOUTH, 0), (core.BTN_MODE, 0), (core.BTN_EAST, 1))
+        self.assertTrue(pump(lambda: core.BACK in self.actions))
+        self.assertEqual(self.actions, [core.BACK])   # Guide was still held: A belonged to its chord
+        press(usb, (core.BTN_MODE, 0))
+        for node in writers:
+            press(node, (core.BTN_SELECT, 1))
+        read_again(core.BTN_SELECT)
+        for node, expected in ((elite, [core.BACK]), (usb, [core.MENU, core.BACK])):
+            del self.actions[:]
+            press(node, (core.BTN_START, 1), (core.BTN_START, 0), (core.BTN_EAST, 0), (core.BTN_EAST, 1))
+            self.assertTrue(pump(lambda: core.BACK in self.actions))
+            # View is still held on the virtual pad, so Menu began the View + Menu hold; the other
+            # pad took the failed read for nothing held, as before.
+            self.assertEqual(self.actions, expected, node)
+
     def test_only_the_announced_identity_is_used(self):
         self.tree.add(20, STEAM_PAD)                 # Steam Input's own virtual pad
         self.tree.add(22, ELITE, where=UHID)         # right identity, but not a uinput device

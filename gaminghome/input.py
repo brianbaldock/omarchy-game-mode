@@ -420,7 +420,8 @@ class ControllerMonitor:
                 fcntl.ioctl(device.fd, EVIOCGABS(code), info, True)
                 axes[code] = info[0]
         except OSError:
-            pass
+            if device.virtual:
+                return  # Unread is not released: what a Guide chord holds must stay ignored.
         self.interpreter.sync_state(node, pressed, axes)
 
     def _on_readable(self, fd, condition, node):
