@@ -157,6 +157,15 @@ def render(report: Report, redactor: Redactor, style: str, *, text: Callable[[Re
     return redactor.text((text or render_text)(safe))
 
 
+def emit(stream: IO[str], text: str) -> None:
+    """Write a report even to a terminal whose encoding lacks a character it uses."""
+    try:
+        stream.write(text)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "ascii"
+        stream.write(text.encode(encoding, "replace").decode(encoding))
+
+
 def _diagnose_command(argv: Sequence[str], stdout: IO[str], stderr: IO[str],
                       context_factory: Callable[[Options], Context] | None = None) -> int:
     parser = build_parser(stdout, stderr)
@@ -167,7 +176,7 @@ def _diagnose_command(argv: Sequence[str], stdout: IO[str], stderr: IO[str],
                       interface=args.interface or "", redact=not args.no_redact)
     ctx = context_factory(options) if context_factory else Context(options, redactor=system_redactor(options.redact))
     report = diagnose(ctx)
-    stdout.write(render(report, ctx.redactor, "json" if args.json else "markdown" if args.markdown else "text"))
+    emit(stdout, render(report, ctx.redactor, "json" if args.json else "markdown" if args.markdown else "text"))
     return report.exit_code()
 
 
@@ -185,12 +194,22 @@ def main(argv: Sequence[str] | None = None, *, stdout: IO[str] | None = None, st
     stdout, stderr = stdout or sys.stdout, stderr or sys.stderr
     try:
         if argv and argv[0] in COMMANDS:
-            return COMMANDS[argv[0]](argv[1:], stdout, stderr)
-        return _diagnose_command(argv, stdout, stderr, context_factory)
+            code = COMMANDS[argv[0]](argv[1:], stdout, stderr)
+        else:
+            code = _diagnose_command(argv, stdout, stderr, context_factory)
+        stdout.flush()
+        return code
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else EXIT_USAGE
     except KeyboardInterrupt:
         stderr.write("\nInterrupted.\n")
         return 130
     except BrokenPipeError:
+        # The reader went away (`doctor | head`). Point stdout at /dev/null so the
+        # interpreter's own flush at exit does not report the same error again.
+        if stdout is sys.stdout:
+            try:
+                os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+            except (OSError, ValueError):
+                pass
         return 0

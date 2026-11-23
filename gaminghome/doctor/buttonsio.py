@@ -448,7 +448,7 @@ def _raw_info(node: RawNode | None, results: Sequence[ControlResult], requested:
 def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str], *, ctx: Context | None = None,
          stdin: Any = None, is_terminal: Callable[[Any], bool] = _is_terminal,
          source_factory: Callable[[Selection, RawNode | None], Any] | None = None) -> int:
-    from .cli import render, system_redactor
+    from .cli import emit, render, system_redactor
     parser = build_parser(stdout, stderr)
     try:
         args = parser.parse_args(list(argv))
@@ -497,5 +497,5 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str], *, ctx: Context 
         source.close()
     report = build_report(ctx, selection, results, _raw_info(raw_node, results, args.raw), started)
     style = "json" if args.json else "markdown" if args.markdown else "text"
-    stdout.write(render(report, ctx.redactor, style, text=render_text, markdown=render_markdown))
+    emit(stdout, render(report, ctx.redactor, style, text=render_text, markdown=render_markdown))
     return 0

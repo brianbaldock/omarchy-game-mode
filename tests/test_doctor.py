@@ -2083,6 +2083,20 @@ class CliTest(CliCase):
             raise BrokenPipeError
         self.assertEqual(cli.main([], stdout=io.StringIO(), stderr=io.StringIO(), context_factory=closed), 0)
 
+    def test_report_survives_a_terminal_that_cannot_encode_it(self):
+        class Latin1(io.StringIO):
+            encoding = "latin-1"
+
+            def write(self, text):
+                text.encode(self.encoding)
+                return super().write(text)
+        stream = Latin1()
+        cli.emit(stream, "cannot verify without root \u2014 run: sudo nft -a list ruleset\n")
+        self.assertEqual(stream.getvalue(), "cannot verify without root ? run: sudo nft -a list ruleset\n")
+        plain = io.StringIO()
+        cli.emit(plain, "dash \u2014 kept\n")
+        self.assertEqual(plain.getvalue(), "dash \u2014 kept\n")
+
     def test_json_report_schema(self):
         code, out, _err = self.run_cli("--json", "--console-ip", CONSOLE_IP)
         document = json.loads(out)
