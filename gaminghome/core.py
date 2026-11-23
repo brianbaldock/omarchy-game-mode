@@ -23,6 +23,7 @@ BTN_SOUTH, BTN_EAST = 304, 305
 BTN_TL, BTN_TR = 310, 311
 BTN_SELECT, BTN_START, BTN_MODE = 314, 315, 316
 ABS_X, ABS_Y, ABS_HAT0X, ABS_HAT0Y = 0, 1, 16, 17
+DIRECTION_AXES = (ABS_X, ABS_Y, ABS_HAT0X, ABS_HAT0Y)
 
 GAME, DESKTOP, AUTO = "game", "desktop", "auto"
 MODES = (AUTO, GAME, DESKTOP)
@@ -582,11 +583,11 @@ class ControllerInterpreter:
         state.pressed = set(pressed) & {BTN_SOUTH, BTN_EAST, BTN_TL, BTN_TR, BTN_SELECT, BTN_START, BTN_MODE}
         for code, value in axes.items():
             self._set_axis(state, code, value)
-        state.direction = self._direction(state)
         if state.guide_chords and BTN_MODE in state.pressed:
             # Whatever is down together with Guide may have been pressed for its chord.
             state.suppressed, state.pressed = state.pressed - {BTN_MODE}, {BTN_MODE}
-            state.direction_suppressed, state.direction = state.direction is not None, None
+            state.suppressed_directions = self._pushed_directions(state)
+        state.direction = self._direction(state)
         state.chord_consumed = {BTN_SELECT, BTN_START} <= state.pressed
 
     def feed(self, device_id: str, etype: int, code: int, value: int):
@@ -604,8 +605,11 @@ class ControllerInterpreter:
             return
         if etype == EV_KEY:
             self._key(device_id, state, code, value)
-        elif etype == EV_ABS and code in (ABS_X, ABS_Y, ABS_HAT0X, ABS_HAT0Y):
+        elif etype == EV_ABS and code in DIRECTION_AXES:
+            before = self._sign(state, code)
             self._set_axis(state, code, value)
+            if state.guide_chords:
+                self._guide_direction(state, code, before)
             self._update_direction(device_id, state)
 
     # ---- buttons --------------------------------------------------------
@@ -702,24 +706,40 @@ class ControllerInterpreter:
                 state.stick[index] = 0
 
     @staticmethod
-    def _direction(state):
-        for x, y in (state.hat, state.stick):
-            if y:
+    def _sign(state, code):
+        """Which way one axis of the D-pad or stick is pushed: -1, 0 or 1."""
+        values = state.hat if code in (ABS_HAT0X, ABS_HAT0Y) else state.stick
+        return values[0 if code in (ABS_HAT0X, ABS_X) else 1]
+
+    @classmethod
+    def _pushed_directions(cls, state):
+        pushed = ((code, cls._sign(state, code)) for code in DIRECTION_AXES)
+        return {(code, sign) for code, sign in pushed if sign}
+
+    @classmethod
+    def _guide_direction(cls, state, code, before):
+        """A direction pushed while Guide is held belongs to that chord until it is let go.
+
+        Each one is kept by axis and sign, so another direction that wins over
+        it while both are held cannot pass it on when that one is let go.
+        """
+        after = cls._sign(state, code)
+        state.suppressed_directions -= {(code, -1), (code, 1)} - {(code, after)}
+        if after and after != before and BTN_MODE in state.pressed:
+            state.suppressed_directions.add((code, after))
+
+    @classmethod
+    def _direction(cls, state):
+        for x_code, y_code in ((ABS_HAT0X, ABS_HAT0Y), (ABS_X, ABS_Y)):
+            x, y = cls._sign(state, x_code), cls._sign(state, y_code)
+            if y and (y_code, y) not in state.suppressed_directions:
                 return UP if y < 0 else DOWN
-            if x:
+            if x and (x_code, x) not in state.suppressed_directions:
                 return LEFT if x < 0 else RIGHT
         return None
 
     def _update_direction(self, device_id, state):
         direction = self._direction(state)
-        if state.guide_chords:
-            # A direction taken while Guide is held belongs to that chord until the pad is back at rest.
-            if direction is None:
-                state.direction_suppressed = False
-            elif BTN_MODE in state.pressed and direction != state.direction:
-                state.direction_suppressed = True
-            if state.direction_suppressed:
-                direction = None
         if direction == state.direction:
             return
         state.direction = direction
@@ -753,7 +773,7 @@ class ControllerInterpreter:
         self._cancel_repeat(state)
         state.pressed.clear()
         state.suppressed.clear()
-        state.direction_suppressed = False
+        state.suppressed_directions.clear()
         state.hat = [0, 0]
         state.stick = [0, 0]
         state.direction = None
@@ -767,7 +787,7 @@ class _DeviceState:
         self.guide_chords = False
         self.pressed: set[int] = set()
         self.suppressed: set[int] = set()
-        self.direction_suppressed = False
+        self.suppressed_directions: set[tuple[int, int]] = set()
         self.dropping = False
         self.hat = [0, 0]
         self.stick = [0, 0]

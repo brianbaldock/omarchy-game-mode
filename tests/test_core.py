@@ -392,13 +392,51 @@ class ControllerTest(unittest.TestCase):
         self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
         self.ci.feed("d", EV_ABS, core.ABS_Y, 32767)
         self.key(core.BTN_MODE, 0)
-        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 1)   # another direction, the same hold
         self.assertEqual((self.actions, self.clock.timers), ([], {}))
-        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 1)   # a direction pushed after Guide counts, as a button does
         self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 0)
+        self.assertEqual((self.actions, self.clock.timers), ([DOWN], {}))
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)   # let go and pushed again; the stick is still held
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.assertEqual((self.actions, self.clock.timers), ([DOWN, core.RIGHT], {}))
         self.ci.feed("d", EV_ABS, core.ABS_Y, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_Y, 32767)
+        self.assertEqual(self.actions, [DOWN, core.RIGHT, DOWN])
+
+    def test_chord_direction_stays_ignored_when_the_direction_held_before_guide_on_its_axis_is_let_go(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, -1)  # held before Guide
+        self.key(core.BTN_MODE, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)   # the other way on the stick, hidden by the D-pad
+        self.key(core.BTN_MODE, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.assertEqual((self.actions, self.clock.timers), ([core.LEFT], {}))
+        self.ci.feed("d", EV_ABS, core.ABS_X, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)
+        self.assertEqual(self.actions, [core.LEFT, core.RIGHT])
+
+    def test_chord_direction_stays_ignored_when_the_other_d_pad_axis_is_let_go(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 1)   # held before Guide
+        self.key(core.BTN_MODE, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)   # down-right: down wins, right is the chord's
+        self.key(core.BTN_MODE, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 0)
+        self.assertEqual((self.actions, self.clock.timers), ([DOWN], {}))
+
+    def test_ordinary_pad_follows_any_direction_held_with_guide(self):
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, -1)
+        self.key(core.BTN_MODE, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)
+        self.key(core.BTN_MODE, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 1)
+        self.key(core.BTN_MODE, 1)
         self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
-        self.assertEqual(self.actions, [core.RIGHT])
+        self.key(core.BTN_MODE, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 0)
+        self.assertEqual(self.actions, [core.LEFT, core.RIGHT, DOWN, core.RIGHT])
 
     def test_direction_held_before_guide_goes_on_and_a_new_one_does_not(self):
         self.ci.add_device("d", guide_chords=True)
