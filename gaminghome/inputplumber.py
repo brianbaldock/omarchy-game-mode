@@ -54,17 +54,22 @@ CONFIRM_MS = 600           # look once more after a discovery that changed the p
 MAX_CONFIRMS = 4
 RETRY_MS = (500, 1500, 4000)   # after a failed discovery, then wait for the next hint
 
-MAX_XML_CHARS = 8 * 1024 * 1024
+# Checked on a reply before it is unpacked. The root answers Introspect with its
+# whole object tree (437 KiB on an ASUS ROG Xbox Ally); every other reply is a
+# handful of properties (7 KiB for that device's composite).
+MAX_XML_BYTES = 8 * 1024 * 1024
+MAX_REPLY_BYTES = 256 * 1024
 MAX_COMPOSITES = 16
 MAX_TARGETS = 16
 MAX_LIST = 1024
 MAX_TEXT = 96
 
-COMPOSITE_NODE_RE = re.compile(r"^CompositeDevice(\d{1,4})$")
-COMPOSITE_PATH_RE = re.compile(rf"^{re.escape(ROOT)}/CompositeDevice\d{{1,4}}$")
-TARGET_PATH_RE = re.compile(rf"^{re.escape(ROOT)}/devices/target/[A-Za-z0-9_]{{1,64}}$")
-EVENT_NODE_RE = re.compile(r"^/dev/input/event\d{1,5}$")
-KIND_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+# Always used with fullmatch: "$" would let a trailing newline through, and "\d" any Unicode digit.
+COMPOSITE_NODE_RE = re.compile(r"CompositeDevice([0-9]{1,4})")
+COMPOSITE_PATH_RE = re.compile(rf"{re.escape(ROOT)}/CompositeDevice[0-9]{{1,4}}")
+TARGET_PATH_RE = re.compile(rf"{re.escape(ROOT)}/devices/target/[A-Za-z0-9_]{{1,64}}")
+EVENT_NODE_RE = re.compile(r"/dev/input/event[0-9]{1,5}")
+KIND_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 RIGHT_STICK_BUTTON = "Gamepad:Button:RightStick"
 
 # Kernel identity of the uinput gamepad InputPlumber creates for a target
@@ -126,7 +131,7 @@ def composite_nodes(document: str) -> list[str]:
     InputPlumber answers with the whole object tree below the node, so only
     direct children are collected and no tree is built.
     """
-    if not isinstance(document, str) or len(document) > MAX_XML_CHARS:
+    if not isinstance(document, str) or len(document) > MAX_XML_BYTES:
         raise ValueError("introspection data is missing or too large")
     found: dict[int, str] = {}
     depth = 0
@@ -135,7 +140,7 @@ def composite_nodes(document: str) -> list[str]:
         nonlocal depth
         depth += 1
         if depth == 2 and tag == "node":
-            match = COMPOSITE_NODE_RE.match(attributes.get("name", ""))
+            match = COMPOSITE_NODE_RE.fullmatch(attributes.get("name", ""))
             if match and len(found) < MAX_COMPOSITES:
                 found[int(match.group(1))] = match.group(0)
 
@@ -166,7 +171,7 @@ def _strings(value) -> list[str]:
 
 
 def _target_paths(value) -> list[str]:
-    return [path for path in _strings(value) if TARGET_PATH_RE.match(path)][:MAX_TARGETS]
+    return [path for path in _strings(value) if TARGET_PATH_RE.fullmatch(path)][:MAX_TARGETS]
 
 
 def _guarded(method):
@@ -365,7 +370,7 @@ class InputPlumberClient:
     def _on_properties_changed(self, _bus, sender, path, _interface, _signal, _parameters, epoch):
         if epoch != self._epoch or sender != self.owner:
             return
-        if path == MANAGER or COMPOSITE_PATH_RE.match(path or ""):
+        if path == MANAGER or COMPOSITE_PATH_RE.fullmatch(path or ""):
             self._mark_dirty()
 
     def _mark_dirty(self):
@@ -399,25 +404,47 @@ class InputPlumberClient:
         self._call(ROOT, INTROSPECTABLE_IFACE, "Introspect", None, "(s)", self._on_root)
         version = GLib.Variant("(ss)", (MANAGER_IFACE, "Version"))
         self._call(MANAGER, PROPERTIES_IFACE, "Get", version, "(v)", self._on_version)
+        self._advance()
 
     def _call(self, path, interface, method, parameters, reply, callback, *context):
+        """Send one read. A call that cannot be sent fails the pass in flight; it is never waited for."""
         if (interface, method) not in READ_METHODS:
             raise ValueError(f"{interface}.{method} is not a read")
-        self._outstanding += 1
-        self._bus.call(self.owner, path, interface, method, parameters, GLib.VariantType(reply),
-                       Gio.DBusCallFlags.NO_AUTO_START, TIMEOUT_MS, self._cancellable, callback,
-                       (self._epoch, self._pass, *context))
-
-    def _reply(self, bus, result, token):
-        """``(current, value)``: a reply that is not from the pass in flight is not current."""
+        # Gio drops a call with a malformed name or path without ever answering it.
+        if not Gio.dbus_is_unique_name(self.owner or ""):
+            self._discovery.fail(f"not sent: {self.owner!r} is not a unique bus name")
+            return
+        if not GLib.Variant.is_object_path(path):
+            self._discovery.fail(f"not sent: {path!r} is not an object path")
+            return
         try:
-            value = bus.call_finish(result).unpack()
+            self._bus.call(self.owner, path, interface, method, parameters, GLib.VariantType(reply),
+                           Gio.DBusCallFlags.NO_AUTO_START, TIMEOUT_MS, self._cancellable, callback,
+                           (self._epoch, self._pass, *context))
+        except (TypeError, ValueError, GLib.Error) as error:
+            self._discovery.fail(error)
+            return
+        self._outstanding += 1
+
+    def _reply(self, bus, result, token, limit=MAX_REPLY_BYTES):
+        """``(current, value)``: a reply that is not from the pass in flight is not current.
+
+        ``value`` is the unpacked reply, or the error that stands for it. Only a
+        current reply within ``limit`` bytes is unpacked.
+        """
+        try:
+            reply = bus.call_finish(result)
         except GLib.Error as error:
-            value = error
+            reply = error
         if token != (self._epoch, self._pass) or self._discovery is None:
             return False, None
         self._outstanding -= 1
-        return True, value
+        if isinstance(reply, GLib.Error):
+            return True, reply
+        size = reply.get_size()
+        if size > limit:
+            return True, GLib.Error(f"a reply of {size} bytes is too large")
+        return True, reply.unpack()
 
     @staticmethod
     def _gone(error) -> bool:
@@ -426,7 +453,7 @@ class InputPlumberClient:
 
     @_guarded
     def _on_root(self, bus, result, context):
-        current, value = self._reply(bus, result, context[:2])
+        current, value = self._reply(bus, result, context[:2], MAX_XML_BYTES)
         if not current:
             return
         if isinstance(value, GLib.Error):
@@ -483,7 +510,7 @@ class InputPlumberClient:
                 self._discovery.fail(value)
         elif isinstance(value[0], dict):
             kind = value[0].get("DeviceType")
-            if isinstance(kind, str) and KIND_RE.match(kind):
+            if isinstance(kind, str) and KIND_RE.fullmatch(kind):
                 self._discovery.kinds[context[2]] = kind
         self._advance()
 
@@ -503,7 +530,7 @@ class InputPlumberClient:
             dbus_targets=len(_target_paths(properties.get("DbusDevices"))),
             sources=len(sources),
             hidraw_sources=any(source.startswith("/dev/hidraw") for source in sources),
-            event_nodes=frozenset(source for source in sources if EVENT_NODE_RE.match(source)),
+            event_nodes=frozenset(source for source in sources if EVENT_NODE_RE.fullmatch(source)),
             right_stick_button=RIGHT_STICK_BUTTON in _strings(properties.get("Capabilities")),
         )
 

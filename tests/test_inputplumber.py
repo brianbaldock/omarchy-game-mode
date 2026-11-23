@@ -13,6 +13,7 @@ import shutil
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from gi.repository import Gio, GLib
 
@@ -54,11 +55,17 @@ class ParsingTest(unittest.TestCase):
         self.assertEqual(composite_nodes(NESTED), ["CompositeDevice0", "CompositeDevice2", "CompositeDevice10"])
 
     def test_garbage_is_refused_and_the_list_is_bounded(self):
-        for document in ("<node", "", None, b"<node/>", "x" * (inputplumber.MAX_XML_CHARS + 1)):
+        for document in ("<node", "", None, b"<node/>", "x" * (inputplumber.MAX_XML_BYTES + 1)):
             with self.assertRaises(ValueError):
                 composite_nodes(document)
         many = "<node>" + "".join(f'<node name="CompositeDevice{i}"/>' for i in range(40)) + "</node>"
         self.assertEqual(len(composite_nodes(many)), inputplumber.MAX_COMPOSITES)
+
+
+    def test_a_name_that_only_begins_like_a_composite_is_not_listed(self):
+        document = ('<node><node name="CompositeDevice3&#10;"/><node name="CompositeDevice\u0663"/>'
+                    '<node name="CompositeDevice4"/></node>')
+        self.assertEqual(composite_nodes(document), ["CompositeDevice4"])
 
 
 class ReadOnlyContractTest(unittest.TestCase):
@@ -297,7 +304,8 @@ class ClientLogicTest(unittest.TestCase):
 
     def test_exceptions_in_callbacks_never_escape_and_do_not_wedge_the_client(self):
         self.appear()
-        self.bus.answer(self.bus.pending()[0], SimpleNamespace(unpack=lambda: 1 / 0))  # a reply nobody expected
+        unexpected = SimpleNamespace(get_size=lambda: 0, unpack=lambda: 1 / 0)         # a reply nobody expected
+        self.bus.answer(self.bus.pending()[0], unexpected)
         self.assertIn("ZeroDivisionError", self.client.error)
         self.assertTrue(self.client.settled and self.client.idle)
         self.client.on_change = lambda: 1 / 0                                          # a failing consumer
@@ -306,6 +314,76 @@ class ClientLogicTest(unittest.TestCase):
         self.assertEqual(len(self.client.composites), 1)
         self.assertIsNone(self.client.error)
         self.assertIn("change handler failed", self.client.status()["error"])
+
+    def test_a_trailing_newline_does_not_pass_for_a_valid_value(self):
+        self.appear()
+        pad, other = f"{ROOT}/devices/target/gamepad0", f"{ROOT}/devices/target/gamepad1"
+        properties = composite_properties(sources=("/dev/input/event6\n", "/dev/input/event7"))
+        properties["TargetDevices"] = GLib.Variant("as", [pad + "\n", other])
+        self.bus.answer_all(composites={f"{ROOT}/CompositeDevice0": properties}, kinds={other: "xbox-elite\n"})
+        self.assertEqual([call.path for call in self.bus.calls if call.method == "GetAll"],
+                         [f"{ROOT}/CompositeDevice0", other])
+        composite, = self.client.composites
+        self.assertEqual((composite.targets, composite.event_nodes), ((), frozenset({"/dev/input/event7"})))
+        self.assertIsNone(self.client.error)
+
+    def test_a_call_that_cannot_be_sent_fails_the_discovery_instead_of_stalling_it(self):
+        # Gio drops a call with a malformed object path without ever answering it.
+        self.appear()
+        self.settle()
+        picture, bad = self.client.composites, f"{ROOT}/devices/target/gamepad0\n"
+        properties = composite_properties()
+        properties["TargetDevices"] = GLib.Variant("as", [bad])
+        with mock.patch.object(inputplumber, "_target_paths", lambda value: list(value or ())):
+            self.client.hint()
+            self.fire()
+            self.bus.answer_all(composites={f"{ROOT}/CompositeDevice0": properties})
+        self.assertNotIn(bad, [call.path for call in self.bus.calls])
+        self.assertIsNone(self.client._discovery)
+        self.assertIn("object path", self.client.error)
+        self.assertEqual((self.client.composites, list(self.timers.values()) != []), (picture, True))
+        self.settle()
+        self.assertIsNone(self.client.error)
+
+        def refuse(*_arguments):
+            raise TypeError("the connection refused the call")
+        with mock.patch.object(self.bus, "call", refuse):
+            self.client.hint()
+            self.fire()
+        self.assertIsNone(self.client._discovery)
+        self.assertIn("refused the call", self.client.error)
+        self.assertEqual(self.client.composites, picture)
+        self.settle()
+        self.assertIsNone(self.client.error)
+
+    def test_oversized_replies_are_refused_before_they_are_unpacked(self):
+        def oversized(limit):
+            return SimpleNamespace(get_size=lambda: limit + 1,
+                                   unpack=lambda: self.fail("an oversized reply was unpacked"))
+
+        version = GLib.Variant("(v)", (GLib.Variant("s", "0.82.0"),))
+        self.appear()
+        self.settle()
+        picture = self.client.composites
+        self.client.hint()
+        self.fire()
+        root, manager = self.bus.pending()
+        # The root describes the whole object tree, 437 KiB on a ROG Xbox Ally: it has a bound of its own.
+        tree = "".join(f'<node name="event{index}"><interface name="{"x" * 480}"/></node>' for index in range(900))
+        document = GLib.Variant("(s)", (f'<node>{tree}<node name="CompositeDevice0"/></node>',))
+        self.assertGreater(document.get_size(), 440 * 1024)
+        self.bus.answer(root, document)
+        self.bus.answer(manager, version)
+        composite, = self.bus.pending()
+        self.bus.answer(composite, oversized(inputplumber.MAX_REPLY_BYTES))
+        self.assertIn("too large", self.client.error)
+        self.assertEqual(self.client.composites, picture)
+        self.fire()                                        # the retry
+        root, manager = self.bus.pending()
+        self.bus.answer(root, oversized(inputplumber.MAX_XML_BYTES))
+        self.bus.answer(manager, version)
+        self.assertIn("too large", self.client.error)
+        self.assertEqual(self.client.composites, picture)
 
     def test_the_call_helper_refuses_everything_but_reads(self):
         self.appear()
@@ -559,10 +637,10 @@ class ClientBusTest(unittest.TestCase):
         properties["Name"] = GLib.Variant("s", "Evil\x1b[31m\nPad " + "x" * 300)
         properties["ProfileName"] = GLib.Variant("u", 7)
         properties["TargetDevices"] = GLib.Variant(
-            "as", ["/evil", f"{ROOT}/devices/target/../../Manager", pad, second])
+            "as", ["/evil", f"{ROOT}/devices/target/../../Manager", f"{pad}\n", pad, second])
         properties["DbusDevices"] = GLib.Variant("s", "not a list")
         properties["SourceDevicePaths"] = GLib.Variant(
-            "as", ["/dev/input/event6", "/dev/input/../sda", "/etc/passwd", "/dev/hidraw2"])
+            "as", ["/dev/input/event6", "/dev/input/event7\n", "/dev/input/../sda", "/etc/passwd", "/dev/hidraw2"])
         fake.target(second)["DeviceType"] = GLib.Variant("s", "Xbox Elite; rm -rf")
         client = self.client()
         self.settle(client)
@@ -570,9 +648,29 @@ class ClientBusTest(unittest.TestCase):
         self.assertEqual(composite.name, ("Evil[31mPad " + "x" * 300)[:inputplumber.MAX_TEXT])
         self.assertEqual((composite.profile, composite.targets, composite.dbus_targets), ("", ("xbox-elite",), 0))
         self.assertEqual((composite.event_nodes, composite.sources, composite.hidraw_sources),
-                         (frozenset({"/dev/input/event6"}), 4, True))
+                         (frozenset({"/dev/input/event6"}), 5, True))
         asked = {call[1] for call in fake.calls if call[3] == "GetAll" and call[4] == (TARGET_IFACE,)}
         self.assertEqual(asked, {pad, second})
+
+    def test_real_replies_fit_the_bounds_and_an_oversized_one_is_refused(self):
+        fake = self.fake()
+        path = f"{ROOT}/CompositeDevice0"
+        # Measured on a ROG Xbox Ally: the root answers with 437 KiB, a composite with 7 KiB.
+        tree = "".join(f'<node name="event{index}"><interface name="org.example.{"x" * 470}"/></node>'
+                       for index in range(900))
+        fake.root_document = f'<node>{tree}<node name="CompositeDevice0"/></node>'
+        self.assertGreater(len(fake.root_document), 440 * 1024)
+        client = self.client()
+        self.settle(client)
+        self.assertIsNone(client.error)
+        picture = client.composites
+        self.assertEqual([composite.name for composite in picture], ["ASUS ROG Xbox Ally"])
+        fake.composite(path)["Name"] = GLib.Variant("s", "x" * inputplumber.MAX_REPLY_BYTES)
+        client.hint()
+        self.assertTrue(pump(lambda: client.error))
+        self.assertIn("too large", client.error)
+        self.assertTrue(pump(lambda: client.idle))
+        self.assertEqual(client.composites, picture)
 
     def test_unrecognized_gamepad_target_is_reported_not_guessed(self):
         self.fake(targets=("deck-uhid", "mouse"))
