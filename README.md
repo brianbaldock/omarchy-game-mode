@@ -72,6 +72,109 @@ needs read access to `/dev/input/event*` (usually the `input` group, or a uacces
 If access is denied, Game Mode says so on screen and keeps working with keyboard and
 touch.
 
+### ASUS ROG Xbox Ally controller layout
+
+On the ASUS ROG Xbox Ally (RC73YA) with a kernel that lacks ASUS's Ally HID driver, the
+generic HID driver reads the built-in controller, `ASUSTeK Computer Inc. N-KEY Device`
+(`0b05:1b4c`). Its descriptor declares 14 buttons in XInput order, and that driver gives
+them the codes `BTN_SOUTH` (304) to `BTN_THUMBL` (317) by position. From X on, each
+button then arrives under the code of another one, and none as the right stick click
+`BTN_THUMBR`:
+
+| Button | Arrives as | Xbox controller code |
+| --- | --- | --- |
+| A, B | `BTN_SOUTH`, `BTN_EAST` | the same |
+| X, Y | `BTN_C`, `BTN_NORTH` | `BTN_NORTH`, `BTN_WEST` |
+| LB, RB | `BTN_WEST`, `BTN_Z` | `BTN_TL`, `BTN_TR` |
+| View, Menu | `BTN_TL`, `BTN_TR` | `BTN_SELECT`, `BTN_START` |
+| L3, R3 | `BTN_TL2`, `BTN_TR2` | `BTN_THUMBL`, `BTN_THUMBR` |
+| Xbox | `BTN_SELECT` | `BTN_MODE` |
+| Three buttons of unknown meaning | `BTN_START`, `BTN_MODE`, `BTN_THUMBL` | none |
+
+The last column holds the codes the kernel's Xbox controller driver reports, which Game
+Mode expects. The table is derived from two independent projects plus one observation,
+not yet confirmed by a physical press test: Handheld Daemon's Ally X button map and
+InputPlumber's former Ally X fallback map, both for this USB id, and the Xbox button seen
+as `BTN_SELECT` on an RC73YA (see [Limitations](#limitations)).
+
+**How Game Mode compensates.** When Game Mode reads this pad itself, without
+InputPlumber, it translates every button through the table before acting on it, for its
+own menus only: LB/RB switch pages, Menu opens Settings, holding View + Menu shows Game
+Mode, the Xbox button counts as Guide and is left alone, and the three unknown buttons
+are ignored. Nothing changes on the device or in the kernel: Steam, browsers, Moonlight,
+games and AntiMicroX keep reading the middle column. The translation applies only to a
+pad that has that name and USB id, the 14 button codes of the middle column but no
+`BTN_THUMBR`, and sticks and a D-pad. A pad whose codes were corrected, by the udev entry
+below or by a kernel driver, has `BTN_THUMBR` and is read as it is. Game Mode also
+notices a correction made while it runs, at the pad's next input, which it drops while it
+reads the pad's state again. udev applies the entry's twelve lines one after another, so
+a press in the instant that happens can still be misread once; a restart is the
+cleanest. InputPlumber's virtual
+gamepad is never translated. `omarchy-game-mode status` shows
+`"quirk": "xinput-order-hid"` for a translated device under `controllers`, and `null`
+for the others. To read every controller exactly as the kernel reports it, quit Game
+Mode and start it with `GAMEMODE_NO_BUTTON_QUIRKS=1`, for example
+`GAMEMODE_NO_BUTTON_QUIRKS=1 omarchy-game-mode show`.
+
+**System-wide fix (optional, as root).** For every program to get the Xbox controller
+codes, a udev hwdb entry can have the kernel report them. Game Mode ships it as
+`contrib/udev/61-rog-xbox-ally-gamepad.hwdb`, installed to
+`/usr/share/omarchy-game-mode/contrib/udev/` (or under your `PREFIX`), and never copies
+it into the system or applies it. It matches only the controller's gamepad interface on
+RC73YA and RC73XA (Xbox Ally X) boards, follows the table above and puts the three
+unknown buttons on `BTN_TRIGGER_HAPPY1` to `3`, where they cannot pass for a standard
+button. To apply it, install the file and update the database, then reboot:
+
+```bash
+sudo install -Dm644 /usr/share/omarchy-game-mode/contrib/udev/61-rog-xbox-ally-gamepad.hwdb /etc/udev/hwdb.d/61-rog-xbox-ally-gamepad.hwdb
+sudo systemd-hwdb update
+```
+
+The entry takes effect when the controller is set up, which for a built-in one means at
+the next boot, and every program then starts with the new codes. Applying it to the
+running controller instead is an advanced option, safe only with every button released:
+the kernel moves the codes one button at a time, and a button held meanwhile can stay
+down under its old code. A held Xbox button, for example, stays down as View
+(`BTN_SELECT`) until View is pressed and released, so Menu alone looks like View + Menu
+to every program. If you take that route, run
+`sudo udevadm trigger --action=change --subsystem-match=input` after the two commands,
+with no button held, then restart Steam and AntiMicroX, which had the pad open.
+InputPlumber, when it runs, reads the corrected codes too; that combination is untested.
+
+To undo, remove the file, update the database and reboot. The kernel keeps the codes it
+was given until the pad is created again, so the original codes return after the reboot:
+
+```bash
+sudo rm /etc/udev/hwdb.d/61-rog-xbox-ally-gamepad.hwdb
+sudo systemd-hwdb update
+```
+
+Remove the entry as well once your kernel has ASUS's Ally HID driver.
+
+How far this has been checked:
+
+- **Verified by automated tests:** the fingerprint, and that another vendor, product or
+  name, a pad with `BTN_THUMBR`, `GAMEMODE_NO_BUTTON_QUIRKS=1` and InputPlumber's
+  virtual gamepad each leave a pad untranslated; every translation, for presses and for
+  buttons held when the pad is opened; that the three unknown buttons are dropped; that
+  the Xbox button no longer counts as View and View + Menu forms the Home hold; that an
+  open pad's codes are judged on the open device before each batch of input, so that a
+  correction is noticed before udev reports anything, input read or queued across it is
+  dropped rather than misread, also around dropped events, and a node name that already
+  belongs to another device changes nothing for the pad still open; that the hwdb entry
+  and Game Mode's table agree.
+- **Verified live on an ASUS ROG Xbox Ally (RC73YA), without physical input:** the
+  fingerprint matches the built-in pad's capabilities as the kernel reports them in
+  sysfs, and does not match InputPlumber's virtual gamepad. The hwdb entry compiles with
+  `systemd-hwdb` in a scratch root, where this machine's lookup key for the gamepad
+  interface returns its 12 entries and the keys of the other N-KEY interfaces return
+  none; it was not installed. No button was pressed.
+- **Pending physical validation:** whether each physical button delivers the code in the
+  table, and with it Game Mode's navigation on the raw pad and the hwdb entry; how Steam,
+  SDL games and browsers handle the pad with the entry applied; applying it without a
+  reboot; anything on the Xbox Ally X. The guided `doctor buttons` test, once available,
+  is how to confirm the table on a real unit.
+
 ## Controller modes
 
 Settings → Controller mode:
@@ -288,7 +391,9 @@ them gone. Game Mode never edits AntiMicroX profiles or any other app's configur
     fits the reading above. The table would explain scrambled SDL and Steam mappings
     for this pad, but no guided physical test on an RC73YA has confirmed it: which
     code each physical press delivers, and with it the View + Menu chord, is
-    unverified there.
+    unverified there. Game Mode's translation of the raw pad and the optional udev
+    entry rest on that table; see
+    [ASUS ROG Xbox Ally controller layout](#asus-rog-xbox-ally-controller-layout).
 - Recognizing InputPlumber's virtual gamepad stays a heuristic, because InputPlumber does
   not say which event node is its own. If another program creates a virtual pad with the
   same name and IDs while InputPlumber announces one that does not exist, Game Mode
