@@ -1,0 +1,42 @@
+# ASUS ROG Xbox Ally (RC73YA) and Xbox Ally X (RC73XA): the built-in gamepad on
+# a kernel without ASUS's Ally HID driver, where the generic HID driver reads it.
+#
+# The pad declares 14 buttons in XInput order (A B X Y LB RB View Menu L3 R3
+# Xbox, then three of unknown meaning), and hid-input gives HID button N the
+# code BTN_GAMEPAD+N-1, so from X on each button arrives under the code of
+# another one (View as BTN_TL, R3 as BTN_TR2, the Xbox button as BTN_SELECT,
+# ...). This entry has the kernel report the codes of an Xbox controller
+# instead, to every program that reads the pad, and parks the three unknown
+# buttons on BTN_TRIGGER_HAPPY1..3 so they cannot pass for a standard button.
+#
+# The order is derived from two independent projects plus one observation, not
+# yet confirmed by a physical press test: Handheld Daemon's Ally X button map
+# and InputPlumber's former Ally X fallback map (both for USB id 0b05:1b4c),
+# and the Xbox button seen as BTN_SELECT on an RC73YA.
+#
+# Scancode = HID usage (page 0x09, button N). The match is limited to the
+# gamepad interface (input5, EV bitmap 1b) on these two boards. Omarchy Game
+# Mode never installs it; as root:
+#   install -Dm644 61-rog-xbox-ally-gamepad.hwdb /etc/udev/hwdb.d/61-rog-xbox-ally-gamepad.hwdb
+#   systemd-hwdb update
+# then reboot, so that the pad is set up with it. Applying it to the running
+# pad (udevadm trigger --action=change --subsystem-match=input) is only safe
+# with every button released: the codes move one button at a time, and a
+# button held meanwhile can stay down under its old code (a held Xbox button
+# stays down as View until View is pressed and released).
+# To undo, remove that file, run systemd-hwdb update and reboot: the kernel
+# keeps the codes it was given until the pad is created again. Remove it as
+# well once the kernel has ASUS's Ally HID driver.
+evdev:name:ASUSTeK Computer Inc. N-KEY Device:phys:*/input5:ev:1b:dmi:*:rnRC73[XY]A:*
+ KEYBOARD_KEY_90003=btn_north
+ KEYBOARD_KEY_90004=btn_west
+ KEYBOARD_KEY_90005=btn_tl
+ KEYBOARD_KEY_90006=btn_tr
+ KEYBOARD_KEY_90007=btn_select
+ KEYBOARD_KEY_90008=btn_start
+ KEYBOARD_KEY_90009=btn_thumbl
+ KEYBOARD_KEY_9000a=btn_thumbr
+ KEYBOARD_KEY_9000b=btn_mode
+ KEYBOARD_KEY_9000c=btn_trigger_happy1
+ KEYBOARD_KEY_9000d=btn_trigger_happy2
+ KEYBOARD_KEY_9000e=btn_trigger_happy3
