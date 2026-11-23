@@ -1,8 +1,10 @@
 """evdev code names and read-only device enumeration from sysfs, shared by the input checks.
 
 Nothing here opens a device node. Capabilities, names and bus ids come from
-/sys/class/input; the `uniq` and `phys` attributes (serial numbers, Bluetooth and
-USB addresses) are never read.
+/sys/class/input. The `uniq` and `phys` attributes and the HID `uevent` file (serial
+numbers, Bluetooth and USB addresses) are never read: a raw HID interface is
+identified from its sysfs path alone. A device name is free text chosen by firmware
+or by whoever paired the device, so it is scrubbed the moment it is read.
 """
 
 from __future__ import annotations
@@ -25,6 +27,9 @@ ABS_GAS, ABS_BRAKE, ABS_HAT0X, ABS_HAT0Y, ABS_HAT2X, ABS_HAT2Y = 0x09, 0x0A, 0x1
 BUS_NAMES = {0x03: "USB", 0x05: "Bluetooth", 0x06: "virtual", 0x18: "I2C", 0x19: "built-in"}
 BUS_VIRTUAL = 0x06
 LONG_BITS = struct.calcsize("l") * 8
+NAME_LIMIT = 80
+# A HID device directory: bus, vendor, product and instance, as in `0003:0B05:1B4C.0006`.
+HID_DEVICE = re.compile(r"[0-9A-Fa-f]{4}:([0-9A-Fa-f]{4,8}):([0-9A-Fa-f]{4,8})\.[0-9A-Fa-f]{4}")
 
 # Values from linux/input-event-codes.h. Gamepad buttons, the keyboard keys handheld
 # buttons are commonly wired to, and every function/programmable key in between.
@@ -173,6 +178,17 @@ def _hex(text: str) -> int:
         return 0
 
 
+def device_label(ctx: Context, text: str, fallback: str = "") -> str:
+    """A device name fit to print: printable ASCII, bounded, and already scrubbed.
+
+    Names can carry a serial number, a Bluetooth address or the owner's name, so nothing
+    downstream (verdicts, prompts, the SDL mapping line) ever sees the raw text.
+    """
+    cleaned = " ".join(re.sub(r"[^\x20-\x7e]", "?", text).split())
+    # Scrub first, then shorten: cut first, a serial number could lose the digits that mark it as one.
+    return ctx.redactor.text(cleaned)[:NAME_LIMIT] or fallback
+
+
 def input_devices(ctx: Context) -> list[InputDevice]:
     """Every evdev device, in event-number order."""
     devices = []
@@ -180,7 +196,7 @@ def input_devices(ctx: Context) -> list[InputDevice]:
     for node in sorted(nodes, key=lambda name: int(name[5:])):
         base = f"/sys/class/input/{node}/device"
         bus = _hex(ctx.fs.line(f"{base}/id/bustype"))
-        name = re.sub(r"[^\x20-\x7e]", "?", ctx.fs.line(f"{base}/name"))[:80] or node
+        name = device_label(ctx, ctx.fs.line(f"{base}/name"), node)
         vendor, product = (_hex(ctx.fs.line(f"{base}/id/{field}")) for field in ("vendor", "product"))
         devices.append(InputDevice(
             node=node, name=name, bus=BUS_NAMES.get(bus, f"bus 0x{bus:02x}"),
@@ -196,7 +212,7 @@ def hid_parent(ctx: Context, sysfs_device: str) -> str:
     """Path of the HID device (`0003:0B05:1B4C.0006`) above a sysfs node, or empty."""
     parts = ctx.fs.resolved(sysfs_device).split("/")
     for index, part in enumerate(parts):
-        if re.fullmatch(r"[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}", part):
+        if HID_DEVICE.fullmatch(part):
             return "/".join(parts[:index + 1])
     return ""
 
@@ -210,7 +226,6 @@ class HidrawNode:
     node: str
     vendor: int
     product: int
-    name: str
     interface: int | None
     mode: int | None
     access: str
@@ -221,16 +236,20 @@ class HidrawNode:
 
 
 def hidraw_nodes(ctx: Context) -> list[HidrawNode]:
-    """Raw HID interfaces with their USB interface number and node permissions. Nothing is opened."""
+    """Raw HID interfaces with their USB interface number and node permissions. Nothing is opened.
+
+    Vendor and product come from the name of the HID device directory, so the `uevent`
+    file next to it, which also holds the device's serial number, is not read.
+    """
     found = []
     names = [name for name in ctx.fs.listdir("/sys/class/hidraw") if re.fullmatch(r"hidraw\d+", name)]
     for name in sorted(names, key=lambda node: int(node[6:])):
-        base = f"/sys/class/hidraw/{name}/device"
-        uevent = dict(line.split("=", 1) for line in (ctx.fs.read(f"{base}/uevent") or "").splitlines() if "=" in line)
-        identity = uevent.get("HID_ID", "").split(":")
-        if len(identity) != 3:
+        device = hid_parent(ctx, f"/sys/class/hidraw/{name}/device")
+        directory, _slash, identity = device.rpartition("/")
+        match = HID_DEVICE.fullmatch(identity)
+        if match is None:
             continue
-        number = ctx.fs.line(ctx.fs.resolved(base).rsplit("/", 1)[0] + "/bInterfaceNumber")
+        number = ctx.fs.line(f"{directory}/bInterfaceNumber")
         mode = ctx.fs.mode(f"/dev/{name}")
         if mode is None:
             access = "missing"
@@ -238,7 +257,6 @@ def hidraw_nodes(ctx: Context) -> list[HidrawNode]:
             access = "hidden"
         else:
             access = "readable" if ctx.fs.readable(f"/dev/{name}") else "no-permission"
-        found.append(HidrawNode(name, _hex(identity[1]), _hex(identity[2]),
-                                re.sub(r"[^\x20-\x7e]", "?", uevent.get("HID_NAME", ""))[:80],
-                                _hex(number) if number else None, None if mode is None else mode & 0o777, access))
+        found.append(HidrawNode(name, _hex(match.group(1)), _hex(match.group(2)), _hex(number) if number else None,
+                                None if mode is None else mode & 0o777, access))
     return found

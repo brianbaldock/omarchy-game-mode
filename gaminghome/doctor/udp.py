@@ -179,10 +179,11 @@ def check_turn_challenge(ctx: Context) -> Outcome:
             if second is None:
                 return warn("Microsoft's relay answered and pointed to a regional relay, but that one did not "
                             "answer on UDP 3478.", UDP_BLOCKED_FIX, answered=True, redirected=True,
-                            rtt_ms=reply.rtt_ms, error_code=300, realm=stun.realm(reply.message))
+                            rtt_ms=reply.rtt_ms, error_code=300, challenge=bool(stun.realm(reply.message)))
             reply, error = second, stun.error_code(second.message)
+        # Whether the answer carries a realm is a fact about the relay; the realm text itself is never reported.
         evidence = dict(answered=True, redirected=redirected, rtt_ms=reply.rtt_ms,
-                        error_code=error[0] if error else None, realm=stun.realm(reply.message))
+                        error_code=error[0] if error else None, challenge=bool(stun.realm(reply.message)))
         via = "regional relay (after the expected redirect)" if redirected else "relay"
         if error and error[0] == 401:
             return ok(f"Microsoft's {via} answered the unauthenticated TURN request with the expected 401 "

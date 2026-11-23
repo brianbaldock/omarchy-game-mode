@@ -168,7 +168,8 @@ def run_command(argv: Sequence[str], timeout: float = 5.0, *, env: Mapping[str, 
     except FileNotFoundError:
         return CommandResult(argv, error="not-found")
     except OSError as exc:
-        return CommandResult(argv, error=f"os-error: {exc.strerror or type(exc).__name__}")
+        reason = os.strerror(exc.errno).lower() if exc.errno else type(exc).__name__
+        return CommandResult(argv, error=f"os-error: {reason}")
     try:
         out, err, timed_out = _drain(proc, deadline, limit)
     finally:
@@ -240,3 +241,11 @@ class Context:
         """Register a value (SSID, search domain) that must never reach the output."""
         if value:
             self.redactor.add_secret(value)
+
+    def trust(self, value: str) -> str:
+        """Vouch for a model name or version so its long tokens are not masked as serial numbers.
+
+        Only for values that describe a product, never a unit or a person: see `Redactor.trust`.
+        """
+        self.redactor.trust(value)
+        return value

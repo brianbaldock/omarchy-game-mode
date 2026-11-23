@@ -6,6 +6,9 @@ receiving the same events, the Guide button included. Raw HID reads (`--raw`) ar
 the same: read-only, and skipped without a word when the node is not readable.
 Everything that was opened is closed, and the terminal mode restored, on exit and
 on Ctrl-C.
+
+Everything this command prints, prompts included, goes through the redactor: a
+controller's name is free text and can hold a serial number or an address.
 """
 
 from __future__ import annotations
@@ -45,6 +48,25 @@ UNREADABLE = {"hidden": "an input daemon hides it (mode 000)",
               "missing": "it has no device node"}
 NOT_A_TERMINAL = ("omarchy-game-mode doctor buttons is interactive: run it in a terminal. With --json or --markdown "
                   "the prompts go to stderr, so the report itself can be redirected.\n")
+
+
+class Scrubbed:
+    """A text stream whose every write is scrubbed first, so no prompt bypasses the redactor."""
+
+    def __init__(self, stream: IO[str], scrub: Callable[[str], str]):
+        self._stream, self._scrub = stream, scrub
+
+    def write(self, text: str) -> int:
+        return self._stream.write(self._scrub(text))
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+
+def _reason(exc: BaseException) -> str:
+    """Why a device could not be opened, from the error number alone: the message would name paths."""
+    number = exc.errno if isinstance(exc, OSError) else next(iter(exc.args), None)
+    return os.strerror(number).lower() if isinstance(number, int) and number > 0 else type(exc).__name__
 
 
 def _ioc_read(number: int, size: int) -> int:
@@ -298,6 +320,8 @@ def build_report(ctx: Context, selection: Selection, results: Sequence[ControlRe
     found = buttons.verdicts(results, selection.watched, selection.primary)
     mapping: dict[str, Any] = {"device": "", "line": "", "missing": []}
     if selection.primary is not None:
+        # The GUID is built from the bus, vendor, product and version numbers: it names a model, not a unit.
+        ctx.trust(buttons.sdl_guid(selection.primary))
         line, missing = buttons.sdl_mapping(results, selection.primary, selection.watched.index(selection.primary))
         mapping = {"device": selection.primary.node, "line": line, "missing": missing}
     sections = {"devices": buttons.device_rows(selection.candidates, selection.watched),
@@ -460,6 +484,7 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str], *, ctx: Context 
         stderr.write(NOT_A_TERMINAL)
         return EXIT_USAGE
     ctx = ctx or Context(Options(scope="input"), redactor=system_redactor())
+    prompts, stderr = Scrubbed(prompts, ctx.redactor.text), Scrubbed(stderr, ctx.redactor.text)
     try:
         selection = select_devices(ctx, args.device)
     except ValueError as exc:
@@ -485,7 +510,7 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str], *, ctx: Context 
         source = (source_factory(selection, raw_node) if source_factory
                   else LiveSource(selection.watched, raw_node.path if raw_node else "", stdin.fileno()))
     except (OSError, termios.error) as exc:
-        stderr.write(f"omarchy-game-mode doctor buttons: could not open the controller for reading: {exc}\n")
+        stderr.write(f"omarchy-game-mode doctor buttons: could not open the controller for reading: {_reason(exc)}\n")
         return 1
     try:
         tracker = buttons.Tracker(source.keys_down(), source.axes())

@@ -1,7 +1,8 @@
 """Device model identification from DMI, and the handhelds the doctor has advice for.
 
 Only model identifiers are read. The serial numbers and UUIDs that live in the same
-sysfs directory are never opened.
+sysfs directory are never opened. A board name or BIOS version (`N3CN29WW`) names a
+product, not a unit, so those values are vouched for and stay readable in a report.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ def dmi(ctx: Context) -> dict[str, str]:
         values = {}
         for name in DMI_FIELDS:
             value = ctx.fs.line(f"{DMI}/{name}")[:80]
-            values[name] = "" if any(word in value.lower() for word in PLACEHOLDERS) else value
+            values[name] = "" if any(word in value.lower() for word in PLACEHOLDERS) else ctx.trust(value)
         return values
     return ctx.once("dmi", read)
 

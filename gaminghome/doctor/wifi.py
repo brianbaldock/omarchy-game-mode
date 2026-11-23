@@ -14,7 +14,7 @@ from typing import Any
 
 from .context import Context
 from .model import Outcome, ok, skip, warn
-from .net import INTERFACE_NAME, default_routes, display_interface
+from .net import INTERFACE_NAME, default_routes, shown_interface
 
 # Radar-shared 5 GHz spectrum (U-NII-2A and U-NII-2C) under FCC and ETSI rules. The
 # regulatory domain has the last word; this is the common case, stated as a heuristic.
@@ -191,7 +191,7 @@ def check_wifi_link(ctx: Context) -> Outcome:
     width = info.get("width_mhz") or link.width_mhz or 20
     band = band_for(frequency)
     dfs = uses_dfs(frequency, width, info.get("center_mhz"))
-    evidence = dict(interface=display_interface(state["interface"]), band=band, frequency_mhz=frequency,
+    evidence = dict(interface=shown_interface(ctx, state["interface"]), band=band, frequency_mhz=frequency,
                     channel=info.get("channel") or channel_for(frequency), width_mhz=width, dfs=dfs,
                     signal_dbm=link.signal_dbm, rx_mbps=link.rx_mbps, tx_mbps=link.tx_mbps, generation=link.generation)
     if evidence["generation"] == "Wi-Fi 6" and band == "6 GHz":
@@ -223,7 +223,7 @@ def check_wifi_powersave(ctx: Context) -> Outcome:
     state = wifi_state(ctx)
     if "skip" in state:
         return _skipped(state)
-    interface = display_interface(state["interface"])
+    interface = shown_interface(ctx, state["interface"])
     if state["power_save"] is None:
         return skip("`iw` did not report the Wi-Fi power-save state.", interface=interface)
     if state["power_save"]:

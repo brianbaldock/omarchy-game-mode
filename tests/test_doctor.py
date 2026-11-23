@@ -41,6 +41,22 @@ CANARY_LAN_IP = "192.168.77.23"
 CANARY_SERIAL = "SN-CANARY-0042"
 CANARIES = (CANARY_SSID, CANARY_BSSID, CANARY_MAC, CANARY_HOST, CANARY_DOMAIN, CANARY_USER, CANARY_PUBLIC_IP,
             CANARY_PUBLIC_IP6, CANARY_LAN_IP, CANARY_SERIAL)
+# Values that no list of field names can catch: they sit inside otherwise harmless strings.
+CANARY_PAD_SERIAL = "SN7Q4X9ZCANARY21"
+CANARY_DOTTED_MAC = "02.aa.bb.cc.dd.01"
+CANARY_CISCO_MAC = "02aa.bbcc.dd02"
+CANARY_BARE_MAC = "02AABBCCDD03"
+CANARY_ZONE = "canaryzone0"
+CANARY_QUERY = "CanaryConsoleQ7"
+CANARY_FRAGMENT = "canaryfragment"
+CANARY_SUFFIX = "canary-private-dir"
+CANARY_REALM = "canary-tenant.example"
+CANARY_UUID = "0b1c2d3e-4f50-4a61-8b72-c0ffee0dcafe"
+VALUE_CANARIES = (CANARY_PAD_SERIAL, CANARY_DOTTED_MAC, CANARY_CISCO_MAC, CANARY_BARE_MAC, CANARY_ZONE, CANARY_QUERY,
+                  CANARY_FRAGMENT, CANARY_SUFFIX, CANARY_REALM, CANARY_UUID)
+ROGUE_PAD_NAME = f"Pad {CANARY_PAD_SERIAL} {CANARY_DOTTED_MAC} fe80::c0de:1%{CANARY_ZONE}"
+ROGUE_URL = (f"https://{CANARY_USER}:pw@xbox.example/play?console={CANARY_QUERY}&gamertag={CANARY_QUERY}"
+             f"#server={CANARY_FRAGMENT}")
 
 
 def canary_redactor(**kw):
@@ -144,6 +160,21 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(model.CheckResult("a", "A", Status.PASS).root(), {"required": False})
         json.dumps(document)
 
+    def test_every_string_of_a_report_goes_through_the_scrubber(self):
+        check = model.CheckResult(*(f"{CANARY_PAD_SERIAL}-{field}" for field in ("id", "title")), Status.WARN,
+                                  *(f"{CANARY_PAD_SERIAL}-{field}" for field in ("detail", "category", "proves",
+                                                                                 "not", "fix")),
+                                  {"rows": [CANARY_PAD_SERIAL]}, f"sudo {CANARY_PAD_SERIAL}")
+        report = model.Report(CANARY_PAD_SERIAL, [check], {"os": CANARY_PAD_SERIAL}, {"p": CANARY_PAD_SERIAL},
+                              {"devices": [{"name": CANARY_PAD_SERIAL}]}, CANARY_PAD_SERIAL, CANARY_PAD_SERIAL,
+                              CANARY_PAD_SERIAL, mode=CANARY_PAD_SERIAL)
+
+        def scrub(value):
+            return json.loads(json.dumps(value).replace(CANARY_PAD_SERIAL, "<id>"))
+        safe = report.transformed(lambda text: text.replace(CANARY_PAD_SERIAL, "<id>"), scrub)
+        self.assertIn(CANARY_PAD_SERIAL, json.dumps(report.to_dict()))
+        self.assertNotIn(CANARY_PAD_SERIAL, json.dumps(safe.to_dict()))
+
     def test_needs_root_never_claims_a_result(self):
         outcome = model.needs_root("sudo ufw status numbered verbose")
         self.assertEqual(outcome.status, Status.SKIP)
@@ -165,7 +196,7 @@ class RedactionTest(unittest.TestCase):
         self.assertEqual(self.r.text(f"gw 192.168.77.1 me {CANARY_LAN_IP}/24 other 10.1.2.3, cgnat 100.64.3.4."),
                          "gw 192.168.x.x me 192.168.x.x/24 other 10.1.x.x, cgnat 100.64.x.x.")
         self.assertEqual(self.r.text("fe80::1c2:3ff:fe04:5%wlan0 fd10:b638::5 ::1 ::"),
-                         "<lan-ipv6>%wlan0 <lan-ipv6> ::1 ::")
+                         "<lan-ipv6> <lan-ipv6> ::1 ::")
         keep = "127.0.0.53 0.0.0.0 255.255.255.255 239.255.255.250"
         self.assertEqual(self.r.text(keep), keep)
 
@@ -181,13 +212,13 @@ class RedactionTest(unittest.TestCase):
     def test_mac_home_user_host_and_registered_secrets_never_survive(self):
         self.r.add_secret(CANARY_SSID)
         self.r.add_secret(CANARY_DOMAIN)
-        text = self.r.text(f"Connected to {CANARY_BSSID} SSID: {CANARY_SSID} on {CANARY_HOST} as {CANARY_USER} "
-                           f"{CANARY_HOME}/.config/x /home/someoneelse/y search {CANARY_DOMAIN} "
-                           f"{CANARY_MAC.upper().replace(':', '-')}")
-        for canary in CANARIES + ("someoneelse",):
+        text = self.r.text(f"Connected to {CANARY_BSSID} ({CANARY_SSID}) on {CANARY_HOST} as {CANARY_USER}, search "
+                           f"{CANARY_DOMAIN} {CANARY_MAC.upper().replace(':', '-')}\n{CANARY_HOME}/.config/x\n"
+                           "/home/someoneelse/y")
+        for canary in CANARIES + ("someoneelse", ".config"):
             self.assertNotIn(canary, text)
-        self.assertIn("~/.config/x", text)
-        self.assertIn("<mac>", text)
+        self.assertEqual(text, "Connected to <mac> (<redacted>) on <host> as <user>, search <redacted> <mac>\n"
+                               "<home-path>\n<home-path>")
 
     def test_identity_is_hidden_even_when_addresses_are_shown(self):
         r = canary_redactor(mask_addresses=False)
@@ -220,7 +251,7 @@ class RedactionTest(unittest.TestCase):
         r = redact.Redactor(home="/home/user", user="user", host="omarchy")
         r.add_secret("home")
         self.assertEqual(r.text("omarchy pkg add: ask the user at home; /home/user/.config"),
-                         "omarchy pkg add: ask the user at home; ~/.config")
+                         "omarchy pkg add: ask the user at home; <home-path>")
 
     def test_redaction_is_idempotent(self):
         self.r.add_secret(CANARY_SSID)
@@ -231,6 +262,123 @@ class RedactionTest(unittest.TestCase):
     def test_a_redaction_bug_cannot_leak_the_value(self):
         self.r._text = lambda _value: 1 / 0
         self.assertEqual(self.r.text(f"secret {CANARY_PUBLIC_IP}"), redact.UNCLASSIFIED)
+
+
+class ValueScrubTest(unittest.TestCase):
+    """Rules about what a value looks like, whatever field it arrived in."""
+
+    def setUp(self):
+        self.r = canary_redactor()
+
+    def test_mac_addresses_are_masked_in_every_notation_and_case(self):
+        forms = ("02:11:22:aa:bb:01", "02-11-22-AA-BB-02", CANARY_DOTTED_MAC, CANARY_DOTTED_MAC.upper(),
+                 CANARY_CISCO_MAC, CANARY_CISCO_MAC.upper(), CANARY_BARE_MAC, CANARY_BARE_MAC.lower(),
+                 "02:11:22:ff:fe:aa:bb:03")
+        for form in forms:
+            for text in (form, f"Pad {form} here", f"({form})", f"addr={form}.", f"x {form}\n"):
+                scrubbed = self.r.text(text)
+                self.assertNotIn(form, scrubbed, text)
+                self.assertIn("<mac>", scrubbed, text)
+        self.assertEqual(self.r.text(f"a {CANARY_DOTTED_MAC} b"), "a <mac> b")
+
+    def test_ipv6_zone_ids_leave_with_their_address(self):
+        self.assertEqual(self.r.text(f"fe80::c0de:1%{CANARY_ZONE} and [fe80::1%25{CANARY_ZONE}]:3478"),
+                         "<lan-ipv6> and [<lan-ipv6>]:3478")
+        self.assertEqual(self.r.text(f"{CANARY_PUBLIC_IP6}%{CANARY_ZONE}"), "<public-ip-1>")
+        self.assertEqual(self.r.text("load 10:20:30%done"), "load 10:20:30%done")
+        shown = canary_redactor(mask_addresses=False).text("fe80::c0de:1%wlp3s0")
+        self.assertEqual(shown, "fe80::c0de:1%wlp3s0")
+
+    def test_ipv4_mapped_ipv6_is_treated_as_the_ipv4_address_it_carries(self):
+        text = self.r.text(f"{CANARY_PUBLIC_IP} ::ffff:{CANARY_PUBLIC_IP} ::ffff:5db8:d822 ::ffff:{CANARY_LAN_IP}")
+        self.assertEqual(text, "<public-ip-1> <public-ip-1> <public-ip-1> 192.168.x.x")
+        self.assertEqual(self.r.text("::ffff:127.0.0.1"), "::ffff:127.0.0.1")
+
+    def test_urls_lose_user_info_query_and_fragment_whatever_the_parameter_is_called(self):
+        scrubbed = self.r.text(f"open {ROGUE_URL} now")
+        self.assertEqual(scrubbed, "open https://xbox.example/play?<redacted>#<redacted> now")
+        self.assertEqual(self.r.text(scrubbed), scrubbed)
+        bare = self.r.text(f"GET /v5/sessions/home/play?serverId={CANARY_QUERY}&x=1 HTTP/1.1")
+        self.assertEqual(bare, "GET /v5/sessions/home/play?<redacted> HTTP/1.1")
+        for kept in ("chrome://webrtc-internals", "https://www.xbox.com/play", "Is it on? yes=no"):
+            self.assertEqual(self.r.text(kept), kept)
+
+    def test_serial_like_tokens_are_masked(self):
+        for token in (CANARY_PAD_SERIAL, "F4000EEB7F2E1234", "0123456789", "a1b2c3d4", "ABCDEFG1"):
+            self.assertEqual(self.r.text(f"Pad {token} (x)"), "Pad <id> (x)", token)
+        self.assertEqual(self.r.text(f"id {CANARY_UUID}."), "id <uuid>.")
+
+    def test_names_versions_and_codes_the_doctor_prints_are_not_mistaken_for_serials(self):
+        for kept in ("Chromium 155.0.8059.84, Linux 7.2.15-1-omarchy x86_64, Mesa 26.2.5-arch1.1, TLSv1.3",
+                     "BTN_TRIGGER_HAPPY40 (743), KEY_MACRO12, ABS_HAT0X (16) +, BTN_0x150, report 0x0b",
+                     "event21, event1234, hidraw10, /dev/input/event100, card1, renderD128",
+                     "ROG Xbox Ally RC73YA_RC73YA, board RC73YA, BIOS RC73YA.318, USB 0b05:1b4c, AMD 1002:163f",
+                     "2026-11-23T02:34:49Z stun_udp_9002 tcp_3074 xhome.gssv-play-prod.xboxlive.com wlp3s0",
+                     "leftshoulder:b4,rightshoulder:b5,dpup:h0.1,platform:Linux,", "5 GHz channel 128, 160 MHz",
+                     "inputplumber 0.82.0, Microsoft X-Box One Elite 2 pad, ASUSTeK Computer Inc. N-KEY Device"):
+            self.assertEqual(self.r.text(kept), kept)
+
+    def test_only_what_the_doctor_vouched_for_is_exempt_from_the_serial_rule(self):
+        model_names = "LNVNB161216 N3CN29WW wlp0s20f3 030000005e040000000b000010010000"
+        self.assertEqual(self.r.text(model_names), "<id> <id> <id> <id>")
+        self.r.trust(model_names)
+        self.assertEqual(self.r.text(f"{model_names} {CANARY_PAD_SERIAL}"), f"{model_names} <id>")
+        self.r.trust(CANARY_BARE_MAC)
+        self.assertEqual(self.r.text(CANARY_BARE_MAC), "<mac>")
+
+    def test_private_paths_are_replaced_whole_so_no_suffix_survives(self):
+        cases = ((f"{CANARY_HOME}/{CANARY_SUFFIX}/notes.txt", "<home-path>"),
+                 (f"/home/someoneelse/{CANARY_SUFFIX}", "<home-path>"),
+                 (f"/var/home/{CANARY_USER}/{CANARY_SUFFIX}", "<home-path>"),
+                 (f"/root/{CANARY_SUFFIX}", "<home-path>"),
+                 (f"/run/user/1000/{CANARY_SUFFIX}/bus", "<runtime-path>"),
+                 (f"/run/media/{CANARY_USER}/{CANARY_SUFFIX}", "<media-path>"),
+                 (f"{CANARY_HOME}/My {CANARY_SUFFIX} Folder/a b.txt", "<home-path>"))
+        for path, label in cases:
+            self.assertEqual(self.r.text(f"cannot open {path}"), f"cannot open {label}", path)
+            self.assertEqual(self.r.text(f'open("{path}") failed'), f'open("{label}") failed', path)
+        elsewhere = redact.Redactor(home="/data/people/canary", user=CANARY_USER)
+        self.assertEqual(elsewhere.text(f"in /data/people/canary/{CANARY_SUFFIX}/x"), "in <home-path>")
+        for kept in ("edit ~/.config/chromium-flags.conf", "/dev/root is busy", "/usr/lib/rootfs/x", "/sysroot/x"):
+            self.assertEqual(self.r.text(kept), kept)
+
+    def test_identity_fields_lose_their_value_in_text_and_in_structures(self):
+        text = self.r.text(f"SSID: Canary {CANARY_SUFFIX}\nHID_UNIQ={CANARY_SERIAL}\nserial number: {CANARY_SERIAL}\n"
+                           f"gamertag={CANARY_QUERY}, console name: Canary {CANARY_SUFFIX} | next\n"
+                           f'"hostname": "{CANARY_SUFFIX}"')
+        for canary in (CANARY_SUFFIX, CANARY_SERIAL, CANARY_QUERY):
+            self.assertNotIn(canary, text)
+        self.assertEqual(text, "SSID: <redacted>\nHID_UNIQ=<redacted>\nserial number: <redacted>\n"
+                               'gamertag=<redacted>, console name: <redacted>| next\n"hostname": <redacted>')
+        data = self.r.data({"ssid": "x", "Serial": "y", "uniq": "z", "gamertag": "g", "host": "www.xbox.com",
+                            "serials_read": False, "name": "Pad"})
+        self.assertEqual(data, {"ssid": "<redacted>", "Serial": "<redacted>", "uniq": "<redacted>",
+                                "gamertag": "<redacted>", "host": "www.xbox.com", "serials_read": False,
+                                "name": "Pad"})
+        for kept in ("Serial numbers and device addresses are never read.", "unique: yes", "serials_read: no"):
+            self.assertEqual(self.r.text(kept), kept)
+
+    def test_every_rule_is_idempotent(self):
+        once = self.r.text(f"{ROGUE_PAD_NAME} {ROGUE_URL} {CANARY_HOME}/{CANARY_SUFFIX}\nssid: x y\n{CANARY_UUID} "
+                           f"{CANARY_CISCO_MAC} {CANARY_BARE_MAC} /run/user/1000/bus\n::ffff:{CANARY_PUBLIC_IP}")
+        self.assertEqual(self.r.text(once), once)
+        for canary in VALUE_CANARIES + CANARIES:
+            self.assertNotIn(canary, once)
+
+    def test_scrubbing_time_stays_linear_whatever_the_text_looks_like(self):
+        for text in ("serial_" * 400, "a_" * 3000, "-a" * 3000, "1." * 10000, "a." * 12000):
+            started = time.perf_counter()
+            self.r.text(text)
+            self.assertLess(time.perf_counter() - started, 0.5, text[:12])
+        self.assertEqual(self.r.text("x" * 70 + "_token=abc1"), "x" * 70 + "_token=<redacted>")
+
+    def test_no_evidence_field_the_doctor_declares_is_mistaken_for_a_secret(self):
+        declared = {field.rsplit(".", 1)[-1] for check in checks.plan(Options(console_ip="192.168.1.2"))
+                    for field in (*runner.BASE_FIELDS, *check.fields)}
+        declared |= {"node", "name", "kind", "role", "bus", "id", "access", "watched", "control", "label", "status",
+                     "result", "expected", "observed", "event", "type", "event_code", "direction", "device", "line",
+                     "missing", "report_id", "declared_buttons", "undeclared_changes", "bit", "where"}
+        self.assertEqual(sorted(name for name in declared if redact._sensitive_key(name)), [])
 
 
 class RunnerTest(unittest.TestCase):
@@ -254,6 +402,28 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("internal error", results[0].detail)
         self.assertIn("ValueError", results[0].detail)
         self.assertEqual(results[0].evidence, {"reason": "internal-error"})
+
+    def test_exception_text_is_replaced_by_its_class_and_where_it_was_raised(self):
+        private = f"cannot open {CANARY_HOME}/{CANARY_SUFFIX}/x for {CANARY_PAD_SERIAL} at {CANARY_LAN_IP}"
+
+        def boom(_ctx):
+            raise ValueError(private)
+
+        def denied(_ctx):
+            raise PermissionError(13, private, f"{CANARY_HOME}/{CANARY_SUFFIX}")
+        results = runner.run_checks([self.check("a", boom), self.check("b", denied)], None)
+        self.assertRegex(results[0].detail, r"^internal error in this check \(ValueError at test_doctor:\d+\); "
+                                            r"result unknown$")
+        self.assertRegex(results[1].detail, r"^internal error in this check \(PermissionError EACCES at "
+                                            r"test_doctor:\d+\); result unknown$")
+        own = runner.run_checks([self.check("c", lambda _c: stun.decode(b"short"))], None)[0]
+        self.assertRegex(own.detail, r"\(StunError at stun:\d+\)")
+        deep = runner.run_checks([self.check("d", lambda _c: json.loads(private))], None)[0]
+        self.assertRegex(deep.detail, r"\(JSONDecodeError at decoder:\d+\)")
+        self.assertNotIn("cannot open", deep.detail)
+        for result in results:
+            for canary in (CANARY_HOME, CANARY_SUFFIX, CANARY_PAD_SERIAL, CANARY_LAN_IP, "cannot open"):
+                self.assertNotIn(canary, result.detail + result.remediation + json.dumps(result.evidence))
 
     def test_a_check_that_returns_the_wrong_type_is_an_internal_error(self):
         results = runner.run_checks([self.check("a", lambda _c: "nope")], None)
@@ -427,8 +597,8 @@ def binding_success(request, mapped):
 
 def allocate_error(request, code, reason, extra=()):
     return stun.encode(stun.ALLOCATE, stun.ERROR, request.transaction_id,
-                       [(stun.ATTR_ERROR_CODE, stun.encode_error_code(code, reason)), (stun.ATTR_REALM, b"rtcmedia"),
-                        (stun.ATTR_NONCE, b"0123456789abcdef"), *extra])
+                       [(stun.ATTR_ERROR_CODE, stun.encode_error_code(code, reason)),
+                        (stun.ATTR_REALM, CANARY_REALM.encode()), (stun.ATTR_NONCE, b"0123456789abcdef"), *extra])
 
 
 def nat(public_ip=CANARY_PUBLIC_IP, port_for=lambda destination, sock: sock.local[1], silent=()):
@@ -494,7 +664,7 @@ class StunCodecTest(unittest.TestCase):
         reply = stun.decode(allocate_error(request, 401, "Unauthorized"))
         self.assertEqual((reply.method, reply.cls), (stun.ALLOCATE, stun.ERROR))
         self.assertEqual(stun.error_code(reply), (401, "Unauthorized"))
-        self.assertEqual(stun.realm(reply), "rtcmedia")
+        self.assertEqual(stun.realm(reply), CANARY_REALM)
         self.assertIsNone(stun.error_code(stun.decode(stun.binding_request(self.TID))))
         self.assertEqual(stun.error_code(stun.decode(allocate_error(request, 300, "Try Alternate")))[0], 300)
 
@@ -768,6 +938,20 @@ class RouteTest(NetCase):
         self.assertEqual(net.display_interface("wlx0211223344ff"), "wlx<mac>")
         self.assertEqual(net.display_interface("wlp3s0"), "wlp3s0")
 
+    def test_kernel_interface_names_are_not_mistaken_for_serial_numbers(self):
+        files = {"/proc/net/route": route_table(("wlp0s20f3", "0.0.0.0", "192.168.77.1", "0003", 600, "0.0.0.0")),
+                 "/sys/class/net/wlp0s20f3/wireless/.keep": "", "/sys/class/net/wlp0s20f3/mtu": "1500\n",
+                 "/proc/net/dev": PROC_NET_DEV + "tailscale0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
+                                                 "wlx0211223344ff: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+                 "/sys/class/net/wlx0211223344ff/type": "65534\n"}
+        ctx = self.ctx(files, {("ip", "-4", "rule", "show"): IP_RULES_DEFAULT})
+        shown = " ".join(ctx.redactor.text(outcome.detail) for outcome in (
+            net.check_default_route(ctx), net.check_mtu_interface(ctx), net.check_vpn_proxy(ctx)))
+        for name in ("via wlp0s20f3 (wifi)", "MTU on wlp0s20f3 is 1500", "tailscale0", "wlx<mac>"):
+            self.assertIn(name, shown)
+        self.assertNotIn("0211223344ff", shown)
+        self.assertEqual(ctx.redactor.text(CANARY_PAD_SERIAL), "<id>")
+
     def test_ipv6_states(self):
         cases = [(IF_INET6_LOCAL, IPV6_ROUTE_NO_DEFAULT, Status.PASS, "local-only"),
                  ("", "", Status.PASS, "absent"),
@@ -980,11 +1164,13 @@ class TlsTest(unittest.TestCase):
 
     def test_certificate_failure_points_at_interception(self):
         error = ssl.SSLCertVerificationError(1, "certificate verify failed")
-        error.verify_message = "self-signed certificate in certificate chain"
+        error.verify_code = 19
+        error.verify_message = f"self-signed certificate in certificate chain of proxy.{CANARY_DOMAIN}"
         outcome = self.run_check(FakeTls({"www.xbox.com": error}))
         self.assertEqual(outcome.status, Status.WARN)
         row = next(row for row in outcome.evidence["hosts"] if row["host"] == "www.xbox.com")
-        self.assertEqual((row["stage"], row["error"]), ("certificate", "self-signed certificate in certificate chain"))
+        self.assertEqual((row["stage"], row["error"]), ("certificate", "self-signed certificate in the chain"))
+        self.assertNotIn(CANARY_DOMAIN, outcome.detail + json.dumps(outcome.evidence))
         self.assertIn("intercepting TLS", outcome.remediation)
         self.assertTrue(all(sock.closed for sock in self.sockets))
 
@@ -1002,6 +1188,21 @@ class TlsTest(unittest.TestCase):
         self.assertEqual(self.run_check(FakeTls(failures)).status, Status.FAIL)
         self.assertEqual(net.describe_os_error(ConnectionRefusedError()), "refused")
         self.assertEqual(net.describe_os_error(OSError(101, "Network is unreachable")), "network is unreachable")
+
+    def test_failure_reasons_come_from_codes_and_never_quote_the_exception(self):
+        private = f"proxy.{CANARY_DOMAIN} said no to {CANARY_PAD_SERIAL}"
+        self.assertEqual(net.describe_os_error(OSError(13, private)), "permission denied")
+        self.assertEqual(net.describe_os_error(OSError(private)), "OSError")
+        handshake = ssl.SSLError(1, f"[SSL: WRONG_VERSION_NUMBER] {private} (_ssl.c:1010)")
+        handshake.reason = "WRONG_VERSION_NUMBER"
+        self.assertEqual(net.describe_os_error(handshake), "wrong version number")
+        self.assertEqual(net.describe_os_error(ssl.SSLError(private)), "SSLError")
+        unknown = ssl.SSLCertVerificationError(1, private)
+        unknown.verify_code, unknown.verify_message = 77, private
+        self.assertEqual(net.certificate_reason(unknown), "certificate verification failed (code 77)")
+        mismatch = ssl.SSLCertVerificationError(1, private)
+        mismatch.verify_code = 62
+        self.assertEqual(net.certificate_reason(mismatch), "certificate is for another host name")
 
     def test_unresolved_name_is_reported_at_the_dns_stage(self):
         outcome = net.check_tls(make_context(getaddrinfo=fake_dns({})))
@@ -1275,6 +1476,9 @@ class FirewallTest(NetCase):
         self.assertEqual([rule.describe() for rule in rules], [
             "allow in udp port 53317", "allow in udp port 53", "allow in tcp port 22", "reject out any port any"])
         self.assertEqual([rule.everywhere for rule in rules], [True, False, True, True])
+        odd = (f"### tuple ### deny {CANARY_PAD_SERIAL} any 0.0.0.0/0 any 0.0.0.0/0 out\n"
+               f"### tuple ### deny udp {CANARY_HOME}/{CANARY_SUFFIX} 0.0.0.0/0 any 0.0.0.0/0 out\n")
+        self.assertEqual(firewall.parse_ufw_rules(odd), [])
         self.assertEqual(firewall.parse_ufw_defaults(UFW_DEFAULTS), {"incoming": "deny", "outgoing": "allow"})
         self.assertEqual(firewall.parse_ufw_defaults("DEFAULT_OUTPUT_POLICY=REJECT\n"), {"outgoing": "reject"})
 
@@ -1615,16 +1819,18 @@ ALLY_RAW_KEYS = "3fff000000000000 0 0 0 0"
 ELITE_PAD_KEYS = "ff 0 0 0 0 0 0 7cdb000000000000 0 8000000000 0 0"
 PAD_AXES = "3003f"
 NKEY_KEYBOARD_KEYS = "1000000000007 ff9f207ac14057ff febeffdfffefffff fffffffffffffffe"
-USB_PARENT = "sys/devices/pci0000:00/0000:00:08.1/0000:04:00.4/usb3/3-6"
+USB_ROOT = "sys/devices/pci0000:00/0000:00:08.1/0000:04:00.4/usb3"
+USB_PARENT = f"{USB_ROOT}/3-6"
 STACK_ACTIVE = ("systemctl", "is-active", "inputplumber.service", "hhd.service")
 STACK_HOOK = ("systemctl", "is-enabled", "inputplumber-suspend.service")
 STACK_BUS = ("busctl", "--system", "status", "org.shadowblip.InputPlumber")
 
 
 def add_input(root, number, name, keys, axes="0", vendor="0b05", product="1b4c", virtual=False, mode=0o660,
-              bus="0003"):
+              bus="0003", usb="3-6", interface=5):
     """One evdev device laid out like sysfs, with canary serials next to the fields the doctor reads."""
-    parent = "sys/devices/virtual/input" if virtual else f"{USB_PARENT}/3-6:1.5/0003:0B05:1B4C.0006/input"
+    hid_device = f"0003:{vendor.upper()}:{product.upper()}.{interface + 1:04X}"
+    parent = "sys/devices/virtual/input" if virtual else f"{USB_ROOT}/{usb}/{usb}:1.{interface}/{hid_device}/input"
     base = root / parent / f"input{number}"
     for relative, text in (("name", name), ("id/bustype", bus), ("id/vendor", vendor), ("id/product", product),
                            ("id/version", "0110"), ("capabilities/key", keys), ("capabilities/abs", axes),
@@ -1639,8 +1845,8 @@ def add_input(root, number, name, keys, axes="0", vendor="0b05", product="1b4c",
     write(root / "dev/input" / f"event{number}").chmod(mode)
 
 
-def add_hidraw(root, number, interface, mode, vendor="0B05", product="1B4C"):
-    device = root / USB_PARENT / f"3-6:1.{interface}" / f"0003:{vendor}:{product}.000{number + 1}"
+def add_hidraw(root, number, interface, mode, vendor="0B05", product="1B4C", usb="3-6"):
+    device = root / USB_ROOT / usb / f"{usb}:1.{interface}" / f"0003:{vendor}:{product}.{interface + 1:04X}"
     write(device / "uevent", f"DRIVER=hid-generic\nHID_ID=0003:0000{vendor}:0000{product}\n"
                              "HID_NAME=ASUSTeK Computer Inc. N-KEY Device\n"
                              f"HID_PHYS=usb-0000:04:00.4-6/input{interface}\nHID_UNIQ={CANARY_SERIAL}\n")
@@ -1688,7 +1894,8 @@ class InputCase(ScratchCase):
         root = SCRATCH
         for path, text in ALLY_DMI.items():
             write(root / path.lstrip("/"), text)
-        add_input(root, 5, "ASUSTeK Computer Inc. N-KEY Device", NKEY_KEYBOARD_KEYS, mode=0o000 if hide_raw else 0o660)
+        add_input(root, 5, "ASUSTeK Computer Inc. N-KEY Device", NKEY_KEYBOARD_KEYS, mode=0o000 if hide_raw else 0o660,
+                  interface=2)
         add_input(root, 6, "ASUSTeK Computer Inc. N-KEY Device", ALLY_RAW_KEYS, PAD_AXES,
                   mode=0o000 if hide_raw else 0o660)
         if virtual_pad:
@@ -1729,6 +1936,23 @@ class InputStackTest(InputCase):
                          [("event5", False, True), ("event6", True, False)])
         self.assertNotIn(CANARY_SERIAL, repr(devices_seen))
         self.assertNotIn(CANARY_MAC, repr(devices_seen))
+
+    def test_controller_names_are_scrubbed_where_they_are_read(self):
+        ctx = self.ally()
+        add_input(SCRATCH, 30, ROGUE_PAD_NAME, ELITE_PAD_KEYS, PAD_AXES, "045e", "0b13", usb="3-2", interface=0)
+        add_input(SCRATCH, 31, f"{CANARY_USER}'s  pad\x07 {CANARY_BARE_MAC} " + "x" * 200, ELITE_PAD_KEYS, PAD_AXES,
+                  "045e", "0b13", usb="3-3", interface=0)
+        add_input(SCRATCH, 32, "x" * 74 + " " + CANARY_PAD_SERIAL, ELITE_PAD_KEYS, PAD_AXES, "045e", "0b13",
+                  usb="3-4", interface=0)
+        names = {device.node: device.name for device in evdev.input_devices(ctx)}
+        self.assertEqual(names["event30"], "Pad <id> <mac> <lan-ipv6>")
+        self.assertTrue(names["event31"].startswith("<user>'s pad? <mac> xxxx"))
+        self.assertLessEqual(len(names["event31"]), 80)
+        self.assertEqual(names["event32"], "x" * 74 + " <id>")
+        self.assertEqual(names["event6"], "ASUSTeK Computer Inc. N-KEY Device")
+        described = inputstack.check_gamepads(ctx)
+        for canary in VALUE_CANARIES + (CANARY_USER,):
+            self.assertNotIn(canary, described.detail + json.dumps(described.evidence))
 
     def test_raw_pad_without_a_daemon_warns_about_the_missing_r3(self):
         ctx = self.ally()
@@ -1882,11 +2106,31 @@ IP_RULES_WITH_ADDRESS = IP_RULES_DEFAULT.replace("32766:", f"100:\tfrom {CANARY_
 TIMEDATECTL = ("timedatectl", "show", "-p", "NTP", "-p", "NTPSynchronized")
 
 
+class RecordingFS(FileSystem):
+    """Remembers every path the doctor looked at."""
+
+    def __init__(self, root):
+        super().__init__(root)
+        self.seen = []
+
+    def path(self, absolute):
+        self.seen.append(absolute)
+        return super().path(absolute)
+
+
+ROGUE_IW_LINK = IW_LINK + f"\tbeacon source: {CANARY_DOTTED_MAC} fe80::c0de:2%{CANARY_ZONE} {CANARY_PAD_SERIAL}\n"
+ROGUE_JOURNAL = JOURNAL_EVENTS + (f"\n1800000301.5 {CANARY_HOST} wpa_supplicant[812]: wlp3s0: roam to {CANARY_CISCO_MAC} "
+                                  f"{CANARY_PAD_SERIAL} {CANARY_HOME}/{CANARY_SUFFIX}")
+
+
 class World(InputCase):
     """A healthy ROG Xbox Ally behind a home router, as the doctor's primitives would see it."""
 
-    def world(self, options=None, *, console_answers=True, files=None, **ally):
+    def world(self, options=None, *, console_answers=True, files=None, rogue=False, fs=None, **ally):
         self.ally(inputplumber=True, **ally)
+        if rogue:
+            # A second controller whose name carries a serial number, a dotted MAC and an IPv6 zone id.
+            add_input(SCRATCH, 30, ROGUE_PAD_NAME, ELITE_PAD_KEYS, PAD_AXES, "045e", "0b13", usb="3-2", interface=0)
         overrides = files or {}
         files = {
             **CLIENT_FILES, "/proc/net/route": WIFI_ROUTES, "/proc/net/if_inet6": IF_INET6_LOCAL,
@@ -1902,7 +2146,8 @@ class World(InputCase):
         for number in range(6):
             add_hidraw(SCRATCH, number, number, 0o000 if number in (2, 5) else 0o200)
         commands = {
-            **self.commands.table, **CLIENT_COMMANDS, **UFW_ACTIVE, **iw_commands(journal=JOURNAL_EVENTS),
+            **self.commands.table, **CLIENT_COMMANDS, **UFW_ACTIVE,
+            **(iw_commands(link=ROGUE_IW_LINK, journal=ROGUE_JOURNAL) if rogue else iw_commands(journal=JOURNAL_EVENTS)),
             ("resolvectl", "status"): RESOLVECTL_STATUS, ("ip", "-4", "rule", "show"): IP_RULES_WITH_ADDRESS,
             TIMEDATECTL: "NTP=yes\nNTPSynchronized=yes\n", PING_GATEWAY: PING_CLEAN,
             pmtu_argv(1200): ping_reply(2), pmtu_argv(1472): ping_reply(2),
@@ -1924,7 +2169,7 @@ class World(InputCase):
         env = {**CLIENT_ENV, "USER": CANARY_USER, "HTTPS_PROXY": f"http://{CANARY_USER}:pw@proxy.{CANARY_DOMAIN}:3128"}
         options = options or Options()
         return make_context(
-            root=SCRATCH, commands=self.commands, env=env, options=options,
+            root=SCRATCH, commands=self.commands, env=env, options=options, **({"fs": fs(SCRATCH)} if fs else {}),
             getaddrinfo=fake_dns(ipv6={"www.xbox.com": [CANARY_PUBLIC_IP6]}), udp_socket=self.udp.socket,
             tcp_connect=lambda address, timeout: FakeTcp(), tls_context=self.tls,
             redactor=canary_redactor(mask_addresses=options.redact))
@@ -2181,7 +2426,7 @@ class PrivacyTest(CliCase):
         return {style: self.run_cli(*style, *extra, world=world)[1] for style in self.STYLES}
 
     def assert_private(self, text, label):
-        for canary in CANARIES:
+        for canary in CANARIES + VALUE_CANARIES:
             self.assertNotIn(canary, text, f"{canary!r} leaked into {label}")
         for pattern, kind in ((RAW_MAC, "MAC address"), (RAW_IPV4, "IPv4 address")):
             leaked = [match for match in pattern.findall(text) if not match.startswith(("127.", "0.0.0.0"))]
@@ -2192,6 +2437,57 @@ class PrivacyTest(CliCase):
         for style, output in self.outputs("--console-ip", CONSOLE_IP).items():
             self.assert_private(output, style or "text")
             self.assertGreater(len(output), 2000)
+
+    def rogue_checks(self):
+        """Two checks no allowlist can save: one raises with private text, one reports it in declared fields."""
+        private = (f"console {CANARY_QUERY} at {ROGUE_URL} id {CANARY_UUID} radio {CANARY_CISCO_MAC} {CANARY_BARE_MAC} "
+                   f"zone fe80::7%{CANARY_ZONE} in {CANARY_HOME}/{CANARY_SUFFIX}/My Notes.txt")
+
+        def raises(_ctx):
+            raise RuntimeError(private)
+
+        def reports(_ctx):
+            return model.warn(private, private, label=private, rows=[{"label": private}])
+        return [runner.Check("rogue.raises", "Rogue exception", "system", raises, "p", "n"),
+                runner.Check("rogue.reports", f"Rogue {CANARY_QUERY}", "system", reports, "p", "n",
+                             ("label", "rows", "rows.label"))], private
+
+    def test_values_hidden_in_device_names_exceptions_labels_and_wifi_lines_never_surface(self):
+        rogue, private = self.rogue_checks()
+        self.addCleanup(setattr, cli, "plan", cli.plan)
+        real_plan = cli.plan
+        cli.plan = lambda options: [*real_plan(options), *rogue]
+        outputs = self.outputs("--console-ip", CONSOLE_IP, world={"rogue": True, "hide_raw": False})
+        for style, output in outputs.items():
+            self.assert_private(output, f"rogue world {style or 'text'}")
+            self.assertIn("Rogue exception", output)
+        document = json.loads(outputs[("--json",)])
+        by_id = {check["id"]: check for check in document["checks"]}
+        names = [row["name"] for row in by_id["input.gamepads"]["evidence"]["gamepads"]]
+        self.assertIn("Pad <id> <mac> <lan-ipv6>", names)
+        self.assertIn("Pad <id> <mac> <lan-ipv6> (physical)", document["environment"]["controllers"]["gamepads"])
+        self.assertRegex(by_id["rogue.raises"]["detail"],
+                         r"^internal error in this check \(RuntimeError at test_doctor:\d+\); result unknown$")
+        self.assertEqual(by_id["rogue.reports"]["evidence"]["label"], by_id["rogue.reports"]["detail"])
+        self.assertIn("console <id> at https://xbox.example/play?<redacted>#<redacted> id <uuid> radio <mac> <mac> "
+                      "zone <lan-ipv6> in <home-path>", by_id["rogue.reports"]["detail"])
+        self.assertTrue(by_id["rogue.reports"]["detail"].endswith(" in <home-path>"))
+        self.assertNotIn("realm", by_id["turn.challenge"]["evidence"])
+        # The planted values really were there to find.
+        self.assertIn(CANARY_ZONE, ROGUE_PAD_NAME + private + ROGUE_IW_LINK)
+        self.assertIn(CANARY_SUFFIX, private + ROGUE_JOURNAL)
+
+    def test_serial_and_address_attributes_are_never_opened(self):
+        options = Options(console_ip=CONSOLE_IP)
+        ctx = self.world(options, rogue=True, fs=RecordingFS)
+        runner.run_checks(checks.plan(options), ctx, workers=1)
+        selection = buttonsio.select_devices(ctx)
+        buttonsio.find_raw_node(ctx, selection)
+        seen = ctx.fs.seen
+        self.assertGreater(len(seen), 100)
+        self.assertTrue(any(path.endswith("/capabilities/key") for path in seen))
+        opened = [path for path in seen if re.search(r"(uniq|phys|uevent|serial|uuid|asset_tag|address)$", path)]
+        self.assertEqual(opened, [])
 
     def test_the_canaries_really_were_in_the_inputs(self):
         ctx = self.world(Options(console_ip=CONSOLE_IP))
@@ -2256,10 +2552,11 @@ class PrivacyTest(CliCase):
         self.addCleanup(setattr, cli, "render_markdown", cli.render_markdown)
         cli.render_text = cli.render_markdown = poisoned
         for style in ("text", "markdown"):
-            self.assertEqual(cli.render(clean, redactor, style), "late <mac> <public-ip-1> ~\n")
+            self.assertEqual(cli.render(clean, redactor, style), "late <mac> <public-ip-1> <home-path>\n")
         cli.render_json = lambda _report: json.dumps({"note": f"{CANARY_BSSID} {CANARY_HOME}", "token": "abc"})
         self.addCleanup(setattr, cli, "render_json", report.render_json)
-        self.assertEqual(json.loads(cli.render(clean, redactor, "json")), {"note": "<mac> ~", "token": "<redacted>"})
+        self.assertEqual(json.loads(cli.render(clean, redactor, "json")),
+                         {"note": "<mac> <home-path>", "token": "<redacted>"})
 
 
 class EntryPointTest(unittest.TestCase):
@@ -3007,6 +3304,35 @@ class ButtonCommandTest(InputCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["devices"][0]["name"], "<user>'s Controller")
         self.assertNotIn(CANARY_USER, out)
+
+    def test_prompts_and_every_report_style_scrub_a_controller_named_after_its_serial(self):
+        for style in ((), ("--json",), ("--markdown",)):
+            ctx = self.device_ctx()
+            add_input(SCRATCH, 30, ROGUE_PAD_NAME, ELITE_PAD_KEYS, PAD_AXES, "045e", "0b13", usb="3-2", interface=0)
+            code, out, err = self.run_buttons(ctx, STANDARD, "--device", "/dev/input/event30", *style)
+            self.assertEqual(code, 0)
+            for canary in VALUE_CANARIES + CANARIES:
+                self.assertNotIn(canary, out, style)
+                self.assertNotIn(canary, err, style)
+            prompts = err if style else out
+            self.assertIn('read  /dev/input/event30  Pad <id> <mac> <lan-ipv6> (physical controller, USB 045e:0b13)',
+                          prompts)
+            self.assertIn('Judging /dev/input/event30 "Pad <id> <mac> <lan-ipv6>".', prompts)
+            self.assertIn('-> BTN_MODE (316) on /dev/input/event30 "Pad <id> <mac> <lan-ipv6>"', prompts)
+            self.assertIn("030000005e040000130b000010010000", out)
+        self.assertIn("030000005e040000130b000010010000,Pad <id> <mac> <lan-ipv6>,guide:b", out.replace("&lt;", "<")
+                      .replace("&gt;", ">"))
+
+    def test_messages_about_a_rejected_device_never_repeat_the_argument(self):
+        ctx = self.device_ctx()
+        write(SCRATCH / f"dev/input/by-id/{CANARY_PAD_SERIAL}")
+        for argument in (f"/dev/input/by-id/{CANARY_PAD_SERIAL}", f"{CANARY_HOME}/{CANARY_SUFFIX}",
+                         f"/dev/input/../{CANARY_SUFFIX}"):
+            code, out, err = self.run_buttons(ctx, {}, "--device", argument)
+            self.assertEqual((code, out), (2, ""), argument)
+            for canary in (CANARY_PAD_SERIAL, CANARY_SUFFIX, CANARY_HOME, CANARY_USER):
+                self.assertNotIn(canary, err, argument)
+            self.assertIn("error: --device", err)
 
     def test_event_reader_parses_kernel_events_and_survives_a_node_that_is_not_evdev(self):
         read_end, write_end = os.pipe()

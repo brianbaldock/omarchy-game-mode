@@ -177,8 +177,11 @@ class Report:
 
     def transformed(self, text: Callable[[str], str], data: Callable[[Any], Any]) -> Report:
         """Copy with every string passed through `text` and every structure through `data`."""
-        checks = [replace(check, title=text(check.title), detail=text(check.detail), proves=text(check.proves),
+        checks = [replace(check, id=text(check.id), title=text(check.title), detail=text(check.detail),
+                          category=text(check.category), proves=text(check.proves),
                           does_not_prove=text(check.does_not_prove), remediation=text(check.remediation),
                           evidence=data(check.evidence), root_command=text(check.root_command))
                   for check in self.checks]
-        return replace(self, checks=checks, environment=data(self.environment), sections=data(self.sections))
+        return replace(self, checks=checks, scope=text(self.scope), mode=text(self.mode), run_id=text(self.run_id),
+                       started_at=text(self.started_at), finished_at=text(self.finished_at),
+                       environment=data(self.environment), privacy=data(self.privacy), sections=data(self.sections))

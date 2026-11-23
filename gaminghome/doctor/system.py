@@ -34,13 +34,14 @@ def _first_match(pattern: str, text: str) -> str:
 
 def check_platform(ctx: Context) -> Outcome:
     release = os_release(ctx)
+    # Release names, build ids and versions describe software, not this machine: keep them readable.
     evidence: dict[str, Any] = dict(
-        os=release.get("PRETTY_NAME") or release.get("NAME") or "Linux",
-        os_version=release.get("VERSION_ID") or release.get("BUILD_ID") or "",
-        kernel=ctx.fs.line("/proc/sys/kernel/osrelease"),
-        architecture=ctx.fs.line("/proc/sys/kernel/arch") or platform.machine(),
-        omarchy=_first_match(r"(?m)^(\d[\w.+~-]*)\s*$", ctx.command(["omarchy", "version"], 5).stdout),
-        hyprland=_first_match(r"Hyprland v?(\d[\w.]*)", ctx.command(["hyprctl", "version"], 5).stdout),
+        os=ctx.trust((release.get("PRETTY_NAME") or release.get("NAME") or "Linux")[:80]),
+        os_version=ctx.trust((release.get("VERSION_ID") or release.get("BUILD_ID") or "")[:40]),
+        kernel=ctx.trust(ctx.fs.line("/proc/sys/kernel/osrelease")[:80]),
+        architecture=ctx.fs.line("/proc/sys/kernel/arch")[:20] or platform.machine(),
+        omarchy=ctx.trust(_first_match(r"(?m)^(\d[\w.+~-]{0,40})\s*$", ctx.command(["omarchy", "version"], 5).stdout)),
+        hyprland=ctx.trust(_first_match(r"Hyprland v?(\d[\w.]{0,40})", ctx.command(["hyprctl", "version"], 5).stdout)),
         session_type=str(ctx.env.get("XDG_SESSION_TYPE") or ""),
         desktop=str(ctx.env.get("XDG_CURRENT_DESKTOP") or ""),
         game_mode=VERSION, python=platform.python_version())

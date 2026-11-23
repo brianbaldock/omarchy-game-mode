@@ -83,7 +83,7 @@ STREAMING = (
     Check("turn.challenge", "Microsoft relay (TURN)", "udp", udp.check_turn_challenge,
           "Microsoft's relay is reachable over UDP 3478.",
           "That a relay allocation with real Xbox credentials succeeds.",
-          ("answered", "redirected", "rtt_ms", "error_code", "realm")),
+          ("answered", "redirected", "rtt_ms", "error_code", "challenge")),
     Check("nat.mapping_stability", "NAT mapping", "udp", udp.check_nat_mapping,
           "How this network maps one socket towards different servers.",
           "The console's NAT type, or any formal NAT classification.",

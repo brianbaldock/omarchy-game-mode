@@ -148,6 +148,7 @@ def render(report: Report, redactor: Redactor, style: str, *, text: Callable[[Re
     `text` and `markdown` let another doctor command supply its own layout while
     keeping this exact redaction path.
     """
+    redactor.trust(report.run_id)  # generated here: random, and not a serial number
     safe = report.transformed(redactor.text, redactor.data)
     if style == "json":
         # Scrubbing string by string keeps the document valid JSON.

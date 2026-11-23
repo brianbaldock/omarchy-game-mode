@@ -9,6 +9,7 @@ gateway and one public anycast address. Nothing here needs root.
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 import socket
 import ssl
@@ -90,6 +91,13 @@ KNOWN_RESOLVERS = {
 def display_interface(name: str) -> str:
     """Interface name safe to print: adapters named after their MAC lose the MAC."""
     return MAC_NAMED.sub(r"\1<mac>", name)
+
+
+def shown_interface(ctx: Context, name: str) -> str:
+    """`display_interface`, vouched for: a kernel interface name such as `wlp0s20f3` or `tailscale0`
+    names a slot or a driver, not a unit, and must not be masked as a serial number."""
+    shown = display_interface(name)
+    return ctx.trust(shown) if INTERFACE_NAME.match(name) else shown
 
 
 # ---- routes -------------------------------------------------------------------
@@ -180,14 +188,14 @@ def check_default_route(ctx: Context) -> Outcome:
     best = defaults[0]
     kind = interface_kind(ctx, best.interface)
     source = local_ipv4(ctx, best.gateway_address) if best.gateway else ""
-    detail = f"via {display_interface(best.interface)} ({kind})"
+    detail = f"via {shown_interface(ctx, best.interface)} ({kind})"
     if best.gateway:
         detail += f", gateway {best.gateway_address}"
     if source:
         detail += f", this device {source}"
     if len(defaults) > 1:
         detail += f"; {len(defaults)} default routes, the lowest metric wins"
-    return ok(detail, interface=display_interface(best.interface), interface_type=kind,
+    return ok(detail, interface=shown_interface(ctx, best.interface), interface_type=kind,
               gateway=best.gateway_address, source=source, default_routes=len(defaults))
 
 
@@ -291,7 +299,7 @@ def _policy_routing(ctx: Context) -> tuple[int | None, list[str]]:
 
 
 def check_vpn_proxy(ctx: Context) -> Outcome:
-    tunnels = [display_interface(name) for name in _tunnel_interfaces(ctx)]
+    tunnels = [shown_interface(ctx, name) for name in _tunnel_interfaces(ctx)]
     defaults = default_routes(ctx)
     via_tunnel = bool(defaults) and interface_kind(ctx, defaults[0].interface) == "tunnel"
     rules, full_tables = _policy_routing(ctx)
@@ -482,16 +490,37 @@ def check_dns_required(ctx: Context) -> Outcome:
 
 # ---- TLS ----------------------------------------------------------------------
 
+# OpenSSL's X509_V_ERR_* codes that explain a failed verification in plain words.
+CERTIFICATE_REASONS = {
+    9: "certificate is not valid yet", 10: "certificate has expired", 18: "self-signed certificate",
+    19: "self-signed certificate in the chain", 20: "certificate issuer is not trusted",
+    21: "certificate issuer is not trusted", 23: "certificate was revoked",
+    62: "certificate is for another host name", 64: "certificate is for another address",
+}
+
+
 def describe_os_error(exc: BaseException) -> str:
-    """Short, address-free reason for a socket failure."""
+    """Short reason for a socket or TLS failure, built from its type and codes.
+
+    The exception's own text is never used: it can quote an address, a host name or a path.
+    """
     if isinstance(exc, (socket.timeout, TimeoutError)):
         return "timeout"
     if isinstance(exc, ConnectionRefusedError):
         return "refused"
     if isinstance(exc, ConnectionResetError):
         return "reset"
-    reason = getattr(exc, "strerror", None)
-    return str(reason).lower() if reason else type(exc).__name__
+    if isinstance(exc, ssl.SSLError):
+        reason = getattr(exc, "reason", None)
+        return reason.lower().replace("_", " ") if isinstance(reason, str) and re.fullmatch(r"[A-Z0-9_]{3,60}", reason) \
+            else type(exc).__name__
+    number = getattr(exc, "errno", None)
+    return os.strerror(number).lower() if isinstance(number, int) and number > 0 else type(exc).__name__
+
+
+def certificate_reason(exc: ssl.SSLCertVerificationError) -> str:
+    code = getattr(exc, "verify_code", None)
+    return CERTIFICATE_REASONS.get(code) or f"certificate verification failed (code {code})"
 
 
 def tls_probe(ctx: Context, host: str, address: str, port: int = 443, timeout: float = 4.0) -> dict[str, Any]:
@@ -511,8 +540,7 @@ def tls_probe(ctx: Context, host: str, address: str, port: int = 443, timeout: f
         secure = ctx.tls_context().wrap_socket(sock, server_hostname=host)
     except ssl.SSLCertVerificationError as exc:
         sock.close()
-        row.update(stage="certificate",
-                   error=str(getattr(exc, "verify_message", "") or "certificate verification failed"))
+        row.update(stage="certificate", error=certificate_reason(exc))
         return row
     except (ssl.SSLError, OSError) as exc:
         sock.close()
@@ -666,7 +694,7 @@ def check_mtu_interface(ctx: Context) -> Outcome:
         mtu = int(ctx.fs.line(f"/sys/class/net/{name}/mtu"))
     except ValueError:
         return skip("Could not read the interface MTU.")
-    shown = display_interface(name)
+    shown = shown_interface(ctx, name)
     if mtu < 1400:
         return warn(f"MTU on {shown} is {mtu}, unusually low. Large stream packets may be fragmented or dropped.",
                     "A low MTU usually comes from a VPN or tunnel. Fix it there instead of lowering it further.",

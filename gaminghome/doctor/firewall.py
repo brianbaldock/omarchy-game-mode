@@ -18,6 +18,8 @@ from .model import Outcome, fail, info, needs_root, ok, skip, warn
 
 MANAGERS = ("ufw", "firewalld", "nftables", "iptables")
 ANYWHERE = ("0.0.0.0/0", "::/0")
+PROTOCOL = re.compile(r"[a-z0-9]{1,12}")
+PORTS = re.compile(r"any|[0-9][0-9,:]{0,79}")
 ROOT_COMMANDS = {
     "ufw": "sudo ufw status numbered verbose",
     "firewalld": "sudo firewall-cmd --list-all",
@@ -69,7 +71,8 @@ def parse_ufw_rules(text: str) -> list[UfwRule]:
             continue
         action, protocol, port, destination = fields[3].split("_")[0], fields[4], fields[5], fields[6]
         direction = next((token.split("_")[0] for token in fields[9:] if re.fullmatch(r"(in|out)(_\S+)?", token)), "")
-        if action in ("allow", "deny", "reject", "limit") and direction:
+        if (action in ("allow", "deny", "reject", "limit") and direction and PROTOCOL.fullmatch(protocol)
+                and PORTS.fullmatch(port)):
             rules.append(UfwRule(action, protocol, port, direction, destination in ANYWHERE))
     return rules
 

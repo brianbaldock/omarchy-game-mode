@@ -14,7 +14,7 @@ import ipaddress
 
 from .context import Context
 from .model import Outcome, ok, skip, warn
-from .net import default_routes, describe_os_error, display_interface, ipv4_routes, local_ipv4, route_for
+from .net import default_routes, describe_os_error, ipv4_routes, local_ipv4, route_for, shown_interface
 from .udp import binding
 
 # RFC 1918 only: not CGNAT, not link-local, never a public address.
@@ -61,7 +61,7 @@ def check_console_route(ctx: Context) -> Outcome:
     problem = _on_link_problem(ctx, address)
     if problem:
         return skip(problem, FIND_ADDRESS, on_link=True, routed=True)
-    interface = display_interface(route.interface)
+    interface = shown_interface(ctx, route.interface)
     if not route.gateway:
         return ok(f"The console address is on this device's own subnet (reached directly on {interface}, with "
                   f"no router in between). {NO_PROOF}", on_link=True, routed=True, interface=interface)

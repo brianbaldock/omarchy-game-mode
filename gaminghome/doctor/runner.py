@@ -6,7 +6,9 @@ timeout would hang the command on the way out. An overrunning daemon worker is
 abandoned instead, and a replacement keeps the queue moving.
 
 A check that raises or overruns becomes `skip` ("result unknown"), never `fail`:
-a doctor bug or a stalled tool is not evidence about the user's system.
+a doctor bug or a stalled tool is not evidence about the user's system. The report
+names the exception class and the line that raised it, never its message, which can
+quote a path, an address or a line of tool output.
 
 Evidence is allowlisted here, at the single point where an `Outcome` becomes part
 of a report: a check declares the evidence fields it may emit and anything else is
@@ -16,6 +18,8 @@ dropped, so a parser that picks up too much cannot leak it.
 from __future__ import annotations
 
 import collections
+import errno
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -27,6 +31,7 @@ T = TypeVar("T")
 R = TypeVar("R")
 
 _PENDING, _RUNNING, _DONE = "pending", "running", "done"
+_PACKAGE, _THIS_FILE = os.path.split(os.path.abspath(__file__))
 BASE_FIELDS = ("reason",)
 REPORT_HINT = "Please report this with the output of `omarchy-game-mode doctor --json`."
 
@@ -84,6 +89,22 @@ def _result(check: Check, outcome: Outcome, seconds: float) -> CheckResult:
         root_command=outcome.root_command, duration_ms=max(0, round(seconds * 1000)), decisive=check.decisive)
 
 
+def describe_exception(exc: BaseException) -> str:
+    """`PermissionError EACCES at net:123`: enough to find the bug, nothing the exception quoted."""
+    parts = [type(exc).__name__]
+    number = getattr(exc, "errno", None)
+    if isinstance(exc, OSError) and isinstance(number, int) and number in errno.errorcode:
+        parts.append(errno.errorcode[number])
+    own, innermost, trace = "", "", exc.__traceback__
+    while trace is not None:
+        directory, filename = os.path.split(trace.tb_frame.f_code.co_filename)
+        innermost = f"at {os.path.splitext(filename)[0]}:{trace.tb_lineno}"
+        if directory == _PACKAGE and filename != _THIS_FILE:
+            own = innermost  # the deepest line of the doctor itself says more than one inside the library it called
+        trace = trace.tb_next
+    return " ".join(filter(None, (*parts, own or innermost)))
+
+
 def _execute(check: Check, ctx: Any) -> Outcome:
     try:
         outcome = check.run(ctx)
@@ -91,7 +112,7 @@ def _execute(check: Check, ctx: Any) -> Outcome:
             raise TypeError(f"check returned {type(outcome).__name__}, not an Outcome")
         return outcome
     except Exception as exc:  # noqa: BLE001 - isolation is the point
-        return skip(f"internal error in this check ({type(exc).__name__}: {exc}); result unknown",
+        return skip(f"internal error in this check ({describe_exception(exc)}); result unknown",
                     REPORT_HINT, reason="internal-error")
 
 
