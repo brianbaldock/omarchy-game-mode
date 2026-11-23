@@ -280,11 +280,14 @@ class LiveSource:
         self._raw_fd = -1
         self._stdin = stdin_fd
         self._saved = None
-        try:
+        self._axes: dict[int, dict[int, AxisInfo]] = {}
+        try:  # whatever fails, nothing stays open and the terminal gets its echo back
             for device in devices:
                 self._readers.append(EvdevReader(device.path))
             if raw_path:
                 self._raw_fd = os.open(raw_path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            self._axes = {index: reader.axes(sorted(device.axes))
+                          for index, (reader, device) in enumerate(zip(self._readers, devices))}
             self._saved = termios.tcgetattr(stdin_fd)
             quiet = termios.tcgetattr(stdin_fd)
             quiet[3] &= ~(termios.ICANON | termios.ECHO)  # single keys, not echoed; Ctrl-C still interrupts
@@ -293,8 +296,6 @@ class LiveSource:
         except BaseException:
             self.close()
             raise
-        self._axes = {index: reader.axes(sorted(device.axes))
-                      for index, (reader, device) in enumerate(zip(self._readers, devices))}
 
     def keys_down(self) -> dict[int, set[int]]:
         return {index: reader.keys_down() for index, reader in enumerate(self._readers)}

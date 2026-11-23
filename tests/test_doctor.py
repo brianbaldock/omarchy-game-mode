@@ -3808,6 +3808,26 @@ class ButtonCommandTest(InputCase):
             buttonsio.run_every(lambda: steps.append(1), interrupted, lambda: steps.append(3))
         self.assertEqual(steps, [1, 3])
 
+    def test_a_failure_while_reading_the_axes_closes_everything_and_restores_the_terminal(self):
+        follower, raw_path = self.terminal()
+        before, opened = termios.tcgetattr(follower), []
+        descriptors = set(os.listdir("/proc/self/fd"))
+
+        class Reader(buttonsio.EvdevReader):
+            def __init__(self, _path):
+                super().__init__(raw_path)
+                opened.append(self)
+
+            def axes(self, _codes):
+                raise RuntimeError("axis set-up failed")
+
+        pad = mock.NonCallableMock(path="/dev/input/event7", axes=frozenset({evdev.ABS_X, evdev.ABS_Y}))
+        with mock.patch.object(buttonsio, "EvdevReader", Reader), self.assertRaises(RuntimeError):
+            buttonsio.LiveSource([pad], raw_path, follower)
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(termios.tcgetattr(follower), before)
+        self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors)
+
     def test_event_reader_parses_kernel_events_and_survives_a_node_that_is_not_evdev(self):
         read_end, write_end = os.pipe()
         self.addCleanup(os.close, read_end)
