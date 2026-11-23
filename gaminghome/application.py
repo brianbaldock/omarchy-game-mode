@@ -7,6 +7,7 @@ import os
 import shutil
 import signal
 import sys
+from functools import cached_property
 from pathlib import Path
 
 import gi
@@ -33,6 +34,7 @@ USAGE = """Usage: omarchy-game-mode [COMMAND]
   mode auto|game|desktop  Controller mode for the focused app
   autostart on|off|status Login autostart (owned XDG entry)
   mapper on|off|status    Let Game Mode switch AntiMicroX sets (off by default)
+  quick status|...        Read or adjust Quick Settings
   status                  Print JSON status
   quit                    Restore controller sets and exit
   --version, help"""
@@ -64,6 +66,11 @@ class Runtime:
         self._stopped = False
         self._claim_focus = False
 
+    @cached_property
+    def quick(self):
+        from .quicksettings import QuickSettings
+        return QuickSettings()
+
     # ---- lifecycle ---------------------------------------------------------
     def start(self):
         from .ui import load_css
@@ -84,6 +91,8 @@ class Runtime:
         if self._stopped:
             return
         self._stopped = True
+        if "quick" in self.__dict__:
+            self.__dict__["quick"].close()
         self._cancel_timeout()
         self.interpreter.set_nav_enabled(False)
         self.interpreter.reset()
@@ -520,6 +529,9 @@ class GameModeApplication(Gtk.Application):
                 return 2, USAGE
             managed = self.runtime.mapper.managed if self.runtime else settings_mod.Settings().mapper_managed
             return 0, "on" if managed else "off"
+        if command == "quick":
+            from .quicksettings import cli
+            return cli(rest, self.runtime.quick if self.runtime else None)
         if command == "status":
             return 0, json.dumps(self.runtime.status() if self.runtime else {"running": False}, ensure_ascii=False)
         if command == "quit":
@@ -551,13 +563,14 @@ def main(argv=None):
     argv = list(sys.argv if argv is None else argv)
     app = GameModeApplication()
     command = argv[1] if len(argv) > 1 else "show"
-    if command in ("status", "quit", "help", "--help", "-h", "--version", "autostart", "mapper"):
+    if command in ("status", "quit", "help", "--help", "-h", "--version", "autostart", "mapper", "quick"):
         # Answer locally when no instance runs, without starting watchers.
-        try:
-            app.register(None)
-        except GLib.Error:
-            pass
-        if not app.get_is_remote():
+        if command != "quick":
+            try:
+                app.register(None)
+            except GLib.Error:
+                pass
+        if command == "quick" or not app.get_is_remote():
             code, out = app.dispatch(argv[1:])
             if out:
                 print(out, file=sys.stdout if code == 0 else sys.stderr)

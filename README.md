@@ -150,6 +150,37 @@ the autostart file Game Mode created.
 
 `omarchy-game-mode mapper on|off|status` turns AntiMicroX set switching on or off.
 
+### Quick Settings
+
+Quick Settings is a command-line preview: there is no Quick Settings screen yet, so
+call these commands from a terminal, launcher or compositor binding. The backend is
+pull-on-demand and never opens the GTK interface. It reads firmware profiles through
+power-profiles-daemon, battery health and power draw through UPower, and the ASUS
+charge limit through asusd. Backlight and audio use fixed `brightnessctl` and `wpctl`
+commands; power actions use Omarchy's lock/reboot/shutdown commands or logind for
+suspend. Destructive power actions require explicit confirmation.
+
+The profile labels are Quiet (`power-saver`), Balanced (`balanced`) and
+Performance (`performance`); on this ASUS platform they correspond to the
+kernel's `quiet`, `balanced` and `performance` `platform_profile` choices.
+
+```bash
+omarchy-game-mode quick status
+omarchy-game-mode quick profile performance
+omarchy-game-mode quick brightness +10
+omarchy-game-mode quick volume -5
+omarchy-game-mode quick volume mute
+omarchy-game-mode quick mic unmute
+```
+
+Brightness cannot be lowered below 5%, output volume is capped at 100%, and the
+ASUS charge-limit backend permits only 60–100% in 5% steps. Quick Settings offers
+no TDP/PPT control: the current
+[ASUS armoury limits table](https://github.com/torvalds/linux/blob/master/drivers/platform/x86/asus-armoury.h)
+has no RC73YA entry, so there are no verified firmware-owned limits to present.
+There are no raw sysfs writes, RyzenAdj/fan controls, pkexec calls or polkit
+escalation paths.
+
 ### Upgrading from an earlier preview
 
 Quit the old running version with `omarchy-game-mode quit` before installing this update: its application ID changed to `io.github.brianbaldock.OmarchyGameMode`, so a new instance cannot quit the old one. Reinstall at the same prefix; old launcher/icon filenames are removed. A login entry owned by Game Mode remains recognized and is migrated by `autostart on` or removed by `autostart off`. Unowned legacy entries are left alone. Update any custom window rules or favorites that refer to the old ID.
