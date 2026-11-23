@@ -155,6 +155,10 @@ the autostart file Game Mode created.
 `omarchy-game-mode doctor` is described in the next section. It always answers in the
 terminal you ran it from, even while Game Mode is running.
 
+### Upgrading from an earlier preview
+
+Quit the old running version with `omarchy-game-mode quit` before installing this update: its application ID changed to `io.github.brianbaldock.OmarchyGameMode`, so a new instance cannot quit the old one. Reinstall at the same prefix; old launcher/icon filenames are removed. A login entry owned by Game Mode remains recognized and is migrated by `autostart on` or removed by `autostart off`. Unowned legacy entries are left alone. Update any custom window rules or favorites that refer to the old ID.
+
 ## Doctor
 
 `omarchy-game-mode doctor` checks what Xbox Remote Play, Xbox Cloud Gaming and your
@@ -318,10 +322,6 @@ is set on the console. Check these there first; none of them can be seen from th
 
 None of this applies to Xbox Cloud Gaming, which runs on Microsoft's servers: there the
 things to check are the account, the region and the subscription.
-
-### Upgrading from an earlier preview
-
-Quit the old running version with `omarchy-game-mode quit` before installing this update: its application ID changed to `io.github.brianbaldock.OmarchyGameMode`, so a new instance cannot quit the old one. Reinstall at the same prefix; old launcher/icon filenames are removed. A login entry owned by Game Mode remains recognized and is migrated by `autostart on` or removed by `autostart off`. Unowned legacy entries are left alone. Update any custom window rules or favorites that refer to the old ID.
 
 ## Uninstall
 
