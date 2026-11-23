@@ -33,6 +33,7 @@ USAGE = """Usage: omarchy-game-mode [COMMAND]
   mode auto|game|desktop  Controller mode for the focused app
   autostart on|off|status Login autostart (owned XDG entry)
   mapper on|off|status    Let Game Mode switch AntiMicroX sets (off by default)
+  keyboard [toggle|show|hide|status]  Control the touch keyboard
   status                  Print JSON status
   quit                    Restore controller sets and exit
   --version, help"""
@@ -120,7 +121,14 @@ class Runtime:
             if app_id in self.installing:
                 self.installing.discard(app_id)
                 if app_id not in self.library():
-                    self.settings.set_pinned(self.catalog, app_id, True)
+                    if not self.settings.set_pinned(self.catalog, app_id, True):
+                        self.model.message = (
+                            "error",
+                            "status.error",
+                            {"name": self.catalog.get(app_id).name,
+                             "reason": self.settings.save_error or "unknown error"},
+                        )
+                        continue
                 self.model.message = ("info", "status.installedNow", {"service": app_id})
         if installed != self.installed:
             self.installed = installed
@@ -313,13 +321,23 @@ class Runtime:
         return self.mapper.managed
 
     def set_mapper_managed(self, managed: bool):
+        previous = self.settings.mapper_managed
         self.settings.mapper_managed = managed
-        self.settings.save()
+        if not self.settings.save():
+            self.settings.mapper_managed = previous
+            self.model.message = (
+                "error",
+                "status.error",
+                {"name": self.t("settings.mapper"), "reason": self.settings.save_error or "unknown error"},
+            )
+            self.on_ui_changed()
+            return False
         self.mapper.set_managed(managed)
         if managed and self.model.requested_mode:
             self.mapper.request(self.model.requested_mode)
         self._sync_nav()
         self.on_ui_changed()
+        return True
 
     def autostart_enabled(self):
         return settings_mod.autostart_enabled()
@@ -327,28 +345,50 @@ class Runtime:
     def toggle_autostart(self):
         ok, detail = settings_mod.set_autostart(not self.autostart_enabled())
         if not ok:
-            self.model.message = ("error", "status.error", {"name": self.t("settings.autostart"), "reason": detail})
+            reason = settings_mod.Settings.sanitize_error(detail)
+            self.model.message = (
+                "error",
+                "status.error",
+                {"name": self.t("settings.autostart"), "reason": reason},
+            )
         self.on_ui_changed()
 
     def set_mode(self, mode):
         self._run(self.model.set_manual_mode(mode))
 
     def set_language(self, code):
+        previous = self.settings.language
         self.settings.language = code
-        self.settings.save()
+        if not self.settings.save():
+            self.settings.language = previous
+            self.model.message = (
+                "error",
+                "status.error",
+                {"name": self.t("settings.language"), "reason": self.settings.save_error or "unknown error"},
+            )
+            self.on_ui_changed()
+            return False
         self.translator = Translator(DATA_DIR / "locales", code)
         self._apply_direction()
         if self.window:
             self.window.sheet = None
             self.window.build()
             self.window.open_settings(focus="language")
+        return True
 
     def _apply_direction(self):
         Gtk.Widget.set_default_direction(Gtk.TextDirection.RTL if self.translator.rtl else Gtk.TextDirection.LTR)
 
     def set_pinned(self, app_id, pinned):
-        self.settings.set_pinned(self.catalog, app_id, pinned)
+        ok = self.settings.set_pinned(self.catalog, app_id, pinned)
+        if not ok:
+            self.model.message = (
+                "error",
+                "status.error",
+                {"name": self.catalog.get(app_id).name, "reason": self.settings.save_error or "unknown error"},
+            )
         self.on_ui_changed()
+        return ok
 
     def install(self, app_id):
         app = self.catalog.get(app_id)
@@ -505,16 +545,26 @@ class GameModeApplication(Gtk.Application):
                 ok, detail = settings_mod.set_autostart(rest[0] == "on")
                 if self.runtime:
                     self.runtime.on_ui_changed()
-                return (0 if ok else 1), detail
+                if not ok:
+                    reason = settings_mod.Settings.sanitize_error(detail)
+                    return 1, f"could not save settings: {reason}"
+                return 0, detail
             return 0, "on" if settings_mod.autostart_enabled() else "off"
         if command == "mapper":
             if rest and rest[0] in ("on", "off"):
+                desired = rest[0] == "on"
                 if self.runtime:
-                    self.runtime.set_mapper_managed(rest[0] == "on")
+                    if not self.runtime.set_mapper_managed(desired):
+                        reason = self.runtime.settings.save_error or "unknown error"
+                        return 1, f"could not save settings: {settings_mod.Settings.sanitize_error(reason)}"
                 else:
                     stored = settings_mod.Settings()
-                    stored.mapper_managed = rest[0] == "on"
-                    stored.save()
+                    previous = stored.mapper_managed
+                    stored.mapper_managed = desired
+                    if not stored.save():
+                        stored.mapper_managed = previous
+                        reason = stored.save_error or "unknown error"
+                        return 1, f"could not save settings: {stored.sanitize_error(reason)}"
                 return 0, rest[0]
             if rest and rest[0] != "status":
                 return 2, USAGE
@@ -549,8 +599,28 @@ class GameModeApplication(Gtk.Application):
 
 def main(argv=None):
     argv = list(sys.argv if argv is None else argv)
-    app = GameModeApplication()
     command = argv[1] if len(argv) > 1 else "show"
+    if command == "keyboard":
+        rest = argv[2:]
+        if len(rest) > 1 or (rest and rest[0] not in ("toggle", "show", "hide", "status")):
+            print(USAGE, file=sys.stderr)
+            return 2
+        from .keyboard import KeyboardController, KeyboardLockError, keyboard_action_lock
+        action = rest[0] if rest else "toggle"
+        if action == "status":
+            controller = KeyboardController(settings_accessor=settings_mod.Settings)
+            print(json.dumps(controller.status(), ensure_ascii=True))
+            return 0
+        try:
+            with keyboard_action_lock():
+                controller = KeyboardController(settings_accessor=settings_mod.Settings)
+                result = getattr(controller, action)()
+        except KeyboardLockError as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        print(result["detail"], file=sys.stdout if result["ok"] else sys.stderr)
+        return 0 if result["ok"] else 1
+    app = GameModeApplication()
     if command in ("status", "quit", "help", "--help", "-h", "--version", "autostart", "mapper"):
         # Answer locally when no instance runs, without starting watchers.
         try:
