@@ -789,7 +789,10 @@ class Brightness:
     def read(self) -> dict[str, Any]:
         if not self.available():
             return {"available": False, "error": "brightnessctl is unavailable"}
-        output, error = _command(self.runner, ["brightnessctl", "-m", "info"])
+        output, error = _command(
+            self.runner,
+            ["brightnessctl", "-c", "backlight", "-m", "info"],
+        )
         if error:
             return {"available": False, "error": error}
         try:
@@ -807,7 +810,7 @@ class Brightness:
             return _failed(error)
         _output, error = _command(
             self.runner,
-            ["brightnessctl", "-m", "set", f"{_format_number(target)}%"],
+            ["brightnessctl", "-c", "backlight", "-m", "set", f"{_format_number(target)}%"],
         )
         if error:
             return _failed(error)

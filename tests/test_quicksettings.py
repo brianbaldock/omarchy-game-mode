@@ -372,7 +372,7 @@ class BrightnessTest(unittest.TestCase):
 
     def test_absolute_and_relative_sets_use_fixed_argv_and_floor(self):
         def respond(argv):
-            if argv[1:] == ["-m", "info"]:
+            if "info" in argv:
                 return SimpleNamespace(
                     returncode=0,
                     stdout="amdgpu_bl1,backlight,32768,50%,65535\n",
@@ -386,16 +386,33 @@ class BrightnessTest(unittest.TestCase):
         self.assertTrue(brightness.set_level("-100")["ok"])
         self.assertTrue(brightness.set_level("+75")["ok"])
         self.assertEqual(
-            [call[0] for call in runner.calls if call[0][1:3] == ["-m", "set"]],
+            [call[0] for call in runner.calls if "set" in call[0]],
             [
-                ["brightnessctl", "-m", "set", "5%"],
-                ["brightnessctl", "-m", "set", "5%"],
-                ["brightnessctl", "-m", "set", "100%"],
+                ["brightnessctl", "-c", "backlight", "-m", "set", "5%"],
+                ["brightnessctl", "-c", "backlight", "-m", "set", "5%"],
+                ["brightnessctl", "-c", "backlight", "-m", "set", "100%"],
             ],
+        )
+        self.assertEqual(
+            runner.calls[0][0],
+            ["brightnessctl", "-c", "backlight", "-m", "info"],
         )
         for _argv, kwargs in runner.calls:
             self.assertEqual(kwargs["timeout"], quick.COMMAND_TIMEOUT_S)
             self.assertNotIn("shell", kwargs)
+
+    def test_missing_display_backlight_is_unavailable(self):
+        runner = FakeRunner(lambda _argv: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="No matching device found",
+        ))
+        status = quick.Brightness(runner, available).read()
+        self.assertFalse(status["available"])
+        self.assertEqual(
+            runner.calls[0][0],
+            ["brightnessctl", "-c", "backlight", "-m", "info"],
+        )
 
     def test_rejects_nan_huge_and_injection_values(self):
         runner = FakeRunner(lambda _argv: SimpleNamespace(
