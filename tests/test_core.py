@@ -322,6 +322,34 @@ class ControllerTest(unittest.TestCase):
         self.key(core.BTN_MODE, 0)
         self.assertEqual(self.actions, [])
 
+    def test_buttons_pressed_while_guide_is_held_never_act(self):
+        # InputPlumber's Xbox target sends a handheld's vendor button as Guide + A.
+        self.key(core.BTN_MODE, 1)
+        self.key(BTN_SOUTH, 1)
+        self.key(BTN_SOUTH, 0)
+        self.key(BTN_START, 1)
+        self.key(BTN_START, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.key(BTN_START, 0)
+        self.key(BTN_SELECT, 0)
+        self.key(core.BTN_MODE, 0)
+        self.assertEqual(self.actions, [])
+        self.key(BTN_SOUTH, 1)
+        self.assertEqual(self.actions, [ACTIVATE])
+
+    def test_guide_pressed_during_a_hold_cancels_menu_and_home(self):
+        self.key(BTN_START, 1)
+        self.key(core.BTN_MODE, 1)
+        self.key(BTN_START, 0)
+        self.key(core.BTN_MODE, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.key(core.BTN_MODE, 1)
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [])
+
     def test_reenabled_nav_resumes_held_direction_without_stale_press(self):
         held = {"d": ({BTN_SOUTH}, {core.ABS_HAT0X: 1})}
         self.ci.on_resync = lambda dev: self.ci.sync_state(dev, *held[dev])

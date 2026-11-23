@@ -513,7 +513,9 @@ class ControllerInterpreter:
       while a direction is actively held; timers exist only during a hold.
     * A/B/LB/RB fire on press, Menu fires on release when not part of a chord.
     * View+Menu held together for ``chord_ms`` emits HOME once per hold.
-    * Guide (BTN_MODE) is ignored entirely.
+    * Guide (BTN_MODE) is ignored entirely, and so is every button pressed
+      while Guide is held: a Guide chord belongs to Steam, or to an input
+      stack that sends a handheld's vendor buttons as Guide chords.
     * SYN_DROPPED discards state until the next SYN_REPORT, after which the
       caller resyncs held buttons without generating actions.
     """
@@ -614,6 +616,10 @@ class ControllerInterpreter:
                 return
             state.pressed.discard(code)
         if code == BTN_MODE:
+            if pressed:
+                state.menu_candidate = False
+            return
+        if pressed and BTN_MODE in state.pressed:
             return
         if code in (BTN_SELECT, BTN_START):
             self._chord(device_id, state, pressed)
@@ -646,7 +652,7 @@ class ControllerInterpreter:
         if state is None:
             return
         state.chord_token = None
-        if {BTN_SELECT, BTN_START} <= state.pressed and not state.chord_consumed:
+        if {BTN_SELECT, BTN_START} <= state.pressed and not state.chord_consumed and BTN_MODE not in state.pressed:
             state.chord_consumed = True
             self.emit(HOME)
 
