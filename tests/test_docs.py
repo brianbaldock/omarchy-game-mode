@@ -44,6 +44,15 @@ class DocsTest(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertIn("No button was pressed.", README)
 
+    def test_r3_and_xbox_button_statements_say_what_was_read(self):
+        # The virtual pad has the button; InputPlumber's sources do not report one to feed it.
+        self.assertNotIn("the virtual pad reports no right stick click", README)
+        self.assertIn("does advertise a right stick click (`BTN_THUMBR`), but nothing feeds it", README)
+        # Of the two maps, only HHD's has an entry for the Xbox button.
+        self.assertNotIn("R3 as `BTN_TR2` and the Xbox button as `BTN_SELECT`", README)
+        self.assertIn("Only HHD's map also lists the Xbox button", README)
+        self.assertIn("no guided physical test on an RC73YA has confirmed", README)
+
     def test_guide_promise_is_kept_everywhere(self):
         self.assertIn("Game Mode never acts on the Xbox Guide button", SITE)
         self.assertIn("It never acts on the Guide button", SITE)

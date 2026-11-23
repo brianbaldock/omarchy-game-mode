@@ -157,10 +157,12 @@ itself. On the ASUS ROG Xbox Ally (RC73YA) with a kernel that lacks the Ally HID
 driver, InputPlumber 0.82.0 rejects its hidraw sources ("Device is not using the
 asus_rog_ally driver") and runs on evdev sources only. In that state:
 
-- the virtual pad reports no right stick click (R3). HHD's and InputPlumber's own
-  former Ally X maps for this USB ID deliver R3 as `BTN_TR2`, a code InputPlumber's
-  stock configuration does not turn into a stick click (see below for what is and is
-  not verified on the RC73YA);
+- the virtual Elite pad does advertise a right stick click (`BTN_THUMBR`), but nothing
+  feeds it: the capabilities InputPlumber reports for its sources include no right
+  stick button. HHD's and InputPlumber's own former Ally X maps for this USB ID list
+  R3 as `BTN_TR2` on the raw pad, a code InputPlumber's stock configuration does not
+  turn into a stick click. Whether a physical R3 press arrives anywhere has not been
+  checked (see below for what is and is not verified on the RC73YA);
 - all of the controller's hidraw nodes become root-only, so tools that read the vendor
   buttons from hidraw stop working;
 - going by InputPlumber's own device configuration, stock profile and target code, the
@@ -268,18 +270,21 @@ them gone. Game Mode never edits AntiMicroX profiles or any other app's configur
     InputPlumber 0.82.0 active; Game Mode's client and controller reader run against
     it read-only: its state read, the virtual `Microsoft X-Box One Elite 2 pad`
     (`045e:0b00`) recognized and opened, the hidden physical node not reported as an
-    error. The controller's hidraw nodes were root-only. No button was pressed.
+    error. That pad's key capabilities include `BTN_THUMBR`, while the source
+    capabilities of InputPlumber's composite device list no right stick button. The
+    controller's hidraw nodes were root-only. No button was pressed.
   - **Pending physical validation, and known limits:** presses of the Xbox, View, Menu,
     Library and Armoury buttons; Guide behavior in Steam; suspend and resume; a real
     game session. On the raw pad the Xbox button has been seen as `BTN_SELECT` (314).
     HHD's Ally X button map and InputPlumber's former Ally X fallback map, both for the
     same USB id (`0b05:1b4c`), describe the pad's buttons as arriving in XInput order
     but with the kernel's generic codes: X as `BTN_C`, Y as `BTN_NORTH`, LB as
-    `BTN_WEST`, RB as `BTN_Z`, View as `BTN_TL`, Menu as `BTN_TR`, L3 as `BTN_TL2`,
-    R3 as `BTN_TR2` and the Xbox button as `BTN_SELECT`. That fits the Xbox button
-    reading and would explain scrambled SDL and Steam mappings for this pad, but no
-    guided physical test on an RC73YA has confirmed the whole table, so the View +
-    Menu chord is unverified there as well.
+    `BTN_WEST`, RB as `BTN_Z`, View as `BTN_TL`, Menu as `BTN_TR`, L3 as `BTN_TL2` and
+    R3 as `BTN_TR2`. Only HHD's map also lists the Xbox button, as `BTN_SELECT`, which
+    fits the reading above. The table would explain scrambled SDL and Steam mappings
+    for this pad, but no guided physical test on an RC73YA has confirmed it: which
+    code each physical press delivers, and with it the View + Menu chord, is
+    unverified there.
 - Recognizing InputPlumber's virtual gamepad stays a heuristic, because InputPlumber does
   not say which event node is its own. If another program creates a virtual pad with the
   same name and IDs while InputPlumber announces one that does not exist, Game Mode
