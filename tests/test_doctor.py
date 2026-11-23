@@ -3531,6 +3531,29 @@ class ButtonCommandTest(InputCase):
         for canary in (CANARY_SERIAL, CANARY_MAC, CANARY_USER, CANARY_HOME):
             self.assertNotIn(canary, out)
 
+    def test_with_a_chosen_device_the_raw_report_comes_from_that_same_device_or_not_at_all(self):
+        ctx = self.device_ctx()
+        add_hidraw(SCRATCH, 5, 5, 0o660)
+        (SCRATCH / USB_PARENT / "3-6:1.5/0003:0B05:1B4C.0006/report_descriptor").write_bytes(ALLY_REPORT_DESCRIPTOR)
+        add_input(SCRATCH, 30, "Microsoft X-Box One Elite 2 pad", ELITE_PAD_KEYS, PAD_AXES, "045e", "0b13", usb="3-2",
+                  interface=0)
+        for device in ("/dev/input/event6", "/dev/input/event5"):
+            code, _out, _err = self.run_buttons(ctx, STANDARD, "--device", device, "--raw", "--json")
+            self.assertEqual((code, self.raw_node.path), (0, "/dev/hidraw5"), device)
+        code, out, err = self.run_buttons(ctx, STANDARD, "--device", "/dev/input/event30", "--raw")
+        self.assertEqual((code, out, self.sources), (2, "", []))
+        self.assertIn("error: --raw: the device behind /dev/input/event30 has no raw HID interface", err)
+        self.assertEqual(self.run_buttons(ctx, STANDARD, "--device", "/dev/input/event30", "--json")[0], 0)
+        (SCRATCH / "dev/hidraw5").chmod(0o000)
+        code, out, err = self.run_buttons(ctx, STANDARD, "--device", "/dev/input/event6", "--raw")
+        self.assertEqual((code, out, self.sources), (2, "", []))
+        self.assertIn("no raw HID interface of the device behind /dev/input/event6 is readable: an input daemon "
+                      "hides it (mode 000)", err)
+        virtual = self.device_ctx(inputplumber=True)
+        code, out, err = self.run_buttons(virtual, STANDARD, "--device", "/dev/input/event21", "--raw")
+        self.assertEqual((code, out, self.sources), (2, "", []))
+        self.assertIn("/dev/input/event21 is a virtual device, so it has no raw HID report of its own", err)
+
     def test_text_report_and_silent_skip_of_unreadable_raw_hid(self):
         ctx = self.device_ctx()
         add_hidraw(SCRATCH, 5, 5, 0o000)

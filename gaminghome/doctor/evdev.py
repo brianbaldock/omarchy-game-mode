@@ -30,6 +30,8 @@ LONG_BITS = struct.calcsize("l") * 8
 NAME_LIMIT = 80
 # A HID device directory: bus, vendor, product and instance, as in `0003:0B05:1B4C.0006`.
 HID_DEVICE = re.compile(r"[0-9A-Fa-f]{4}:([0-9A-Fa-f]{4,8}):([0-9A-Fa-f]{4,8})\.[0-9A-Fa-f]{4}")
+# A USB interface directory, as in `3-6:1.5`: its parent is the USB device itself.
+USB_INTERFACE = re.compile(r"\d+-[\d.]+:\d+\.\d+")
 
 # Values from linux/input-event-codes.h. Gamepad buttons, the keyboard keys handheld
 # buttons are commonly wired to, and every function/programmable key in between.
@@ -215,6 +217,18 @@ def hid_parent(ctx: Context, sysfs_device: str) -> str:
         if HID_DEVICE.fullmatch(part):
             return "/".join(parts[:index + 1])
     return ""
+
+
+def physical_device(ctx: Context, sysfs_device: str) -> str:
+    """Path of the physical device behind a sysfs node, or empty for virtual and platform devices.
+
+    That is the USB device for a USB HID interface (all interfaces of one controller share it),
+    and the HID device itself on other buses (Bluetooth, I2C), where it stands for one device.
+    """
+    hid = hid_parent(ctx, sysfs_device)
+    parent = hid.rpartition("/")[0]
+    above, _slash, name = parent.rpartition("/")
+    return above if hid and USB_INTERFACE.fullmatch(name) else hid
 
 
 def gamepads(ctx: Context) -> list[InputDevice]:

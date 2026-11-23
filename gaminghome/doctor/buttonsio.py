@@ -220,19 +220,59 @@ class RawNode:
     fields: list[hid.Field]
 
 
+def _with_buttons(ctx: Context, node: evdev.HidrawNode) -> RawNode | None:
+    """The node with its parsed report descriptor, when that declares buttons."""
+    descriptor = ctx.fs.read_bytes(f"/sys/class/hidraw/{node.node}/device/report_descriptor", 4096)
+    fields = hid.parse_report_descriptor(descriptor or b"")
+    return RawNode(node.path, fields) if any(item.is_buttons for item in fields) else None
+
+
 def find_raw_node(ctx: Context, selection: Selection) -> RawNode | None:
-    """The readable hidraw node of the physical gamepad's own HID interface, with its parsed descriptor."""
-    pads = [item for item in evdev.gamepads(ctx) if not item.virtual]
+    """The readable hidraw node of the physical gamepad's own HID interface, with its parsed descriptor.
+
+    The judged controller comes first when it is a physical one; nothing found means no raw report.
+    """
+    pads = sorted((item for item in evdev.gamepads(ctx) if not item.virtual), key=lambda pad: pad != selection.primary)
     for pad in pads:
         parent = evdev.hid_parent(ctx, f"/sys/class/input/{pad.node}/device")
         for node in evdev.hidraw_nodes(ctx) if parent else ():
             if node.access != "readable" or evdev.hid_parent(ctx, f"/sys/class/hidraw/{node.node}/device") != parent:
                 continue
-            descriptor = ctx.fs.read_bytes(f"/sys/class/hidraw/{node.node}/device/report_descriptor", 4096)
-            fields = hid.parse_report_descriptor(descriptor or b"")
-            if any(item.is_buttons for item in fields):
-                return RawNode(node.path, fields)
+            found = _with_buttons(ctx, node)
+            if found:
+                return found
     return None
+
+
+def raw_node_of(ctx: Context, chosen: InputDevice) -> RawNode:
+    """The raw HID report of the device chosen with `--device`, from that same physical device only.
+
+    A HID interface counts only when sysfs shows it under the same USB device (or, on another
+    bus, the same HID device) as the chosen node; the chosen node's own interface comes first.
+    Anything else would attribute another controller's bits to this one, so it is refused
+    with a ValueError that says why.
+    """
+    if chosen.virtual:
+        raise ValueError(f"--raw: {chosen.path} is a virtual device, so it has no raw HID report of its own")
+    own = evdev.hid_parent(ctx, f"/sys/class/input/{chosen.node}/device")
+    device = evdev.physical_device(ctx, f"/sys/class/input/{chosen.node}/device")
+    if not device:
+        raise ValueError(f"--raw: {chosen.path} is not a USB, Bluetooth or I2C HID device, so it has no raw HID "
+                         "report")
+    nodes = [node for node in evdev.hidraw_nodes(ctx)
+             if evdev.physical_device(ctx, f"/sys/class/hidraw/{node.node}/device") == device]
+    readable = sorted((node for node in nodes if node.access == "readable"),
+                      key=lambda node: evdev.hid_parent(ctx, f"/sys/class/hidraw/{node.node}/device") != own)
+    for node in readable:
+        found = _with_buttons(ctx, node)
+        if found:
+            return found
+    if not nodes:
+        raise ValueError(f"--raw: the device behind {chosen.path} has no raw HID interface")
+    if not readable:
+        reasons = "; ".join(sorted({UNREADABLE.get(node.access, node.access) for node in nodes}))
+        raise ValueError(f"--raw: no raw HID interface of the device behind {chosen.path} is readable: {reasons}")
+    raise ValueError(f"--raw: no readable raw HID interface of the device behind {chosen.path} declares buttons")
 
 
 # ---- live event source ----------------------------------------------------------------
@@ -515,7 +555,8 @@ def build_parser(stdout: IO[str], stderr: IO[str]) -> argparse.ArgumentParser:
     parser.add_argument("--timeout", metavar="SECONDS", type=_timeout, default=12.0,
                         help="time to wait for each control, 2-120 (default: 12)")
     parser.add_argument("--raw", action="store_true",
-                        help="also watch the controller's raw HID report for buttons the kernel does not expose")
+                        help="also watch the controller's raw HID report for buttons the kernel does not expose; "
+                             "with --device, only a raw interface of that same device, or the test does not start")
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true", help="machine-readable report (prompts go to stderr)")
     output.add_argument("--markdown", action="store_true", help="report to paste into an issue (prompts go to stderr)")
@@ -578,6 +619,10 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str], *, ctx: Context 
     prompts, stderr = Scrubbed(prompts, ctx.redactor.text), Scrubbed(stderr, ctx.redactor.text)
     try:
         selection = select_devices(ctx, args.device)
+        if args.raw and args.device:
+            raw_node: RawNode | None = raw_node_of(ctx, selection.watched[0])
+        else:
+            raw_node = find_raw_node(ctx, selection) if args.raw else None
     except ValueError as exc:
         stderr.write(f"omarchy-game-mode doctor buttons: error: {exc}\n")
         return EXIT_USAGE
@@ -595,7 +640,6 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str], *, ctx: Context 
     judged = (f"Judging {selection.primary.path} \"{selection.primary.name}\". " if selection.primary
               else "That device is not a gamepad, so its codes are recorded but not judged. ")
     prompts.write(f"{judged}Press each control when asked; Enter skips one, q stops the test.\n\n")
-    raw_node = find_raw_node(ctx, selection) if args.raw else None
     started = ctx.wall_time()
     try:
         with ending_signals_raise():
