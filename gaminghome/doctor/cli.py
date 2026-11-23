@@ -23,7 +23,7 @@ from typing import IO, Any, Callable, NoReturn, Sequence
 
 from . import console
 from .checks import SCOPES, plan
-from .context import Context, Options
+from .context import KEY_LOG_VARIABLE, Context, Options
 from .model import EXIT_USAGE, Report
 from .net import INTERFACE_NAME
 from .redact import Redactor
@@ -227,6 +227,7 @@ def main(argv: Sequence[str] | None = None, *, stdout: IO[str] | None = None, st
          context_factory: Callable[[Options], Context] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     stdout, stderr = stdout or sys.stdout, stderr or sys.stderr
+    os.environ.pop(KEY_LOG_VARIABLE, None)  # nothing the doctor starts may write TLS secrets to disk
     try:
         if argv and argv[0] in COMMANDS:
             code = COMMANDS[argv[0]](argv[1:], stdout, stderr)

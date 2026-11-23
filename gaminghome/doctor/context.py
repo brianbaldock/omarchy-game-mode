@@ -29,6 +29,9 @@ from .runner import parallel_map
 READ_LIMIT = 65536
 OUTPUT_LIMIT = 262144
 LIST_LIMIT = 4096
+# Python's `ssl.create_default_context` (and Chromium) append TLS session secrets to the file this
+# variable names: a read-only diagnostic must never create or extend it.
+KEY_LOG_VARIABLE = "SSLKEYLOGFILE"
 
 
 @dataclass(frozen=True)
@@ -111,8 +114,23 @@ class FileSystem:
 
 def _command_env(env: Mapping[str, str] | None) -> dict[str, str]:
     merged = dict(os.environ if env is None else env)
+    merged.pop(KEY_LOG_VARIABLE, None)
     merged.update(LC_ALL="C", LANG="C")
     return merged
+
+
+def tls_client_context() -> ssl.SSLContext:
+    """A verifying TLS client context with the settings of `ssl.create_default_context`.
+
+    It is built by hand because that function opens the file named by SSLKEYLOGFILE for
+    appending, which would make the doctor write session secrets to disk.
+    """
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.check_hostname = True
+    context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN | ssl.VERIFY_X509_STRICT
+    context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+    return context
 
 
 def _drain(proc: subprocess.Popen[bytes], deadline: float, limit: int) -> tuple[bytes, bytes, bool]:
@@ -197,7 +215,7 @@ class Context:
                  getaddrinfo: Callable[..., list] = socket.getaddrinfo,
                  udp_socket: Callable[..., Any] = _udp_socket,
                  tcp_connect: Callable[..., Any] = socket.create_connection,
-                 tls_context: Callable[[], Any] = ssl.create_default_context,
+                 tls_context: Callable[[], Any] = tls_client_context,
                  monotonic: Callable[[], float] = time.monotonic,
                  wall_time: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep,

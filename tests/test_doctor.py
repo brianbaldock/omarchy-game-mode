@@ -519,6 +519,22 @@ class ContextTest(ScratchCase):
         self.assertEqual([ctx.once("k", lambda: calls.append(1) or 7) for _ in range(3)], [7, 7, 7])
         self.assertEqual(calls, [1])
 
+    def test_tls_never_writes_a_key_log_file(self):
+        ours, standard = SCRATCH / "ours.keys", SCRATCH / "standard.keys"
+        self.addCleanup(os.environ.pop, context.KEY_LOG_VARIABLE, None)
+        if not sys.flags.ignore_environment:
+            os.environ[context.KEY_LOG_VARIABLE] = str(standard)
+            ssl.create_default_context()
+            self.assertTrue(standard.exists())  # what the doctor has to avoid
+        os.environ[context.KEY_LOG_VARIABLE] = str(ours)
+        tls = context.tls_client_context()
+        self.assertEqual((tls.verify_mode, tls.check_hostname), (ssl.CERT_REQUIRED, True))
+        self.assertIs(Context().tls_context, context.tls_client_context)
+        self.assertNotIn(context.KEY_LOG_VARIABLE, context._command_env({context.KEY_LOG_VARIABLE: str(ours)}))
+        self.assertEqual(cli.main(["--help"], stdout=io.StringIO()), 0)
+        self.assertNotIn(context.KEY_LOG_VARIABLE, os.environ)
+        self.assertFalse(ours.exists())
+
 
 # ---- fakes for the network layer ------------------------------------------------
 
@@ -1057,9 +1073,13 @@ class VpnProxyTest(NetCase):
         self.assertEqual(net.parse_ip_rules("5270:\tfrom 192.168.77.23 lookup 52\ngarbage\n"), [(5270, "52")])
 
 
+RESOLVED_ACTIVE = ("systemctl", "is-active", "systemd-resolved.service")
+
+
 class DnsTest(NetCase):
     def test_resolver_behind_the_systemd_stub_is_identified_and_filtering_is_flagged(self):
-        ctx = self.ctx({"/etc/resolv.conf": RESOLV_STUB}, {("resolvectl", "status"): RESOLVECTL_STATUS})
+        ctx = self.ctx({"/etc/resolv.conf": RESOLV_STUB},
+                       {RESOLVED_ACTIVE: "active\n", ("resolvectl", "status"): RESOLVECTL_STATUS})
         outcome = net.check_resolver(ctx)
         self.assertEqual(outcome.status, Status.WARN)
         self.assertEqual(outcome.evidence["mode"], "systemd-resolved")
@@ -1089,6 +1109,15 @@ class DnsTest(NetCase):
         self.assertIn("Google", public.detail)
         self.assertEqual(net.check_resolver(self.ctx({})).status, Status.SKIP)
         self.assertEqual(net.check_resolver(self.ctx({"/etc/resolv.conf": RESOLV_STUB})).status, Status.SKIP)
+
+    def test_a_stopped_systemd_resolved_is_reported_and_never_started(self):
+        for state in ("inactive", "failed"):
+            commands = FakeCommands({RESOLVED_ACTIVE: CommandResult(RESOLVED_ACTIVE, 3, state + "\n")})
+            ctx = make_context(root=self.tree({"/etc/resolv.conf": RESOLV_STUB}), commands=commands)
+            outcome = net.check_resolver(ctx)
+            self.assertEqual((outcome.status, commands.calls), (Status.WARN, [RESOLVED_ACTIVE]))
+            self.assertIn("systemd-resolved is not running", outcome.detail)
+            self.assertEqual(ctx.redactor.text(f"search {CANARY_DOMAIN}"), "search <redacted>")
 
     def test_every_filtering_resolver_entry_is_a_valid_address(self):
         for address in (*net.FILTERING_RESOLVERS, *net.KNOWN_RESOLVERS):
@@ -1253,12 +1282,25 @@ def ntp_server(skew, mode=4, stratum=2, echo=True):
     return respond
 
 
-class ClockTest(NetCase):
-    SYNCED = {("timedatectl", "show", "-p", "NTP", "-p", "NTPSynchronized"): "NTP=yes\nNTPSynchronized=yes\n"}
-    UNSYNCED = {("timedatectl", "show", "-p", "NTP", "-p", "NTPSynchronized"): "NTP=no\nNTPSynchronized=no\n"}
+TIME_ACTIVE = ("systemctl", "is-active", "systemd-timesyncd.service", "chronyd.service", "ntpd.service")
+# Asks systemd-timedated over D-Bus, which starts it: the doctor must never run this.
+TIMEDATECTL = ("timedatectl", "show", "-p", "NTP", "-p", "NTPSynchronized")
 
-    def check(self, commands=None, **kw):
-        return net.check_clock(self.ctx(commands=commands, getaddrinfo=fake_dns(), **kw))
+
+def time_services(*states):
+    """`systemctl is-active` for systemd-timesyncd, chronyd and ntpd."""
+    code = 0 if all(state == "active" for state in states) else 3
+    return {TIME_ACTIVE: CommandResult(TIME_ACTIVE, code, "\n".join(states) + "\n")}
+
+
+TIMESYNCD = time_services("active", "inactive", "inactive")
+
+
+class ClockTest(NetCase):
+    SYNCED = {net.TIMESYNC_FLAG: ""}
+
+    def check(self, commands=TIMESYNCD, files=SYNCED, **kw):
+        return net.check_clock(self.ctx(files, commands, getaddrinfo=fake_dns(), **kw))
 
     def test_sntp_request_is_a_client_packet_and_the_offset_is_measured(self):
         captured = []
@@ -1266,26 +1308,42 @@ class ClockTest(NetCase):
         def respond(data, destination, sock):
             captured.append((data, destination))
             return ntp_server(2.5)(data, destination, sock)
-        outcome = self.check(self.SYNCED, responder=respond)
-        self.assertEqual((outcome.status, outcome.evidence["offset_ms"], outcome.evidence["ntp_synchronized"]),
-                         (Status.PASS, 2500, True))
+        outcome = self.check(responder=respond)
+        self.assertEqual((outcome.status, outcome.evidence["offset_ms"], outcome.evidence["ntp_synchronized"],
+                          outcome.evidence["ntp_client"]), (Status.PASS, 2500, True, "systemd-timesyncd"))
+        self.assertIn("systemd-timesyncd has synchronised it since boot", outcome.detail)
         packet, destination = captured[0]
         self.assertEqual((len(packet), packet[0], destination), (48, 0x23, (NTP_IP, 123)))
 
     def test_skew_thresholds(self):
-        self.assertEqual(self.check(self.SYNCED, responder=ntp_server(-12)).status, Status.WARN)
-        wrong = self.check(self.SYNCED, responder=ntp_server(3600))
+        self.assertEqual(self.check(responder=ntp_server(-12)).status, Status.WARN)
+        wrong = self.check(responder=ntp_server(3600))
         self.assertEqual((wrong.status, wrong.evidence["offset_ms"]), (Status.FAIL, 3_600_000))
         self.assertIn("timedatectl set-ntp true", wrong.remediation)
 
     def test_unsynchronised_clock_warns_and_missing_evidence_is_a_skip(self):
-        self.assertEqual(self.check(self.UNSYNCED, responder=ntp_server(0.2)).status, Status.WARN)
-        self.assertEqual(self.check(self.SYNCED).status, Status.PASS)
-        self.assertEqual(self.check().status, Status.SKIP)
+        nothing = self.check(time_services("inactive", "inactive", "inactive"), {}, responder=ntp_server(0.2))
+        self.assertEqual((nothing.status, nothing.evidence["ntp_enabled"]), (Status.WARN, False))
+        self.assertIn("No NTP client", nothing.detail)
+        waiting = self.check(files={}, responder=ntp_server(0.2))
+        self.assertEqual((waiting.status, waiting.evidence["ntp_synchronized"]), (Status.WARN, False))
+        self.assertIn("has not synchronised the clock since boot", waiting.detail)
+        self.assertEqual(self.check().status, Status.PASS)
+        chrony = self.check(time_services("inactive", "active", "inactive"), {}, responder=ntp_server(0.2))
+        self.assertEqual((chrony.status, chrony.evidence["ntp_synchronized"]), (Status.PASS, None))
+        self.assertIn("and chronyd is running", chrony.detail)
+        self.assertEqual(self.check(time_services("inactive", "active", "inactive"), {}).status, Status.SKIP)
+        self.assertEqual(self.check(None, {}).status, Status.SKIP)
+
+    def test_the_sync_state_is_read_without_starting_a_service(self):
+        commands = FakeCommands({**TIMESYNCD, TIMEDATECTL: "NTP=yes\nNTPSynchronized=yes\n"})
+        net.check_clock(make_context(root=self.tree(self.SYNCED), commands=commands, getaddrinfo=fake_dns({}),
+                                     udp_socket=UdpWorld(lambda *_a: []).socket))
+        self.assertEqual(commands.calls, [TIME_ACTIVE])
 
     def test_replies_that_are_not_ours_are_ignored(self):
         for responder in (ntp_server(100, mode=3), ntp_server(100, stratum=0), ntp_server(100, echo=False)):
-            outcome = self.check(self.SYNCED, responder=responder)
+            outcome = self.check(responder=responder)
             self.assertEqual((outcome.status, outcome.evidence["offset_ms"]), (Status.PASS, None))
         self.assertAlmostEqual(net._from_ntp(net._ntp_timestamp(1_800_000_000.25)), 1_800_000_000.25, places=6)
         self.assertGreater(net._from_ntp(struct.pack("!II", 5, 0)), 2_085_978_496)
@@ -2145,7 +2203,6 @@ class InputStackTest(InputCase):
 # ---- a complete fake device: every input source carries canaries ---------------------
 
 IP_RULES_WITH_ADDRESS = IP_RULES_DEFAULT.replace("32766:", f"100:\tfrom {CANARY_LAN_IP} lookup main\n32766:")
-TIMEDATECTL = ("timedatectl", "show", "-p", "NTP", "-p", "NTPSynchronized")
 
 
 class RecordingFS(FileSystem):
@@ -2181,7 +2238,7 @@ class World(InputCase):
             "/proc/sys/kernel/hostname": CANARY_HOST + "\n", "/sys/class/net/wlp3s0/wireless/.keep": "",
             "/sys/class/net/wlp3s0/mtu": "1500\n", "/etc/default/ufw": UFW_DEFAULTS, "/etc/ufw/user.rules": UFW_RULES,
             "/sys/class/drm/card1/device/vendor": "0x1002\n", "/sys/class/drm/card1/device/device": "0x163f\n",
-            "/run/udev/rules.d/50-inputplumber-hide-hidraw5-early.rules": "", **overrides,
+            "/run/udev/rules.d/50-inputplumber-hide-hidraw5-early.rules": "", net.TIMESYNC_FLAG: "", **overrides,
         }
         for path, text in files.items():
             write(SCRATCH / path.lstrip("/"), text)
@@ -2191,7 +2248,8 @@ class World(InputCase):
             **self.commands.table, **CLIENT_COMMANDS, **UFW_ACTIVE,
             **(iw_commands(link=ROGUE_IW_LINK, journal=ROGUE_JOURNAL) if rogue else iw_commands(journal=JOURNAL_EVENTS)),
             ("resolvectl", "status"): RESOLVECTL_STATUS, ("ip", "-4", "rule", "show"): IP_RULES_WITH_ADDRESS,
-            TIMEDATECTL: "NTP=yes\nNTPSynchronized=yes\n", PING_GATEWAY: PING_CLEAN,
+            RESOLVED_ACTIVE: "active\n", **TIMESYNCD, TIMEDATECTL: "NTP=yes\nNTPSynchronized=yes\n",
+            PING_GATEWAY: PING_CLEAN,
             pmtu_argv(1200): ping_reply(2), pmtu_argv(1472): ping_reply(2),
         }
         self.commands = FakeCommands(commands)
@@ -2292,8 +2350,11 @@ class PlanTest(World):
         options = Options(console_ip=CONSOLE_IP)
         runner.run_checks(checks.plan(options), self.world(options), workers=1)
         tools = {call[0] for call in self.commands.calls}
-        self.assertEqual(tools, {"omarchy", "hyprctl", "pacman", "ip", "resolvectl", "timedatectl", "iw", "journalctl",
-                                 "ping", "systemctl", "chromium", "vainfo", "busctl"})
+        self.assertEqual(tools, {"omarchy", "hyprctl", "pacman", "ip", "resolvectl", "iw", "journalctl", "ping",
+                                 "systemctl", "chromium", "vainfo", "busctl"})
+        # Tools that talk to a D-Bus activatable service run only once systemd says it is already up.
+        calls = self.commands.calls
+        self.assertLess(calls.index(RESOLVED_ACTIVE), calls.index(("resolvectl", "status")))
         for call in self.commands.calls:
             self.assertNotIn(call[0], ("sudo", "pkexec", "su", "doas", "greenlight", "greenlight-desktop", "steam"))
             if call[0] == "systemctl":

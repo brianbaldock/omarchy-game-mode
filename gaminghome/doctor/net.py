@@ -40,6 +40,8 @@ TABLE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 
 NTP_HOST = "time.cloudflare.com"
 NTP_EPOCH_OFFSET = 2208988800
+TIME_SERVICES = ("systemd-timesyncd", "chronyd", "ntpd")
+TIMESYNC_FLAG = "/run/systemd/timesync/synchronized"
 # One of the STUN servers the UDP checks contact anyway (see `udp.STUN_SERVERS`), so the
 # path MTU probe adds no destination of its own.
 PMTU_HOST = "stun.cloudflare.com"
@@ -457,14 +459,22 @@ def check_resolver(ctx: Context) -> Outcome:
     servers, domains = parse_resolv_conf(ctx.fs.read("/etc/resolv.conf") or "")
     mode = "direct"
     if any(server.startswith("127.0.0.5") for server in servers):
-        mode = "systemd-resolved"
-        status = ctx.command(["resolvectl", "status"], 4)
-        if status.ok:
-            upstream, fallback, link_domains = parse_resolvectl_status(status.stdout)
-            domains += link_domains
-            servers = upstream or fallback
-        else:
-            servers = []
+        mode, servers = "systemd-resolved", []
+        # `resolvectl` asks systemd-resolved over D-Bus, which would start it if it were stopped.
+        state = ctx.command(["systemctl", "is-active", "systemd-resolved.service"], 3).stdout.strip()
+        if state == "active":
+            status = ctx.command(["resolvectl", "status"], 4)
+            if status.ok:
+                upstream, fallback, link_domains = parse_resolvectl_status(status.stdout)
+                domains += link_domains
+                servers = upstream or fallback
+        elif state in ("inactive", "failed"):
+            for domain in domains:
+                ctx.secret(domain)
+            return warn("DNS goes to systemd-resolved's local stub (127.0.0.53), but systemd-resolved is not "
+                        "running, so lookups through it fail.",
+                        "Start it again: `sudo systemctl start systemd-resolved.service`", mode=mode, servers=[],
+                        filtering=False)
     for domain in domains:
         ctx.secret(domain)
     rows = []
@@ -642,23 +652,31 @@ def sntp_offset(ctx: Context, address: str, timeout: float = 2.0) -> float | Non
     return ((_from_ntp(data[32:40]) - sent) + (_from_ntp(data[40:48]) - received)) / 2
 
 
-def _time_sync_state(ctx: Context) -> dict[str, bool]:
-    shown = ctx.command(["timedatectl", "show", "-p", "NTP", "-p", "NTPSynchronized"], 3)
-    if not shown.ok:
+def _time_sync_state(ctx: Context) -> dict[str, Any]:
+    """The running NTP client and, for systemd-timesyncd, whether it has synchronised the clock since boot.
+
+    `timedatectl` is not asked: it talks to systemd-timedated over D-Bus, which starts that service
+    when it is not running, and no check may start anything. `systemctl is-active` and the file
+    systemd-timesyncd touches after each synchronisation answer without side effects.
+    """
+    result = ctx.command(["systemctl", "is-active", *(f"{name}.service" for name in TIME_SERVICES)], 3)
+    states = result.stdout.split()
+    if result.error or len(states) != len(TIME_SERVICES):
         return {}
-    pairs = dict(line.split("=", 1) for line in shown.stdout.splitlines() if "=" in line)
-    return {key: pairs[key].strip() == "yes" for key in ("NTP", "NTPSynchronized") if key in pairs}
+    running = [name for name, state in zip(TIME_SERVICES, states) if state == "active"]
+    synced = ctx.fs.exists(TIMESYNC_FLAG) if "systemd-timesyncd" in running else None
+    return {"enabled": bool(running), "client": running[0] if running else "", "synchronized": synced}
 
 
 def check_clock(ctx: Context) -> Outcome:
     state = _time_sync_state(ctx)
     resolution = resolve_cached(ctx, NTP_HOST, socket.AF_INET)
     offset = sntp_offset(ctx, resolution.usable[0]) if resolution.usable else None
-    synced = state.get("NTPSynchronized")
-    evidence = dict(ntp_enabled=state.get("NTP"), ntp_synchronized=synced,
+    enabled, client, synced = state.get("enabled"), state.get("client", ""), state.get("synchronized")
+    evidence = dict(ntp_enabled=enabled, ntp_client=client, ntp_synchronized=synced,
                     offset_ms=None if offset is None else round(offset * 1000), reference=NTP_HOST)
     fix = "Turn on time synchronisation: `sudo timedatectl set-ntp true`"
-    if offset is None and synced is None:
+    if offset is None and enabled is None:
         return skip("Could not read the time-sync state or reach an NTP server.", **evidence)
     if offset is not None and abs(offset) > 30:
         return fail(f"The system clock is off by about {abs(offset):.0f} s. Sign-in tokens and TLS certificates "
@@ -666,12 +684,22 @@ def check_clock(ctx: Context) -> Outcome:
     if offset is not None and abs(offset) > 5:
         return warn(f"The system clock is off by about {abs(offset):.0f} s.", fix, **evidence)
     measured = "not measured" if offset is None else f"within {max(abs(offset), 0.1):.1f} s of {NTP_HOST}"
+    if enabled is False:
+        return warn(f"No NTP client ({', '.join(TIME_SERVICES)}) is running, so nothing keeps the clock "
+                    f"synchronised (offset {measured}).", fix, **evidence)
     if synced is False:
-        return warn(f"The clock is not being synchronised by NTP (offset {measured}).", fix, **evidence)
+        return warn(f"systemd-timesyncd is running but has not synchronised the clock since boot (offset "
+                    f"{measured}).", "Check that the network lets NTP through (UDP 123): "
+                    "`journalctl -u systemd-timesyncd`", **evidence)
+    keeper = (" and systemd-timesyncd has synchronised it since boot" if synced
+              else f" and {client} is running" if client else "")
     if offset is None:
-        return ok("NTP synchronisation is active (the offset was not measured: no answer from the NTP server).",
-                  **evidence)
-    return ok(f"The clock is {measured}" + (" and NTP synchronisation is active." if synced else "."), **evidence)
+        if not synced:
+            return skip(f"{client} is running, but whether it has synchronised the clock is unknown and the offset "
+                        "was not measured (no answer from the NTP server).", **evidence)
+        return ok("systemd-timesyncd has synchronised the clock since boot (the offset was not measured: no "
+                  "answer from the NTP server).", **evidence)
+    return ok(f"The clock is {measured}{keeper}.", **evidence)
 
 
 # ---- ping: gateway loss and path MTU --------------------------------------------

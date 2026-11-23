@@ -73,7 +73,7 @@ STREAMING = (
            "hosts.handshake_ms", "hosts.tls_version", "completed", "total")),
     Check("host.clock", "System clock", "network", net.check_clock,
           "The clock is close enough for sign-in tokens and certificates.", "Anything about the account itself.",
-          ("ntp_enabled", "ntp_synchronized", "offset_ms", "reference")),
+          ("ntp_enabled", "ntp_client", "ntp_synchronized", "offset_ms", "reference")),
     Check("stun.binding", "UDP and STUN", "udp", udp.check_stun_binding,
           "Outbound UDP works and replies come back.",
           "That the ports a real stream negotiates are open, or that the console is reachable.",
