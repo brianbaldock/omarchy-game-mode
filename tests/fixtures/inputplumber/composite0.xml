@@ -75,4 +75,3 @@
     <property name="TargetDevices" type="as" access="read"/>
   </interface>
 </node>
-
