@@ -21,6 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from gaminghome import VERSION
 from gaminghome.doctor import (browser, buttons, buttonsio, checks, cli, console, context, devices, evdev, firewall,
                                hid, inputstack, model, net, redact, report, runner, stun, system, udp, wifi)
 from gaminghome.doctor.context import CommandResult, Context, FileSystem, Options
@@ -2135,10 +2136,10 @@ class SystemTest(NetCase):
         self.assertEqual(outcome.status, Status.INFO)
         expected = {"os": "Omarchy", "os_version": "4.0.6", "kernel": "7.2.15-1-omarchy", "architecture": "x86_64",
                     "omarchy": "4.0.6-1", "hyprland": "0.56.2", "session_type": "wayland", "desktop": "Hyprland",
-                    "game_mode": "0.1.0"}
+                    "game_mode": VERSION}
         self.assertEqual({key: outcome.evidence[key] for key in expected}, expected)
         self.assertEqual(outcome.detail, "Omarchy 4.0.6, Linux 7.2.15-1-omarchy x86_64, Hyprland 0.56.2, wayland "
-                                         "session, Game Mode 0.1.0.")
+                                         f"session, Game Mode {VERSION}.")
         self.assertNotIn(CANARY_HOST, outcome.detail + json.dumps(outcome.evidence))
         bare = system.check_platform(self.ctx({}, {}, env={}))
         self.assertEqual((bare.status, bare.evidence["os"], bare.evidence["omarchy"]), (Status.INFO, "Linux", ""))
@@ -2904,7 +2905,7 @@ class CliTest(CliCase):
         _code, out, _err = self.run_cli("--json")
         env = json.loads(out)["environment"]
         self.assertEqual((env["os"], env["kernel"], env["hyprland"], env["game_mode"]),
-                         ("Omarchy", "7.2.15-1-omarchy", "0.56.2", "0.1.0"))
+                         ("Omarchy", "7.2.15-1-omarchy", "0.56.2", VERSION))
         self.assertEqual(env["device"]["board"], "RC73YA")
         self.assertEqual(env["network"], {"interface": "wlp3s0", "interface_type": "wifi", "ipv6_state": "local-only"})
         self.assertEqual(env["wireless"], {"band": "5 GHz", "frequency_mhz": 5640, "channel": 128, "width_mhz": 160,
