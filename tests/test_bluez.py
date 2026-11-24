@@ -457,6 +457,14 @@ class ReadingTest(BusCase):
         for device in devices.values():
             self.assertNotIn("AA", repr(device))                             # no address, no path
 
+    def test_a_new_alias_alone_renames_the_device(self):
+        fake = self.fake()
+        path = fake.add_device(PAD, name="Pad", signal=False)
+        client = self.ready()
+        fake.set(path, DEVICE, Alias="Living room pad")                       # the Name stays as it was
+        self.until(lambda: client.snapshot.devices[0].name == "Living room pad")
+        self.assertEqual(fake.value(path, DEVICE, "Name"), "Pad")
+
     def test_a_device_that_goes_and_comes_back_is_a_new_device(self):
         fake = self.fake()
         client = self.ready()
@@ -572,6 +580,17 @@ class ReadingTest(BusCase):
         self.until(lambda: newcomer in self.tracked(client))
         self.assertEqual(self.tracked(client), {paths[0], paths[1], paths[3], newcomer})
         self.assertEqual(client.snapshot.activity.kind, bt.PAIRING)
+
+    def test_in_a_crowd_a_device_bonded_by_a_pairing_that_timed_out_stays(self):
+        fake, client, paths = self.crowd(("Target", False), ("Two", False), ("Three", False), ("Four", False))
+        fake.defer = lambda call: call[3] == "Pair"
+        client.pair(self.find(client, "Target").id)
+        self.until(lambda: fake.deferred and client._devices[paths[0]].bonded)
+        self.clock.fire_after(bluez.PAIR_TIMEOUT_MS)    # over, and not Paired yet: only Bonded keeps it
+        self.assertEqual((client.snapshot.activity, client.snapshot.failure.code), (None, bt.TIMEOUT))
+        newcomer = fake.add_device(PAD, name="Pad")
+        self.until(lambda: newcomer in self.tracked(client))
+        self.assertEqual(self.tracked(client), {paths[0], paths[2], paths[3], newcomer})
 
     def test_in_a_crowd_a_nameless_newcomer_does_not_push_out_a_named_device(self):
         fake, client, paths = self.crowd(("One", False), ("Two", False), ("Three", False), ("Four", False))
@@ -795,6 +814,26 @@ class LifecycleTest(BusCase):
         self.until(lambda: client._scan_active)
         self.assertEqual((client.snapshot.scanning, client.snapshot.failure), (True, None))
 
+    def test_an_answer_of_an_owner_that_is_gone_never_reaches_its_handler(self):
+        handled = []
+        original = bluez.BlueZ._on_scan_started
+
+        def watch(client, reply, error, path):
+            handled.append(error)
+            return original(client, reply, error, path)
+
+        with mock.patch.object(bluez.BlueZ, "_on_scan_started", watch):
+            first = self.fake()
+            client = self.ready()
+            first.defer = lambda call: call[3] == "StartDiscovery"
+            client.scan(True)
+            self.until(lambda: first.deferred)
+            first.release()                             # the owner goes while the start's answer is still to come
+            self.until(lambda: client.snapshot.state == bt.ABSENT)
+            first.answer_deferred()                     # and it comes after all
+            self.assertFalse(pump(lambda: handled, timeout=0.2))
+        self.assertEqual(handled, [])                   # dropped before any handler saw it, cancelled or not
+
     def test_a_read_that_a_newer_one_replaced_is_dropped(self):
         fake = self.fake(adapters=(0, 1))
         client = self.ready()
@@ -985,6 +1024,21 @@ class SearchTest(BusCase):
         self.assertEqual(fake.sessions[self.HCI0], {name})                     # a search that really runs
         self.assertTrue(client.snapshot.scanning)
         self.assertIsNone(client.snapshot.failure)
+
+    def test_a_stop_that_is_never_answered_lets_the_asked_for_search_start_when_it_times_out(self):
+        fake = self.fake()
+        client = self.ready()
+        client.scan(True)
+        self.until(lambda: client._scan_active)
+        fake.defer = lambda call: call[3] == "StopDiscovery"                    # stuck: never answered
+        with mock.patch.object(bluez, "CALL_TIMEOUT_MS", 50):
+            client.scan(False)
+            self.until(lambda: fake.deferred)
+            client.scan(True)
+            self.assertEqual(self.sent(fake, client).count("StartDiscovery"), 1)
+            self.until(lambda: self.sent(fake, client).count("StartDiscovery") == 2)   # once the stop timed out
+        self.until(lambda: client._scan_active)
+        self.assertEqual((client.snapshot.scanning, client.snapshot.failure), (True, None))
 
     def test_a_search_cancelled_while_the_last_stop_is_unanswered_sends_nothing_more(self):
         fake = self.fake()
@@ -1578,6 +1632,16 @@ class AgentExitTest(PairingCase):
         successor = self.fake()
         self.until(lambda: client.snapshot.state == bt.ON)
         self.assertEqual(successor.agents, {})
+
+    def test_bluez_going_away_after_the_bond_says_the_device_is_paired(self):
+        fake, client, device, path = self.pairing()
+        fake.defer = lambda call: call[3] == "Pair"
+        client.pair(device)
+        self.until(lambda: fake.deferred and client._devices[path].bonded)    # Bonded; Paired is still to come
+        fake.close()
+        self.until(lambda: client.snapshot.state == bt.ABSENT)
+        self.assertEqual(client.snapshot.failure,
+                         bt.Failure(bt.UNAVAILABLE, bt.PAIRING, bt.STAGE_PAIR, device, "Pad", paired=True))
 
     def test_a_pairing_that_fails(self):
         fake, client, device, _path = self.pairing([(FAIL, "org.bluez.Error.ConnectionAttemptFailed")])
