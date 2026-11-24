@@ -172,9 +172,11 @@ class FocusTest(unittest.TestCase):
         controls = [("bt:connect:1", True), ("bt:forget-yes:1", True), ("bt:forget-no:1", True), ("bt:close", True)]
         self.assertEqual(choose_focus("bt:connect:1", controls, first="bt:forget-no:1"), "bt:forget-no:1")
 
-    def test_when_the_control_is_gone_the_focus_goes_to_search_then_close(self):
-        self.assertEqual(choose_focus("bt:pair:4", self.CONTROLS), "bt:search")
-        without_search = [item for item in self.CONTROLS if item[0] != "bt:search"]
+    def test_when_the_control_is_gone_the_focus_goes_to_dismiss_then_search_then_close(self):
+        self.assertEqual(choose_focus("bt:pair:4", self.CONTROLS), "bt:dismiss")     # the failure line is the top
+        without_failure = [item for item in self.CONTROLS if item[0] != "bt:dismiss"]
+        self.assertEqual(choose_focus("bt:pair:4", without_failure), "bt:search")
+        without_search = [item for item in without_failure if item[0] != "bt:search"]
         self.assertEqual(choose_focus("bt:forget-yes:3", without_search), "bt:close")
 
     def test_the_focus_never_falls_on_forget_or_pair(self):

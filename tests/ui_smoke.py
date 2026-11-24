@@ -226,7 +226,7 @@ def play(word, window, source):
 
 FIRST_FOCUS = {"bt": sheet.SEARCH, "btoff": sheet.POWER, "bterror": sheet.RETRY, "btforget": f"{sheet.FORGET_NO}3",
                "btconfirm": sheet.NO, "btcode": sheet.CANCEL, "btpin": sheet.PAD_DONE, "btpasskey": sheet.PAD_DONE,
-               "btpairing": sheet.CLOSE, "btfail": f"{sheet.CONNECT}2", "btpaired": sheet.SEARCH}
+               "btpairing": sheet.CLOSE, "btfail": f"{sheet.CONNECT}2", "btpaired": sheet.DISMISS}
 
 
 def scroll_to_end(window):

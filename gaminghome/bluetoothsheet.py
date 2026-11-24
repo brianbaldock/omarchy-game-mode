@@ -26,8 +26,9 @@ PAD = "bt:pad:"
 PAD_ERASE, PAD_DONE = PAD + "erase", PAD + "done"
 PAD_KEYS = (("1", "2", "3"), ("4", "5", "6"), ("7", "8", "9"), ("erase", "0", "done"))
 
-# Where the focus goes when its control is gone: never to a control that forgets or pairs a device.
-SAFE_FOCUS = (SEARCH, CLOSE)
+# Where the focus goes when its control is gone: to Dismiss when something failed, which scrolls the failure line at
+# the top into view, then to Search or Close; never to a control that forgets or pairs a device.
+SAFE_FOCUS = (DISMISS, SEARCH, CLOSE)
 DESTRUCTIVE = (FORGET, FORGET_YES, PAIR)
 # Where the focus starts when the sheet opens. None of them changes a connection: the power switch is first only
 # while Bluetooth is off, because while it is on, Search is there before it.
@@ -149,8 +150,8 @@ def choose_focus(wanted: str | None, controls, first: str | None = None) -> str 
     ``controls`` are the sheet's controls in order, as ``(name, enabled)``. ``first`` is where a part that has just
     appeared wants the focus to start (No for a number to compare, Cancel for a question); it wins over the control
     that had the focus. Otherwise the focus stays on the control of the same name, even one that is disabled while
-    something runs: the window only dims it. When that control is gone, the focus goes to Search or Close, or else
-    to the first enabled control that neither forgets nor pairs a device.
+    something runs: the window only dims it. When that control is gone, the focus goes to the failure's Dismiss, to
+    Search or to Close, or else to the first enabled control that neither forgets nor pairs a device.
     """
     enabled = {name: on for name, on in controls}
     if first and enabled.get(first):
