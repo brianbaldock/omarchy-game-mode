@@ -34,6 +34,8 @@ USAGE = """Usage: omarchy-game-mode [COMMAND]
   autostart on|off|status Login autostart (owned XDG entry)
   mapper on|off|status    Let Game Mode switch AntiMicroX sets (off by default)
   keyboard [toggle|show|hide|status]  Control the touch keyboard
+  power [status|cycle]    Print the power profile, or switch to the next one offered
+  power set PROFILE       Set the power profile: power-saver, balanced or performance
   status                  Print JSON status
   doctor [SCOPE|buttons]  Read-only streaming and controller checks (see doctor --help)
   quit                    Restore controller sets and exit
@@ -131,6 +133,11 @@ class Runtime:
         """The Bluetooth of the Home header and its sheet. The window starts it when it is mapped and stops it when it is not."""
         from .bluez import BlueZ
         return BlueZ(on_change)
+
+    def power(self, on_change):
+        """The power profile of the Home header. The window starts it when it is mapped and stops it when it is not."""
+        from .powerprofiles import PowerProfiles
+        return PowerProfiles(on_change)
 
     def _probe_installed(self) -> set[str]:
         return {a.id for a in self.catalog.apps if a.supported_on(self.arch) and self.availability.installed(a)}
@@ -714,6 +721,10 @@ def main(argv=None):
             return 1
         print(result["detail"], file=sys.stdout if result["ok"] else sys.stderr)
         return 0 if result["ok"] else 1
+    if command == "power":
+        # Answered by this process, never by a running instance: it needs no window.
+        from .powerprofiles import main as power_main
+        return power_main(argv[2:], usage=USAGE)
     app = GameModeApplication()
     if command in ("status", "quit", "help", "--help", "-h", "--version", "autostart", "mapper"):
         # Answer locally when no instance runs, without starting watchers.

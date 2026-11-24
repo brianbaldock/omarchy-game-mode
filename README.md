@@ -613,6 +613,9 @@ omarchy-game-mode mode auto|game|desktop
 omarchy-game-mode autostart on|off|status
 omarchy-game-mode status             Print JSON status
 omarchy-game-mode mapper on|off|status  Let Game Mode switch AntiMicroX sets
+omarchy-game-mode power [status]     Print the power profile, the profiles offered and any holds
+omarchy-game-mode power set <profile>  power-saver, balanced or performance
+omarchy-game-mode power cycle        Switch to the next power profile offered
 omarchy-game-mode quit               Restore the original AntiMicroX sets and exit
 ```
 
@@ -629,6 +632,23 @@ reads and, under `inputplumber`, what a running InputPlumber manages. Review it 
 posting: window titles can contain private information. Its `selected` field names the
 control that has the focus; on the Bluetooth digit pad it says only `bt:pad`, not which
 key, so a PIN being typed is not given away.
+
+`omarchy-game-mode power` prints the active power profile (`power-saver`, `balanced` or
+`performance`), the profiles this machine really offers (a profile that only
+power-profiles-daemon's placeholder backs changes nothing and is left out) and any program
+holding one. `power set <profile>` and `power cycle` change it through power-profiles-daemon;
+`cycle` goes from power-saver to balanced to performance and back, through the profiles
+offered, and does nothing from a profile that is not one of them. Choosing a different
+profile ends every hold other programs have on one, as power-profiles-daemon does for any
+change. When Omarchy's `omarchy-powerprofiles-set` is installed, the choice is also kept for
+the current power source. The command needs no running Game Mode, waits for a change still
+running from an earlier press, and exits 1 with a one-line reason when a change fails (for
+example `denied` from an ssh session, which polkit refuses) and 2 on bad usage, so a key can
+run it. In a custom Omarchy Hyprland Lua bindings file:
+
+```lua
+o.bind("F14", "Cycle the power profile", "omarchy-game-mode power cycle")
+```
 
 `omarchy-game-mode doctor` is described in the next section. It always answers in the
 terminal you ran it from, even while Game Mode is running.
