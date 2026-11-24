@@ -23,6 +23,9 @@ INPUTPLUMBER_BUS_NAME = "org.shadowblip.InputPlumber"
 WATCHED_PROCESSES = frozenset({"inputplumber", "hhd", "antimicrox", "steam"})
 INSTALL_INPUTPLUMBER = ("`omarchy pkg add inputplumber` then `sudo systemctl enable --now inputplumber.service "
                         "inputplumber-suspend.service`")
+UDEV_ENTRY_ADVICE = ("Game Mode ships a udev entry that has the kernel report the standard codes; its root steps are "
+                     "in the README under \"ASUS ROG Xbox Ally controller layout\". On a kernel without ASUS's Ally "
+                     "HID driver, InputPlumber is not a mapping upgrade by itself.")
 ENABLE_SUSPEND_HOOK = "sudo systemctl enable inputplumber-suspend.service"
 ASUS_VENDOR = 0x0B05
 UDEV_RUNTIME_RULES = "/run/udev/rules.d"
@@ -108,11 +111,13 @@ def check_gamepads(ctx: Context) -> Outcome:
                     "(usually membership of the `input` group).", **evidence)
     incomplete = [device for device in usable if device.missing_controls() or device.hid_ordered]
     if incomplete:
+        handheld = known_handheld(dmi(ctx))
+        remedy = (_udev_advice(handheld) if handheld and handheld.udev_entry else
+                  "On a handheld, an input daemon such as InputPlumber provides a controller with the standard codes.")
         return warn(f"Apps see a controller without the standard control codes: {summary}",
                     "Games and Steam act on the standard codes, so a control that is not listed, or arrives "
                     "under another code, does the wrong thing or nothing. `omarchy-game-mode doctor buttons` "
-                    "shows what each press really sends. On a handheld, an input daemon such as InputPlumber "
-                    "provides a controller with the standard codes.", **evidence)
+                    f"shows what each press really sends. {remedy}", **evidence)
     return ok(f"Every controller apps can see lists the standard controls: {summary}", **evidence)
 
 
@@ -135,6 +140,10 @@ def check_input_stack(ctx: Context) -> Outcome:
     return info("; ".join(parts) + ".", **evidence)
 
 
+def _udev_advice(handheld: Handheld) -> str:
+    return UDEV_ENTRY_ADVICE + ("" if handheld.verified else " This project has not tested the entry on this model.")
+
+
 def handheld_verdict(handheld: Handheld | None, found: Sequence[InputDevice], stack: Stack) -> Outcome:
     """What the controller setup means on a known handheld. Pure: all inputs are already probed."""
     evidence = dict(handheld=handheld.name if handheld else "", verified=bool(handheld and handheld.verified),
@@ -145,12 +154,17 @@ def handheld_verdict(handheld: Handheld | None, found: Sequence[InputDevice], st
     raw = [device for device in found if not device.virtual]
     virtual = [device for device in found if device.virtual and not device.missing_controls()]
     if not stack.daemons:
+        if raw and not any(device.missing_controls() or device.hid_ordered for device in raw):
+            return info(f"{handheld.name}: no handheld input daemon is running, and the built-in controller already "
+                        "lists the standard controls. Back paddles and vendor buttons still arrive as keyboard keys "
+                        "or not at all.", **evidence)
         missing = next((device.missing_controls() for device in raw if device.missing_controls()), [])
         gap = f" The built-in controller does not list {', '.join(missing)}." if missing else ""
+        remedy = (_udev_advice(handheld) if handheld.udev_entry else
+                  f"Install InputPlumber, which ships a profile for this device: {INSTALL_INPUTPLUMBER}.{tested}")
         return warn(f"{handheld.name}: no handheld input daemon is running, so apps get the raw built-in "
                     f"controller.{gap} Back paddles and vendor buttons arrive as keyboard keys or not at all.",
-                    f"Install InputPlumber, which ships a profile for this device: {INSTALL_INPUTPLUMBER}.{tested}",
-                    **evidence)
+                    remedy, **evidence)
     daemon = " and ".join(stack.daemons)
     if not virtual:
         return warn(f"{handheld.name}: {daemon} is running, but no complete virtual controller was found.",

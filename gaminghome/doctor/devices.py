@@ -24,14 +24,15 @@ class Handheld:
     values: tuple[str, ...]
     vendor: str
     verified: bool = False
+    udev_entry: bool = False  # Game Mode ships a udev entry that gives this model's pad the standard codes
 
 
 # DMI matches taken from InputPlumber's device definitions
 # (ShadowBlip/InputPlumber, rootfs/usr/share/inputplumber/devices/50-*.yaml, checked against 0.82.0).
 # `verified` marks hardware this project has physically tested; the rest is listed, not tested.
 HANDHELDS = (
-    Handheld("ASUS ROG Xbox Ally", "board_name", ("RC73YA",), "asustek", verified=True),
-    Handheld("ASUS ROG Xbox Ally X", "board_name", ("RC73XA",), "asustek"),
+    Handheld("ASUS ROG Xbox Ally", "board_name", ("RC73YA",), "asustek", verified=True, udev_entry=True),
+    Handheld("ASUS ROG Xbox Ally X", "board_name", ("RC73XA",), "asustek", udev_entry=True),
     Handheld("ASUS ROG Ally", "board_name", ("RC71L",), "asustek"),
     Handheld("ASUS ROG Ally X", "board_name", ("RC72LA",), "asustek"),
     Handheld("Lenovo Legion Go", "product_name", ("83E1",), "lenovo"),
