@@ -498,6 +498,21 @@ class ReadingTest(BusCase):
         self.assertEqual([device.name for device in bt.remembered(snapshot.devices)], ["Device 1990", "Device 1999"])
         self.assertEqual(snapshot.devices[2].name, "Device 0")                  # then the rest in the order read
 
+    def test_changes_nobody_shows_do_not_even_arm_a_timer(self):
+        fake = self.fake()
+        path = fake.add_device(PAD, name="Pad", signal=False)
+        client = self.ready()
+        snapshot = client.snapshot
+        for changed in ({"RSSI": GLib.Variant("n", -40)}, {"TxPower": GLib.Variant("n", 4)},
+                        {"ManufacturerData": GLib.Variant("a{qv}", {0x004C: blob(64)})},
+                        {"ServiceData": GLib.Variant("a{sv}", {})}, {"AdvertisingFlags": GLib.Variant("ay", b"\x06")},
+                        {"Name": GLib.Variant("s", "Pad"), "Paired": GLib.Variant("b", False)}):
+            client._on_signal(None, fake.unique_name, path, PROPERTIES, "PropertiesChanged",
+                              GLib.Variant("(sa{sv}as)", (DEVICE, changed, [])), client._epoch)
+            self.assertEqual(self.clock.pending, {}, changed)
+        self.assertIs(client.snapshot, snapshot)
+        self.assertTrue(client.idle)
+
     def test_changes_nobody_shows_are_not_reported(self):
         fake = self.fake()
         path = fake.add_device(PAD, name="Pad", signal=False)
@@ -540,11 +555,12 @@ class ReadingTest(BusCase):
         client = self.ready()
         snapshot = client.snapshot
         impostor = self.bus.connect()
+        renamed = {"Alias": GLib.Variant("s", "Impostor"), "Name": GLib.Variant("s", "Impostor")}
         impostor.emit_signal(None, path, PROPERTIES, "PropertiesChanged",
-                             GLib.Variant("(sa{sv}as)", (DEVICE, {"Name": GLib.Variant("s", "Impostor")}, [])))
+                             GLib.Variant("(sa{sv}as)", (DEVICE, renamed, [])))
         impostor.emit_signal(None, "/", "org.freedesktop.DBus.ObjectManager", "InterfacesRemoved",
                              GLib.Variant("(oas)", (path, [DEVICE])))
-        parameters = GLib.Variant("(sa{sv}as)", (DEVICE, {"Name": GLib.Variant("s", "Impostor")}, []))
+        parameters = GLib.Variant("(sa{sv}as)", (DEVICE, renamed, []))
         client._on_signal(None, impostor.get_unique_name(), path, PROPERTIES, "PropertiesChanged", parameters,
                           client._epoch)                                        # delivered after all: dropped
         client._on_signal(None, fake.unique_name, path, PROPERTIES, "PropertiesChanged", parameters,
