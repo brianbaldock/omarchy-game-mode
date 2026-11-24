@@ -135,7 +135,7 @@ class PowerCommandTest(unittest.TestCase):
                          (1, "", "unsupported: this machine does not offer performance\n"))
         self.assertEqual(self.sets(fake), [])
 
-    def test_cycle_goes_up_one_offered_profile_at_a_time_and_round_again(self):
+    def test_cycle_goes_up_one_offered_profile_at_a_time_and_back_to_the_first(self):
         fake = self.fake(active=SAVER)
         for expected in (BALANCED, PERFORMANCE, SAVER):
             self.assertEqual(self.run_command("cycle"), (0, expected + "\n", ""))
