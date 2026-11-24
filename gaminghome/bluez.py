@@ -153,8 +153,13 @@ ERRORS = {
     "TimedOut": TIMEOUT,
 }
 # The short reason of a ``Failed`` error is not documented API: these words are looked for loosely, first match wins.
-REASONS = (("page-timeout", UNREACHABLE), ("page timeout", UNREACHABLE), ("host is down", UNREACHABLE),
-           ("key-missing", AUTH_FAILED), ("rfkill", BLOCKED), ("blocked", BLOCKED))
+# In BlueZ 5.87 (src/error.h) a device that does not answer gives ``br-connection-page-timeout``,
+# ``br-connection-timeout`` or ``le-connection-timeout``, and an LE connection the kernel gave up on
+# ``le-connection-abort-by-local``; ``*-key-missing`` is a device that forgot the pairing. BR/EDR's
+# ``br-connection-aborted-by-local`` (spelled differently) is a local termination for other reasons: FAILED.
+REASONS = (("page-timeout", UNREACHABLE), ("page timeout", UNREACHABLE), ("connection-timeout", UNREACHABLE),
+           ("abort-by-local", UNREACHABLE), ("host is down", UNREACHABLE), ("key-missing", AUTH_FAILED),
+           ("rfkill", BLOCKED), ("blocked", BLOCKED))
 
 # Icon names BlueZ gives devices, and what the window draws for them.
 ICONS = {"audio-headset": "headset", "audio-headphones": "headphones", "audio-card": "speaker",

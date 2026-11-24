@@ -62,11 +62,17 @@ class ErrorTableTest(unittest.TestCase):
         self.assertEqual(bluez.failure_code("org.bluez.Error.AuthenticationFailed", cancelled=True), bt.CANCELED)
 
     def test_the_reason_of_failed_is_matched_loosely(self):
-        reasons = {"br-connection-page-timeout": bt.UNREACHABLE, "le-connection-page-timeout": bt.UNREACHABLE,
+        reasons = {"br-connection-page-timeout": bt.UNREACHABLE, "br-connection-timeout": bt.UNREACHABLE,
+                   "le-connection-timeout": bt.UNREACHABLE, "le-connection-abort-by-local": bt.UNREACHABLE,
                    "Host is down": bt.UNREACHABLE, "br-connection-key-missing": bt.AUTH_FAILED,
-                   "Blocked through rfkill": bt.BLOCKED, "adapter BLOCKED": bt.BLOCKED,
-                   "br-connection-refused": bt.FAILED, "": bt.FAILED}
+                   "le-connection-key-missing": bt.AUTH_FAILED, "Blocked through rfkill": bt.BLOCKED,
+                   "adapter BLOCKED": bt.BLOCKED, "br-connection-aborted-by-local": bt.FAILED,
+                   "le-connection-abort-by-remote": bt.FAILED, "br-connection-refused": bt.FAILED,
+                   "br-connection-canceled": bt.FAILED, "": bt.FAILED}
         self.assertEqual({reason: bluez.failure_code("org.bluez.Error.Failed", reason) for reason in reasons}, reasons)
+        # The user's cancel still decides, whatever the reason says.
+        self.assertEqual(bluez.failure_code("org.bluez.Error.Failed", "le-connection-abort-by-local", cancelled=True),
+                         bt.CANCELED)
 
     def test_no_such_object_means_gone_only_for_a_device_or_an_adapter(self):
         for name in ("org.bluez.Error.DoesNotExist", "org.bluez.Error.InvalidArguments",
@@ -1392,8 +1398,9 @@ class DeviceTest(BusCase):
 
     def test_a_connection_that_fails_says_why_without_its_text(self):
         fake, client, device, _path = self.remembered()
-        for reason, code in (("br-connection-page-timeout", bt.UNREACHABLE), ("br-connection-key-missing",
-                                                                              bt.AUTH_FAILED)):
+        for reason, code in (("br-connection-page-timeout", bt.UNREACHABLE), ("le-connection-abort-by-local",
+                                                                              bt.UNREACHABLE),
+                             ("br-connection-key-missing", bt.AUTH_FAILED)):
             fake.failures["Connect"] = ("org.bluez.Error.Failed", reason)
             client.connect(device)
             self.until(lambda: client.snapshot.activity is None)
