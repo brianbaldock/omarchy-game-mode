@@ -37,7 +37,9 @@ This is an independent preview, not an official Omarchy component.
   then `LANG`, and you can pick a language in Settings. Missing strings fall back to
   English.
 - **Theme**: uses your current Omarchy theme colors when they can be read, with a dark
-  fallback. There are no background images, network fetches or idle redraws.
+  fallback. There are no background images or idle redraws, and the launcher itself makes
+  no network requests. Only the `doctor` command, when you run it, sends the diagnostic
+  probes listed under [Doctor](#doctor).
 
 ## Controls
 
@@ -375,9 +377,210 @@ the autostart file Game Mode created.
 reads and, under `inputplumber`, what a running InputPlumber manages. Review it before
 posting: window titles can contain private information.
 
+`omarchy-game-mode doctor` is described in the next section. It always answers in the
+terminal you ran it from, even while Game Mode is running.
+
 ### Upgrading from an earlier preview
 
 Quit the old running version with `omarchy-game-mode quit` before installing this update: its application ID changed to `io.github.brianbaldock.OmarchyGameMode`, so a new instance cannot quit the old one. Reinstall at the same prefix; old launcher/icon filenames are removed. A login entry owned by Game Mode remains recognized and is migrated by `autostart on` or removed by `autostart off`. Unowned legacy entries are left alone. Update any custom window rules or favorites that refer to the old ID.
+
+## Doctor
+
+`omarchy-game-mode doctor` checks what Xbox Remote Play, Xbox Cloud Gaming and your
+controller need on this device. Every result says what it proves and what it does not.
+
+```
+omarchy-game-mode doctor                  Everything below
+omarchy-game-mode doctor streaming        Network, Wi-Fi, firewall, clients, video decode
+omarchy-game-mode doctor input            Controllers and input daemons
+omarchy-game-mode doctor system           Device, system and GPU facts only
+omarchy-game-mode doctor --console-ip 192.168.1.50   Also probe your console's address
+omarchy-game-mode doctor --markdown       Redacted report to paste into an issue
+omarchy-game-mode doctor --json           The same report for tools
+omarchy-game-mode doctor --timeout 3      No check gets more than 3 seconds
+omarchy-game-mode doctor buttons          Guided button test (see below)
+```
+
+What it checks:
+
+- **Network path:** default route, IPv6 consistency, VPN or proxy in the way, which DNS
+  resolver answers, the Microsoft and Xbox service names, TLS to them, the clock, MTU.
+- **Streaming transport:** UDP to Microsoft's relay and two public STUN servers, the
+  relay's TURN challenge, and how your router maps one connection to several servers.
+- **Wi-Fi:** band, channel width, radar-shared (DFS) spectrum, signal, power saving,
+  roams and disconnects in the last 10 minutes, loss between the device and the router.
+- **Firewall:** which firewall is active and, for ufw, what its saved policy and rules
+  would do to outbound UDP, for IPv4 and IPv6 separately. Saved rules are not the live
+  ones, which only root can read.
+- **Clients and video:** browsers, Greenlight, browser flag files, hardware H.264 decode.
+- **Controller:** which control codes each gamepad lists (read without a handheld daemon,
+  the ROG Xbox Ally's built-in pad lists generically numbered buttons and no standard
+  right-stick click), InputPlumber, Handheld Daemon and AntiMicroX, and controller
+  interfaces that another daemon has hidden.
+- **Vibration:** whether the kernel offers games rumble (`FF_RUMBLE`) on each controller
+  and, for a physical controller, whether its HID report descriptor declares a haptics
+  output report. On Linux 7.2 the ROG Xbox Ally's built-in pad declares one (report 0x0D,
+  laid out like the Xbox One controller's) but the kernel offers no force feedback for
+  it, so games cannot make it vibrate through evdev. The doctor verifies these two facts,
+  both read from sysfs, and not that any program can make the controller vibrate. A
+  direct test on one RC73YA, writing to that report outside the doctor, made the left
+  and right grip motors vibrate through the third and fourth magnitudes; the first two,
+  which the Xbox One layout gives to the triggers, produced nothing.
+
+What it never does:
+
+- **No root.** It never runs `sudo`. Where only root can answer, it prints the command
+  for you to run and marks the result "cannot verify without root".
+- **No changes.** Nothing is written (not even Python bytecode caches), installed,
+  enabled, started or stopped. No controller is grabbed and no input is injected. Advice
+  is text you can act on or ignore.
+- **No account access.** It does not sign in and never reads tokens, cookies, browser
+  profiles or keyrings. Greenlight is never started.
+- **No discovery.** Nothing is broadcast and no network is scanned. Your console is
+  contacted only when you pass `--console-ip` with its private address, and then with an
+  anonymous STUN request on UDP 9002 and one connection attempt on TCP 3074.
+
+What it sends, only while you run it: DNS lookups for the names below, and TLS handshakes
+(no request, no credentials) with `login.live.com`, `user.auth.xboxlive.com`,
+`xsts.auth.xboxlive.com`, `www.xbox.com`, `xhome.gssv-play-prod.xboxlive.com` and
+`gssv-play-prod.xboxlive.com`; anonymous STUN to `relay.communication.microsoft.com`,
+`stun.cloudflare.com` and `stun.l.google.com`; one unauthenticated TURN request to
+Microsoft's relay (its answer, usually a redirect to a regional relay, is reported; the
+regional relay is never contacted); one time query to `time.cloudflare.com`; and a few
+pings to your router and to `stun.cloudflare.com`. Names are looked up as absolute names,
+so no search domain is ever appended, and only probed at public unicast addresses, whatever
+the resolver answers. The tools it runs get no display, D-Bus address, proxy or resolver
+setting from your environment, and hardware video decode is read from the local GPU render
+node (`vainfo --display drm`). With `--console-ip`, the console probes described above go
+to that one address.
+
+Reading the result:
+
+```
+Streaming transport (UDP)
+  [PASS] UDP and STUN: All 3 STUN servers answered (Microsoft relay 80 ms, Cloudflare 4 ms,
+         Google 10 ms); public address <public-ip-1>.
+         proves: Outbound UDP works and replies come back. Not: That the ports a real stream
+                 negotiates are open, or that the console is reachable.
+...
+Not verifiable from this device
+  [SKIP] Live firewall rules: cannot verify without root — run: sudo ufw status numbered verbose
+
+Result: INCONCLUSIVE: no failures in what was tested, 2 warnings. Not verified: Live firewall
+        rules, Console settings and account, Live failed attempt.
+```
+
+`[PASS]`, `[WARN]`, `[FAIL]`, `[SKIP]` and `[INFO]` mark each check. A streaming report
+ends with **INCONCLUSIVE** even when every check passes, because three things cannot be
+seen from this device: the live firewall rules, the console's own settings, and what
+happens during a real connection attempt. A clean report rules causes out; it is not a
+promise that a stream connects. The exit status is 0 when no check failed, 1 when at
+least one failed and 2 for a usage error. Ctrl-C, SIGTERM and SIGHUP stop it with 128 plus
+the signal number (130 for Ctrl-C), and only after every tool it started has been ended.
+
+Microsoft's supported-browser list for `xbox.com/play` and `xbox.com/remoteplay` does
+not include desktop Linux, so the doctor always warns that the web client can fail here
+whatever the network looks like. Greenlight is the client to compare against.
+
+**Privacy.** Reports are redacted before they are printed. Public IP addresses become
+tokens such as `<public-ip-1>` (the same address gets the same token within one report),
+private addresses keep only their first two numbers (`192.168.x.x`), and the Wi-Fi network
+name, access-point and device MAC addresses, host name, user name, home directory, DNS
+search domains and serial numbers are never included. A controller or key device is
+named only when its name is a model name the doctor knows (such as `Microsoft X-Box One
+Elite 2 pad` or `ASUSTeK Computer Inc. N-KEY Device`); any other name was chosen by the
+firmware or by whoever paired it, and is shown as `<controller>` or `<device>`. Network
+interfaces keep generic names such as `wlp3s0`, `wg0` or `tailscale0`; a name someone chose
+(`wg-office`) becomes an alias such as `vpn-1`, the same within one report. Values
+are scrubbed wherever they appear, not only in known fields: serial-like tokens and
+joined hex groups (`AB12-CD34-EF56`) show up as `<id>`, MAC addresses as `<mac>`, and a
+private path as `<home-path>`. `--no-redact` shows IP addresses in full for your own
+debugging; it cannot be combined with `--markdown`.
+
+**Sharing a report.** Run `omarchy-game-mode doctor --markdown`, read it once, and paste
+it into the "Optional redacted evidence" field of the
+[hardware-validation issue form](https://github.com/brianbaldock/omarchy-game-mode/issues/new?template=hardware-validation.yml).
+
+The doctor's output is English only by design, so reports read the same for everyone who
+helps with them; it adds no strings to the translated interface.
+
+### Hardware button test
+
+`omarchy-game-mode doctor buttons` asks you to press each control once and shows the code
+that really arrives for it: the Xbox button, View, Menu, A, B, X, Y, the bumpers and
+triggers, both stick clicks, the D-pad, both sticks, the back paddles, the Armoury Crate
+button (small, top left) and the Library button (small, top right). Run it in a terminal;
+Enter skips a control and `q` stops the test.
+
+```
+omarchy-game-mode doctor buttons                        Test the controller games see
+omarchy-game-mode doctor buttons --markdown > buttons.md   Prompts stay on the terminal
+omarchy-game-mode doctor buttons --raw                  Also watch the raw HID report
+omarchy-game-mode doctor buttons --device /dev/input/event21   Read only this device
+```
+
+It is read-only. Controllers are read non-exclusively from evdev and never grabbed;
+nothing is remapped and no input is sent. Every press, the Xbox (Guide) button
+included, therefore still reaches Steam, your games and other apps while the test runs,
+so leave nothing open that a stray press could affect. It tests the controller that
+games see: the virtual controller of a handheld daemon such as InputPlumber when one is
+running, otherwise the built-in one. Devices it is not allowed to read are listed with
+the reason.
+
+On the ROG Xbox Ally the small buttons (Armoury Crate, top left; Library, top right) and
+the back paddles arrive as keyboard keys on a node only root can read, so without a
+handheld daemon the test may see nothing for them. On one RC73YA a press test run as
+root saw the Armoury Crate button as `KEY_F16` and a back paddle as `KEY_F15` on one
+interface, and the Library button as `KEY_F22` on another. The test marks them not
+tested instead of failed and prints the command that shows them, `sudo evtest` with
+each such node it found (for example `sudo evtest /dev/input/event5`); it never runs it.
+
+Nothing about your controller is assumed. At the end the test lists where it differs
+from an Xbox-style pad on Linux, for example an Xbox button that sends the View code (so
+Steam does not open its menu), a right-stick click that never arrives, paddles that
+arrive as keyboard keys, or two buttons that send the same code. It also prints an SDL
+mapping line built only from the presses it saw and names the controls it left out.
+
+`--raw` additionally reads the controller's raw HID report, when your user is allowed
+to, and tells you when a press changes bits the controller never declared. That is how a
+button that exists in the hardware but is invisible to the kernel shows up. Only a raw
+interface of the same physical device as the controller under test (the same USB device
+in sysfs) is ever read, never another controller's. When there is no such interface, or
+the controller under test is a daemon's virtual one, the test says `raw report
+unavailable` and why, and goes on without it; with `--device` it does not start.
+
+To share a result, run it with `--markdown` and paste the file into the
+hardware-validation issue form. It holds the device model, kernel and input-stack
+versions and one row per control (pass, fail or not tested). Serial numbers and device
+addresses are never read.
+
+## Xbox Remote Play: before you troubleshoot
+
+Remote Play streams from your own console, so most of what decides whether it connects
+is set on the console. Check these there first; none of them can be seen from the handheld.
+
+1. **Update and restart** the console, and make sure nobody else is in a remote session.
+2. **Remote features:** press the Xbox button, then go to *Profile & system > Settings >
+   Devices & connections > Remote features*. Tick **Enable remote features**. Under
+   **Power options** choose **Sleep**; a console set to *Shutdown (energy saving)* cannot
+   be woken remotely.
+3. **Same profile:** sign in to Greenlight with the Xbox profile that is signed in on the
+   console. If *Remote features* shows **Xbox app preferences**, allow connections there.
+4. **Test remote play:** on the *Remote features* page, run **Test remote play** and note
+   what it reports. Away from home, Microsoft asks for at least 4.75 Mbps upload (9 Mbps
+   recommended) and less than 150 ms latency.
+5. **Network:** in *Profile & system > Settings > General > Network settings* run **Test
+   network connection** and **Test NAT type**. *Open* or *Moderate* is fine.
+6. **If the NAT type is Strict:** turn on UPnP on your router, or forward UDP port 9002
+   to the console (never to the handheld), and remove a second router in between if there
+   is one. Then test again.
+7. **Same network:** for a first test put the console and the handheld on the same
+   trusted network, not a guest network, and wire the console if you can. The console's
+   address is under *Network settings > Advanced settings*; pass it to
+   `omarchy-game-mode doctor --console-ip` to check that the handheld can reach it.
+
+None of this applies to Xbox Cloud Gaming, which runs on Microsoft's servers: there the
+things to check are the account, the region and the subscription.
 
 ## Uninstall
 

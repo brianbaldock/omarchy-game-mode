@@ -61,7 +61,10 @@ the initial mapper set. Test fullscreen and windowed games separately. With Inpu
 whether its virtual gamepad navigates Home, what the vendor buttons do there (nothing
 should be selected), and suspend and resume.
 
-`omarchy-game-mode status` helps, but review it before posting: window titles can
+Attach `omarchy-game-mode doctor --markdown` as the report: it lists the device,
+versions, input stack and network checks, and it is redacted before it is printed (no
+addresses in full, no network or host names, no serial numbers). Read it once before
+posting. `omarchy-game-mode status` helps too, but review it first: window titles can
 contain private information. Never post credentials, full process environments,
 account details, controller serial numbers or unredacted desktop recordings.
 Do not grant extra device permissions or bypass a lock screen for a report.
