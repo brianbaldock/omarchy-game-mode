@@ -1,11 +1,14 @@
 """The Bluetooth button and sheet without a display: what they show, what their controls do, and that every way out
-of the sheet ends its search and its pairing. The source is always the scripted FakeBluetooth."""
+of the sheet ends its search and its pairing. The window's own methods run on stand-ins, as in test_headerstatus,
+because the real window needs a display; the source is always the scripted FakeBluetooth."""
 
 import ast
+import importlib
 import json
 import re
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from fakes.fake_bluetooth import FakeBluetooth
@@ -703,6 +706,152 @@ class FakeBluetoothTest(unittest.TestCase):
         imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
         imported |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
         self.assertEqual(imported, {"__future__", "dataclasses", "gaminghome"})
+
+
+class WindowTest(unittest.TestCase):
+    """The window's Bluetooth glue, run on a stand-in for the window around a real BluetoothSheet and the fake."""
+
+    @classmethod
+    def setUpClass(cls):
+        importlib.import_module("gaminghome.application")             # pins Gtk 4 before the window module needs it
+        cls.window = importlib.import_module("gaminghome.ui").HomeWindow
+        cls.source_text = (ROOT / "gaminghome" / "ui.py").read_text(encoding="utf-8")
+        tree = next(node for node in ast.parse(cls.source_text).body if isinstance(node, ast.ClassDef)
+                    and node.name == "HomeWindow")
+        cls.methods = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+    def calls(self, name):
+        return [node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+                for node in ast.walk(self.methods[name]) if isinstance(node, ast.Call)]
+
+    def stand_in(self, source, sheet_name="bluetooth"):
+        window = mock.MagicMock()
+        window._bluetooth = BluetoothSheet(source)
+        window._bluetooth.enter()
+        window.sheet = sheet_name
+        for name in ("_leave_bluetooth", "close_sheet", "back", "handle_action", "open_settings", "open_app",
+                     "_on_unmap", "_on_map", "stop_status"):
+            setattr(window, name, getattr(self.window, name).__get__(window))
+        return window
+
+    def pairing_world(self):
+        source = world()
+        source.add_device("Speaker", "speaker")
+        source.pair(4)
+        source.show_prompt(bt.PIN, max_length=16)
+        return source
+
+    def assert_left(self, source, cancelled=True):
+        self.assertIn(("scan", False), source.calls)
+        self.assertEqual(("cancel",) in source.calls, cancelled)
+        self.assertIsNone(source.snapshot.prompt)
+
+    def test_b_and_close_and_escape_leave_through_close_sheet(self):
+        from gaminghome.core import BACK
+        source = self.pairing_world()
+        window = self.stand_in(source)
+        window.handle_action(BACK)                                    # first B gives up the pairing
+        self.assertEqual((window.sheet, source.calls[-1]), ("bluetooth", ("cancel",)))
+        window.handle_action(BACK)                                    # then closes
+        self.assertIsNone(window.sheet)
+        self.assertFalse(window._bluetooth.visiting)
+        self.assert_left(source)
+
+    def test_closing_the_sheet_leaves_it(self):
+        source = self.pairing_world()
+        window = self.stand_in(source)
+        window.close_sheet()
+        self.assert_left(source)
+
+    def test_menu_closes_the_bluetooth_sheet_instead_of_opening_settings(self):
+        from gaminghome.core import MENU
+        source = self.pairing_world()
+        window = self.stand_in(source)
+        window.handle_action(MENU)
+        self.assertIsNone(window.sheet)
+        self.assert_left(source)
+        window._build_settings_sheet.assert_not_called()
+
+    def test_another_sheet_taking_its_place_leaves_it(self):
+        for opening in (lambda window: window.open_settings(), lambda window: window.open_app("steam")):
+            source = self.pairing_world()
+            window = self.stand_in(source)
+            opening(window)
+            self.assertNotEqual(window.sheet, "bluetooth")
+            self.assert_left(source)
+
+    def test_hiding_the_window_leaves_and_closes_the_sheet_and_stops_bluetooth(self):
+        source = self.pairing_world()
+        window = self.stand_in(source)
+        window._on_unmap()
+        self.assertIsNone(window.sheet)
+        window.scrim.set_visible.assert_called_with(False)
+        self.assert_left(source)
+        self.assertEqual((source.running, source.calls[-1]), (False, ("stop",)))
+
+    def test_quitting_leaves_the_sheet_and_stops_bluetooth(self):
+        source = self.pairing_world()
+        window = self.stand_in(source)
+        window.stop_status()
+        self.assert_left(source)
+        self.assertFalse(source.running)
+
+    def test_showing_the_window_starts_bluetooth(self):
+        source = FakeBluetooth()
+        window = self.stand_in(source, None)
+        window._on_map()
+        self.assertTrue(source.running)
+
+    def test_building_the_window_again_leaves_the_sheet_first(self):
+        # build() makes widgets and needs a display, so its first lines are read off its source.
+        body = self.methods["build"].body
+        statements = [ast.get_source_segment(self.source_text, node) for node in body[0:2]]
+        self.assertEqual(statements[0], "self._leave_bluetooth()")
+        self.assertTrue(statements[1].startswith('if self.sheet == "bluetooth":'))
+
+    def test_every_way_out_goes_through_the_one_cleanup(self):
+        for name in ("close_sheet", "open_settings", "open_app", "build", "_on_unmap", "stop_status"):
+            self.assertIn("_leave_bluetooth", self.calls(name), name)
+        self.assertEqual([name for name, node in self.methods.items() if "leave" in self.calls(name)],
+                         ["_leave_bluetooth"])
+
+    def test_the_source_is_made_once_by_the_constructor(self):
+        made = [name for name in self.methods if "bluetooth" in self.calls(name)]
+        self.assertEqual(made, ["__init__"])
+        segment = ast.get_source_segment(self.source_text, self.methods["__init__"])
+        self.assertIn("runtime.bluetooth(self._on_bluetooth)", segment)
+
+    def test_a_change_repaints_the_button_and_the_sheet_and_never_the_whole_window(self):
+        for name in ("_on_bluetooth", "_paint_bluetooth_button", "_render_bluetooth"):
+            self.assertFalse(set(self.calls(name)) & {"refresh", "on_ui_changed", "build", "show_page", "idle_add",
+                                                      "timeout_add", "timeout_add_seconds"}, name)
+
+    def test_the_bluetooth_code_of_the_window_owns_no_timer_and_no_animation(self):
+        names = [name for name in self.methods if "bluetooth" in name or name.startswith("_bt_")]
+        self.assertGreater(len(names), 10)
+        for name in names:
+            segment = ast.get_source_segment(self.source_text, self.methods[name])
+            for word in ("timeout_add", "idle_add", "Spinner", "add_tick_callback"):
+                self.assertNotIn(word, segment, name)
+
+    def test_the_bluetooth_button_is_between_the_status_chips_and_settings_in_the_header_row(self):
+        rows = ast.get_source_segment(self.source_text, self.methods["nav_rows"])
+        self.assertIn("header = [self.tab_home, self.tab_discover, self.bluetooth_button, self.settings_button]", rows)
+        header = ast.get_source_segment(self.source_text, self.methods["_build_header"])
+        self.assertLess(header.index("header.append(self.clock_label)"),
+                        header.index("header.append(self.bluetooth_button)"))
+        self.assertLess(header.index("header.append(self.bluetooth_button)"),
+                        header.index("header.append(self.settings_button)"))
+
+    def test_a_pad_key_counts_every_press_of_a(self):
+        from gaminghome.core import ACTIVATE
+        key = mock.Mock()
+        key.get_name.return_value = "bt:pad:0"
+        window = SimpleNamespace(get_focus=lambda: key)
+        self.window.handle_action(window, ACTIVATE)
+        self.window.handle_action(window, ACTIVATE)
+        self.assertEqual(key.emit.call_args_list, [mock.call("clicked")] * 2)
+        key.activate.assert_not_called()
 
 
 if __name__ == "__main__":
