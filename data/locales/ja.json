@@ -136,6 +136,7 @@
   "bluetooth.forget": "削除",
   "bluetooth.forgetQuestion": "{name} を削除しますか？",
   "bluetooth.cancel": "キャンセル",
+  "bluetooth.canceling": "キャンセルしています…",
   "bluetooth.addDevice": "デバイスを追加",
   "bluetooth.addHint": "デバイスをペアリングモードにしてから検索してください。追加したデバイスは自動で再接続できます。止めるには削除してください。",
   "bluetooth.search": "検索",

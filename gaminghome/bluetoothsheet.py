@@ -304,6 +304,7 @@ class BluetoothSheet:
         self.entry = DigitEntry()
         self._search_seen = False    # a search was seen running during this visit, so "nothing found" can be said
         self._power_target = None    # what the power switch was last asked for, while that runs
+        self._cancelled = None       # the device of the pairing given up, until the source says it has ended
 
     @property
     def snapshot(self) -> bt.Snapshot:
@@ -313,6 +314,15 @@ class BluetoothSheet:
     def searching(self) -> bool:
         """Only the source says whether it searches: it may ignore a request, and it ends a search by itself."""
         return self.snapshot.scanning
+
+    @property
+    def cancelling(self) -> bool:
+        """The pairing on screen was given up and the source has not ended it yet, which may take ten seconds."""
+        snapshot = self.snapshot
+        activity, prompt = snapshot.activity, snapshot.prompt
+        device = activity.device if activity is not None and activity.kind == bt.PAIRING else \
+            prompt.device if prompt is not None else None
+        return device is not None and device == self._cancelled
 
     @property
     def typing(self) -> bool:
@@ -347,10 +357,10 @@ class BluetoothSheet:
         self.forgetting = 0
         self._power_target = None
         self.entry.clear()
-        give_up = abandonable(self.source.snapshot)
+        give_up = abandonable(self.source.snapshot) and not self.cancelling
         self.source.scan(False)
         if give_up:
-            self.source.cancel()
+            self._give_up()
         return True
 
     def sync(self):
@@ -365,6 +375,8 @@ class BluetoothSheet:
             self.forgetting = 0
         if self.visiting and snapshot.scanning:
             self._search_seen = True
+        if not pairing(snapshot):
+            self._cancelled = None
         if snapshot.activity is None or snapshot.activity.kind != bt.POWERING:
             self._power_target = None
 
@@ -395,8 +407,8 @@ class BluetoothSheet:
             if prompt is not None and prompt.kind == bt.CONFIRM:
                 self.source.answer(prompt.id, name == YES)
         elif name == CANCEL:
-            self.entry.clear()
-            self.source.cancel()
+            if abandonable(snapshot) and not self.cancelling:
+                self._give_up()
         elif name.startswith(PAD):
             return self._pad(name[len(PAD):])
         elif (device := device_id(name, CONNECT)) is not None:
@@ -415,17 +427,25 @@ class BluetoothSheet:
             return f"{FORGET}{device}"
         elif (device := device_id(name, PAIR)) is not None:
             if idle:
+                self._cancelled = None
                 self.source.pair(device)
         return None
+
+    def _give_up(self):
+        snapshot = self.source.snapshot
+        activity, prompt = snapshot.activity, snapshot.prompt
+        self._cancelled = activity.device if activity is not None and activity.kind == bt.PAIRING else prompt.device
+        self.entry.clear()
+        self.source.cancel()
 
     def back(self) -> tuple[bool, str | None]:
         """B, or Escape: close a question first and give up a pairing next. (False, None) lets the sheet close."""
         if self.forgetting:
             return True, self.press(f"{FORGET_NO}{self.forgetting}")
-        if abandonable(self.source.snapshot):
+        if abandonable(self.source.snapshot) and not self.cancelling:
             self.press(CANCEL)
             return True, None
-        return False, None
+        return False, None                  # and a pairing given up already lets the sheet close
 
     def key(self, key: str) -> str | None:
         """A digit or "erase" from a keyboard while the pad is shown. The focus moves to Done after a digit, so
@@ -542,7 +562,8 @@ class BluetoothSheet:
 
     def _panel(self, snapshot, called, t) -> list[Block]:
         prompt = snapshot.prompt
-        cancel = Control(CANCEL, t("bluetooth.cancel"))
+        cancelling = self.cancelling
+        cancel = Control(CANCEL, t("bluetooth.canceling" if cancelling else "bluetooth.cancel"), not cancelling)
         if prompt is not None:
             name = called(prompt.device, prompt.name)
             if prompt.kind == bt.CONFIRM:
@@ -568,7 +589,7 @@ class BluetoothSheet:
             words = "bluetooth.pairingWith"
         if not abandonable(snapshot):
             return [Question("pairing", text=t(words, name=name))]     # paired: it connects as Connect does
-        return [Question("pairing", (cancel,), first=CANCEL, text=t(words, name=name))]
+        return [Question("pairing", (cancel,), first="" if cancelling else CANCEL, text=t(words, name=name))]
 
     def _pad_controls(self, t) -> tuple[Control, ...]:
         keys = []

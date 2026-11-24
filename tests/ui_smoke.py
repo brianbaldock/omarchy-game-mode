@@ -305,7 +305,18 @@ def check_behaviour(word, language, window, source):
         check(window.sheet == "bluetooth" and window.selected_name() == f"{sheet.FORGET}3",
               "B did not take the question back and return to Forget")
         check(("forget", 3) not in source.calls, "a device was forgotten without being confirmed")
-    elif word in ("btconfirm", "btcode"):
+    elif word == "btcode":
+        window.handle_action(core.BACK)                             # B gives the pairing up ...
+        settle()
+        check(source.calls.count(("cancel",)) == 1 and window.sheet == "bluetooth"
+              and window._bt_buttons[sheet.CANCEL].get_label() == t("bluetooth.canceling"),
+              "B did not give the pairing up, or Cancel does not say that it is being canceled")
+        window.handle_action(core.BACK)                             # ... and closes the sheet while BlueZ answers
+        check(window.sheet is None and source.calls.count(("cancel",)) == 1,
+              "B is stuck on a pairing given up already")
+        source.finish_cancel()
+        settle()
+    elif word == "btconfirm":
         cancels = source.calls.count(("cancel",))
         window.sheet = None                                         # as a change of language does
         window.build()

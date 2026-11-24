@@ -166,6 +166,7 @@ DEFAULTS = {
     "bluetooth.forget": "Forget",
     "bluetooth.forgetQuestion": "Forget {name}?",
     "bluetooth.cancel": "Cancel",
+    "bluetooth.canceling": "Canceling…",
     "bluetooth.addDevice": "Add a device",
     "bluetooth.addHint": "Put your device in pairing mode, then search. Devices you add can reconnect by themselves; forget one to stop that.",
     "bluetooth.search": "Search",

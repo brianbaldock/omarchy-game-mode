@@ -426,6 +426,49 @@ class ControlsTest(unittest.TestCase):
         self.assertEqual(sum(call[0] == "answer" for call in source.calls), 1)
 
 
+class GivingUpTest(unittest.TestCase):
+    """BlueZ answers a cancelled pairing up to ten seconds later: the sheet must not wait for that answer."""
+
+    def setUp(self):
+        self.source = FakeBluetooth(cancel_waits=True)
+        self.source.start()
+        self.visit = opened(self.source)
+        self.speaker = self.source.add_device("Speaker", "speaker")
+        self.visit.press(f"{sheet.PAIR}{self.speaker}")
+        self.source.show_prompt(bt.PASSKEY, max_length=6)
+
+    def panel(self):
+        return self.visit.blocks(ENGLISH)[2]
+
+    def test_b_gives_the_pairing_up_once_and_then_lets_the_sheet_close(self):
+        self.assertEqual(self.visit.back(), (True, None))
+        self.assertEqual(self.visit.back(), (False, None))
+        self.assertEqual(self.source.calls.count(("cancel",)), 1)
+
+    def test_cancel_reads_canceling_and_does_nothing_more_until_bluez_answers(self):
+        self.visit.press(sheet.CANCEL)
+        self.visit.press(sheet.CANCEL)
+        cancel = self.panel().controls[0]
+        self.assertEqual((cancel.name, cancel.text, cancel.enabled, self.panel().first),
+                         (sheet.CANCEL, "Canceling…", False, ""))
+        self.assertEqual(self.source.calls.count(("cancel",)), 1)
+        self.source.finish_cancel()
+        self.assertFalse(self.visit.cancelling)
+        self.assertNotIn("pairing", [block.key for block in self.visit.blocks(ENGLISH)])
+
+    def test_leaving_after_giving_up_does_not_cancel_again(self):
+        self.visit.back()
+        self.visit.leave()
+        self.assertEqual(self.source.calls.count(("cancel",)), 1)
+
+    def test_a_new_pairing_is_not_taken_for_the_one_given_up(self):
+        self.visit.back()
+        self.source.finish_cancel()
+        self.visit.press(f"{sheet.PAIR}{self.speaker}")
+        self.assertFalse(self.visit.cancelling)
+        self.assertEqual(self.panel().controls[0].text, "Cancel")
+
+
 class BlocksTest(unittest.TestCase):
     def blocks(self, source, visit=None):
         return (visit or opened(source)).blocks(ENGLISH)

@@ -136,6 +136,7 @@
   "bluetooth.forget": "Entfernen",
   "bluetooth.forgetQuestion": "{name} entfernen?",
   "bluetooth.cancel": "Abbrechen",
+  "bluetooth.canceling": "Wird abgebrochen…",
   "bluetooth.addDevice": "Gerät hinzufügen",
   "bluetooth.addHint": "Versetze dein Gerät in den Kopplungsmodus und suche dann. Hinzugefügte Geräte können sich von selbst wieder verbinden; entferne eines, damit es das nicht mehr tut.",
   "bluetooth.search": "Suchen",

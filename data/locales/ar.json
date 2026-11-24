@@ -136,6 +136,7 @@
   "bluetooth.forget": "إزالة",
   "bluetooth.forgetQuestion": "هل تريد إزالة ⁦{name}⁩؟",
   "bluetooth.cancel": "إلغاء",
+  "bluetooth.canceling": "جارٍ الإلغاء…",
   "bluetooth.addDevice": "إضافة جهاز",
   "bluetooth.addHint": "ضع جهازك في وضع الإقران، ثم ابحث. يمكن للأجهزة التي تضيفها أن تعيد الاتصال من تلقاء نفسها؛ أزِل جهازًا لإيقاف ذلك.",
   "bluetooth.search": "بحث",

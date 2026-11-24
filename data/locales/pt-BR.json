@@ -136,6 +136,7 @@
   "bluetooth.forget": "Esquecer",
   "bluetooth.forgetQuestion": "Esquecer {name}?",
   "bluetooth.cancel": "Cancelar",
+  "bluetooth.canceling": "Cancelando…",
   "bluetooth.addDevice": "Adicionar um dispositivo",
   "bluetooth.addHint": "Coloque o dispositivo no modo de pareamento e depois pesquise. Dispositivos adicionados podem se reconectar sozinhos; esqueça um para impedir isso.",
   "bluetooth.search": "Pesquisar",

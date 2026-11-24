@@ -136,6 +136,7 @@
   "bluetooth.forget": "Oublier",
   "bluetooth.forgetQuestion": "Oublier {name} ?",
   "bluetooth.cancel": "Annuler",
+  "bluetooth.canceling": "Annulation…",
   "bluetooth.addDevice": "Ajouter un appareil",
   "bluetooth.addHint": "Mettez votre appareil en mode d’association, puis lancez la recherche. Les appareils ajoutés peuvent se reconnecter d’eux-mêmes ; oubliez-en un pour l’en empêcher.",
   "bluetooth.search": "Rechercher",
