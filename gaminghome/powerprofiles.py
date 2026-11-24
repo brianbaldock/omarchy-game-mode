@@ -30,9 +30,10 @@ Files and the one process
 * Two kernel files are read, never written, a few hundred bytes at most: ``firmware/acpi/platform_profile`` and
   ``devices/system/cpu/cpufreq/policy0/boost`` under ``/sys``. They are read at ``start()``, with each reading of
   the service, each ``PropertiesChanged`` and each reply to a ``Set``, and they never decide whether a change worked.
-* Omarchy's ``omarchy-powerprofiles-set autodetect PROFILE``, found on ``PATH``, runs after a change succeeded or
-  when the active profile is chosen again, so that Omarchy keeps the choice for the current power source (it
-  switches to what it keeps at every plug and unplug). No shell, stdin closed, output dropped, its own directory and
+* Omarchy's ``omarchy-powerprofiles-set autodetect PROFILE``, found on ``PATH``, runs after a change succeeded,
+  when the active profile is chosen again, and when a profile whose answer never came (it timed out, or the window
+  was hidden first) shows up in a reading after all, so that Omarchy keeps the choice for the current power source
+  (it switches to what it keeps at every plug and unplug). No shell, stdin closed, output dropped, its own directory and
   ``/usr/local/bin:/usr/bin:/bin`` as ``PATH`` (never the inherited one: a version manager's shims there would give
   ``powerprofilesctl`` another Python), only ``HOME``, ``LANG``, ``XDG_RUNTIME_DIR``, ``XDG_STATE_HOME`` and
   ``DBUS_SYSTEM_BUS_ADDRESS`` besides, and a process group of its own that is killed as a whole when
@@ -248,7 +249,7 @@ class _Run:
         self.kill = lambda: None    # ends its whole process group
         self.limit = None           # the token of its time limit while that is pending
         self.timed_out = False
-        self.ended = False          # ended because another profile is active now
+        self.ended = False          # ended: another choice, or another profile active now
 
 
 def _timeout_add(milliseconds, callback):
@@ -306,6 +307,7 @@ class PowerProfiles:
         self._reading = False
         self._live = False       # the service was read in this visit, from the current owner
         self._armed = False      # a request of this visit succeeded: another program's change is worth a note
+        self._unconfirmed = ""   # asked for, and its answer never came (timed out, or on its way at stop())
         self._helper: _Run | None = None    # the run of Omarchy's command whose outcome is still worth a note
         self._runs: set[_Run] = set()       # every run of it that has not been reaped yet
 
@@ -346,6 +348,8 @@ class PowerProfiles:
         """Idempotent. What was last read stays; a request on its way is forgotten, and nothing reports any more."""
         watch, self._watch = self._watch, None
         self._started = False
+        if self._snapshot.pending:
+            self._unconfirmed = self._snapshot.pending   # if the next visit finds it done, it is remembered then
         self._visit += 1
         self._forget_owner()
         self._armed = False
@@ -456,13 +460,15 @@ class PowerProfiles:
                 fields = read_properties(reply.unpack()[0])
             except (Unusable, IndexError):
                 fields = None
-        self._live = fields is not None
+        first, self._live = not self._live, fields is not None
         changes = _service(ERROR) if fields is None else {**_service(READY), **fields}
-        if fields is not None and self._end_outdated_runs(fields["active"]):
-            changes["note"] = CHANGED_ELSEWHERE
-        failure = self._snapshot.failure
-        if fields and failure is not None and failure.code == TIMEOUT and fields["active"] == failure.profile:
-            changes["failure"] = None
+        if fields is not None:
+            if self._unconfirmed and fields["active"] == self._unconfirmed:
+                self._confirm(changes)
+            elif first:
+                self._unconfirmed = ""                # it did not take, or did not stay
+            if self._end_outdated_runs(fields["active"]):
+                changes["note"] = CHANGED_ELSEWHERE
         self._update(evidence=read_evidence(self._root), **changes)
         self._announce()
 
@@ -489,12 +495,23 @@ class PowerProfiles:
         self._announce()
 
     def _profile_changed(self, active: str, changes: dict):
-        """What a change of the active profile announced by the service means for the request of this visit."""
-        failure = self._snapshot.failure
-        if failure is not None and failure.code == TIMEOUT and active == failure.profile:
-            changes["failure"] = None
-        if not self._snapshot.pending and (self._end_outdated_runs(active) or self._armed):
+        """What a change of the active profile announced by the service means for the requests of this visit."""
+        if self._snapshot.pending:
+            return
+        if self._unconfirmed and active == self._unconfirmed:
+            self._confirm(changes)
+        elif self._end_outdated_runs(active) or self._armed:
             changes["note"] = CHANGED_ELSEWHERE
+
+    def _confirm(self, changes: dict):
+        """A request whose answer never came shows up after all: its time-out goes, and it is remembered like any
+        change that succeeded."""
+        profile, self._unconfirmed = self._unconfirmed, ""
+        failure = self._snapshot.failure
+        if failure is not None and failure.code == TIMEOUT and failure.profile == profile:
+            changes["failure"] = None
+        self._armed = True
+        self._remember(profile)
 
     # ---- operations --------------------------------------------------------
     @_guarded
@@ -503,7 +520,7 @@ class PowerProfiles:
         snapshot = self._snapshot
         if not self._started or snapshot.pending:
             return                                    # ignored while a request is on its way, and while stopped
-        self._armed = False
+        self._armed, self._unconfirmed = False, ""
         asked = profile if profile in PROFILES else ""
         if snapshot.state != READY or not self._live:   # what is shown may be the last visit's until it is read
             self._update(failure=Failure(UNAVAILABLE, asked), note="")
@@ -542,8 +559,12 @@ class PowerProfiles:
                     changes["note"] = CHANGED_ELSEWHERE
         else:
             code = failure_code(reply)
-            if code != TIMEOUT or snapshot.active != profile:  # a profile announced in time is no time-out
+            if code == TIMEOUT and snapshot.state == READY and snapshot.active == profile:
+                self._armed = remember = True         # no answer, but the profile was announced in time
+            else:
                 changes["failure"] = Failure(code, profile)
+                if code == TIMEOUT:
+                    self._unconfirmed = profile       # it may still come, and is remembered then
         self._update(**changes)
         if remember:
             self._remember(profile)
@@ -592,6 +613,7 @@ class PowerProfiles:
         program's, stands now."""
         self._helper = None
         for run in list(self._runs):
+            run.ended = True
             run.kill()
 
     @_guarded

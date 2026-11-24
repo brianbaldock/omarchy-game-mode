@@ -13,6 +13,7 @@ import shutil
 import signal
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from gi.repository import Gio, GLib
@@ -82,6 +83,18 @@ def gone(pid: int) -> bool:
             return handle.read().rsplit(")", 1)[1].split()[0] in ("Z", "X")
     except OSError:
         return True
+
+
+class SlowRuns:
+    """Runs of Omarchy's command that are never started and only end when the test says so, killed or not."""
+
+    def __init__(self):
+        self.started, self.killed = [], []
+
+    def __call__(self, argv, _environment, on_exit):
+        run = SimpleNamespace(argv=argv, on_exit=on_exit)
+        self.started.append(run)
+        return lambda: self.killed.append(run)
 
 
 def set_call(profile, value_type="s", interface=INTERFACE, name="ActiveProfile"):
@@ -1214,6 +1227,87 @@ class RememberTest(BusCase):
         self.assertTrue(pump(lambda: not source.snapshot.pending))
         self.assertEqual((source.snapshot.note, source.helping, self.timers.delays), (CHANGED_ELSEWHERE, False, []))
         self.assertFalse((script.parent / "record").exists() and any((script.parent / "record").iterdir()))
+
+    def ran(self, script) -> bool:
+        return (script.parent / "record" / "argv").exists()
+
+    def test_a_profile_that_arrives_after_its_answer_timed_out_is_remembered(self):
+        script = stand_in(self.home / "late")
+        fake = self.fake(active=BALANCED)
+        fake.hold = lambda call: call.member == "Set"
+        source = self.with_helper(script)
+        with mock.patch.object(powerprofiles, "SET_TIMEOUT_MS", 100):
+            source.set_profile(PERFORMANCE)
+            self.assertTrue(pump(lambda: source.snapshot.failure is not None, 3))
+        self.assertEqual((source.snapshot.failure.code, source.helping), (TIMEOUT, False))
+        fake.answer_held()                                             # the service was only slow
+        self.assertTrue(pump(lambda: source.snapshot.failure is None and self.ran(script) and source.idle))
+        self.assertEqual(self.record(script)["argv"][1:], ["autodetect", PERFORMANCE])
+        fake.external(SAVER)                                           # it counts as a request that succeeded
+        self.assertTrue(pump(lambda: source.snapshot.note == CHANGED_ELSEWHERE))
+
+    def test_a_time_out_after_the_profile_was_announced_is_remembered_like_a_success(self):
+        script = stand_in(self.home / "announced")
+        fake = self.fake(active=BALANCED)
+        fake.late = lambda call: call.member == "Set"
+        source = self.with_helper(script)
+        with mock.patch.object(powerprofiles, "SET_TIMEOUT_MS", 100):
+            source.set_profile(PERFORMANCE)
+            self.assertTrue(pump(lambda: not source.snapshot.pending, 3))
+        self.assertTrue(pump(lambda: self.ran(script) and source.idle))
+        self.assertEqual((source.snapshot.failure, self.record(script)["argv"][2]), (None, PERFORMANCE))
+
+    def test_a_request_on_its_way_at_stop_is_remembered_when_the_next_visit_finds_it_done(self):
+        script = stand_in(self.home / "hidden")
+        fake = self.fake(active=BALANCED)
+        fake.hold = lambda call: call.member == "Set"
+        source = self.with_helper(script)
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: fake.held))
+        source.stop()
+        fake.hold = None
+        fake.answer_held()                                             # done while the window is hidden
+        self.assertFalse(pump(lambda: source.helping, 0.05))           # and nothing runs while it is
+        self.assertEqual((fake.active, self.timers.delays), (PERFORMANCE, []))
+        source.start()
+        self.assertTrue(pump(lambda: self.ran(script) and source.idle))
+        self.assertEqual(self.record(script)["argv"][2], PERFORMANCE)
+        self.assertEqual((source.snapshot.active, source.snapshot.note, source.snapshot.failure),
+                         (PERFORMANCE, "", None))
+
+    def test_a_request_on_its_way_at_stop_that_did_not_take_is_forgotten(self):
+        script = stand_in(self.home / "lost")
+        fake = self.fake(active=BALANCED)
+        fake.hold = lambda call: call.member == "Set"
+        source = self.with_helper(script)
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: fake.held))
+        source.stop()
+        fake.hold = None
+        fake.held.clear()                                              # it never arrives
+        self.ready(source)
+        fake.external(PERFORMANCE)                                     # later, another program chooses it
+        self.assertTrue(pump(lambda: source.snapshot.active == PERFORMANCE))
+        self.assertFalse(pump(lambda: source.helping, 0.05))
+        self.assertEqual((self.ran(script), source.snapshot.note), (False, ""))
+
+    def test_a_command_ended_for_a_newer_choice_never_counts_as_another_programs_change(self):
+        runs = SlowRuns()
+        fake = self.fake(active=BALANCED)
+        source = self.ready(self.source(find_helper=lambda: "/opt/omarchy/bin/omarchy-powerprofiles-set",
+                                        run_helper=runs))
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: len(runs.started) == 1))
+        fake.hold = lambda call: call.member == "Set"
+        source.set_profile(SAVER)                                      # ends that run, which is slow to go
+        self.assertTrue(pump(lambda: fake.held))
+        self.assertEqual(runs.killed, runs.started)
+        source.stop()
+        fake.hold = None
+        fake.answer_held()
+        source.start()                                                 # finds power-saver: it is remembered now
+        self.assertTrue(pump(lambda: len(runs.started) == 2))
+        self.assertEqual((runs.started[1].argv[1:], source.snapshot.note), (["autodetect", SAVER], ""))
 
     def setting(self, name) -> Path:
         """A gated stand-in that, once let through, sets its profile on the fake daemon like Omarchy's script."""
