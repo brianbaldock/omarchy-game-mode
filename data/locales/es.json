@@ -116,7 +116,7 @@
   "bluetooth.tooltipConnected": "Conectado:",
   "bluetooth.tooltipError": "No se pudo leer Bluetooth",
   "bluetooth.unnamed": "Dispositivo sin nombre",
-  "bluetooth.powerHint": "Activa o desactiva Bluetooth en todo el equipo. Se mantiene así tras reiniciar.",
+  "bluetooth.powerHint": "Activa o desactiva Bluetooth en todo el equipo.",
   "bluetooth.turningOn": "Activando…",
   "bluetooth.turningOff": "Desactivando…",
   "bluetooth.offBody": "Activa Bluetooth para conectar dispositivos.",

@@ -116,7 +116,7 @@
   "bluetooth.tooltipConnected": "Connectés :",
   "bluetooth.tooltipError": "Impossible de lire l’état du Bluetooth",
   "bluetooth.unnamed": "Appareil sans nom",
-  "bluetooth.powerHint": "Active ou désactive le Bluetooth pour tout l’ordinateur. Ce réglage est conservé après un redémarrage.",
+  "bluetooth.powerHint": "Active ou désactive le Bluetooth pour tout l’ordinateur.",
   "bluetooth.turningOn": "Activation…",
   "bluetooth.turningOff": "Désactivation…",
   "bluetooth.offBody": "Activez le Bluetooth pour connecter des appareils.",

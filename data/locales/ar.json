@@ -116,7 +116,7 @@
   "bluetooth.tooltipConnected": "متصل:",
   "bluetooth.tooltipError": "تعذّرت قراءة البلوتوث",
   "bluetooth.unnamed": "جهاز بلا اسم",
-  "bluetooth.powerHint": "يشغّل البلوتوث أو يوقفه للحاسوب كله، ويبقى كذلك بعد إعادة التشغيل.",
+  "bluetooth.powerHint": "يشغّل البلوتوث أو يوقفه للحاسوب كله.",
   "bluetooth.turningOn": "جارٍ التشغيل…",
   "bluetooth.turningOff": "جارٍ الإيقاف…",
   "bluetooth.offBody": "شغّل البلوتوث لتوصيل الأجهزة.",

@@ -146,7 +146,7 @@ DEFAULTS = {
     "bluetooth.tooltipConnected": "Connected:",
     "bluetooth.tooltipError": "Couldn't read Bluetooth",
     "bluetooth.unnamed": "Unnamed device",
-    "bluetooth.powerHint": "Turns Bluetooth on or off for the whole computer. It stays that way after a restart.",
+    "bluetooth.powerHint": "Turns Bluetooth on or off for the whole computer.",
     "bluetooth.turningOn": "Turning on…",
     "bluetooth.turningOff": "Turning off…",
     "bluetooth.offBody": "Turn Bluetooth on to connect devices.",

@@ -116,7 +116,7 @@
   "bluetooth.tooltipConnected": "接続中:",
   "bluetooth.tooltipError": "Bluetooth の状態を読み取れません",
   "bluetooth.unnamed": "名前のないデバイス",
-  "bluetooth.powerHint": "このコンピューター全体の Bluetooth をオンまたはオフにします。再起動してもそのままです。",
+  "bluetooth.powerHint": "このコンピューター全体の Bluetooth をオンまたはオフにします。",
   "bluetooth.turningOn": "オンにしています…",
   "bluetooth.turningOff": "オフにしています…",
   "bluetooth.offBody": "デバイスを接続するには Bluetooth をオンにしてください。",

@@ -116,7 +116,7 @@
   "bluetooth.tooltipConnected": "Conectados:",
   "bluetooth.tooltipError": "Não foi possível ler o Bluetooth",
   "bluetooth.unnamed": "Dispositivo sem nome",
-  "bluetooth.powerHint": "Liga ou desliga o Bluetooth no computador todo. Continua assim depois de reiniciar.",
+  "bluetooth.powerHint": "Liga ou desliga o Bluetooth no computador todo.",
   "bluetooth.turningOn": "Ligando…",
   "bluetooth.turningOff": "Desligando…",
   "bluetooth.offBody": "Ligue o Bluetooth para conectar dispositivos.",

@@ -116,7 +116,7 @@
   "bluetooth.tooltipConnected": "Verbunden:",
   "bluetooth.tooltipError": "Bluetooth konnte nicht gelesen werden",
   "bluetooth.unnamed": "Gerät ohne Namen",
-  "bluetooth.powerHint": "Schaltet Bluetooth für den ganzen Computer ein oder aus. Das bleibt auch nach einem Neustart so.",
+  "bluetooth.powerHint": "Schaltet Bluetooth für den ganzen Computer ein oder aus.",
   "bluetooth.turningOn": "Wird eingeschaltet…",
   "bluetooth.turningOff": "Wird ausgeschaltet…",
   "bluetooth.offBody": "Schalte Bluetooth ein, um Geräte zu verbinden.",
