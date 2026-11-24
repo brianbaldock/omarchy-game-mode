@@ -26,6 +26,8 @@ class PowerCommandTest(unittest.TestCase):
 
     def setUp(self):
         self.root = scratch(self, "command")
+        self.runtime = self.root / "runtime"
+        self.runtime.mkdir()
         self.helper = None
         self.made = []
         self.addCleanup(self.bus.close_connections)
@@ -48,8 +50,11 @@ class PowerCommandTest(unittest.TestCase):
             # PyGObject's asyncio glue warns about asyncio policies on new Pythons, as in fakes.loop.pump.
             warnings.simplefilter("ignore", DeprecationWarning)
             code = powerprofiles.main(list(args), usage=USAGE, stdout=stdout, stderr=stderr,
-                                      make_source=self.make_source)
+                                      make_source=self.make_source, lock=self.lock)
         return code, stdout.getvalue(), stderr.getvalue()
+
+    def lock(self, timeout=powerprofiles.LOCK_TIMEOUT_S):
+        return powerprofiles.power_action_lock(str(self.runtime), timeout)
 
     def sets(self, fake) -> list:
         return [call.arguments[2] for call in fake.writes()]
@@ -156,10 +161,49 @@ class PowerCommandTest(unittest.TestCase):
 
     def test_bad_usage_is_exit_status_2_and_touches_nothing(self):
         for args in (["bogus"], ["set"], ["set", "turbo"], ["set", "Performance"], ["set", BALANCED, "now"],
-                     ["status", "now"], ["cycle", "up"], ["--help"]):
+                     ["status", "now"], ["cycle", "up"], ["--help", "set"], ["-x"]):
             with self.subTest(args=args):
                 self.assertEqual(self.run_command(*args), (2, "", USAGE + "\n"))
         self.assertEqual(self.made, [])
+
+
+    def test_help_prints_the_usage_and_succeeds(self):
+        for args in (["--help"], ["-h"], ["help"]):
+            with self.subTest(args=args):
+                self.assertEqual(self.run_command(*args), (0, USAGE + "\n", ""))
+        self.assertEqual(self.made, [])
+
+    def test_a_change_waits_for_the_one_before_it_and_gives_up_after_a_while(self):
+        fake = self.fake(active=BALANCED)
+        self.lock = lambda: powerprofiles.power_action_lock(str(self.runtime), 0.1)
+        with powerprofiles.power_action_lock(str(self.runtime)):      # an earlier press still at work
+            for args in (["set", PERFORMANCE], ["cycle"]):
+                with self.subTest(args=args):
+                    self.assertEqual(self.run_command(*args), (1, "", "timeout: another change of the power profile "
+                                                                       "is still running; try again\n"))
+            self.assertEqual(self.made, [])
+            self.assertEqual(self.run_command("status")[0], 0)        # a look needs no lock
+        self.assertEqual(self.run_command("cycle"), (0, "performance\n", ""))
+        self.assertEqual(self.sets(fake), [PERFORMANCE])
+
+    def test_the_lock_is_private_and_nothing_but_a_lock_file_is_used(self):
+        self.fake(active=BALANCED)
+        self.assertEqual(self.run_command("set", SAVER)[0], 0)
+        directory = self.runtime / "omarchy-game-mode"
+        self.assertEqual((directory.stat().st_mode & 0o777, (directory / "power.lock").stat().st_mode & 0o777),
+                         (0o700, 0o600))
+        (directory / "power.lock").unlink()
+        (directory / "power.lock").mkdir()
+        self.assertEqual(self.run_command("set", BALANCED),
+                         (1, "", "failed: the lock that keeps changes apart cannot be taken\n"))
+        for runtime in (None, "relative/runtime"):
+            with self.subTest(runtime=runtime), mock.patch.dict("os.environ", clear=False) as environ:
+                environ.pop("XDG_RUNTIME_DIR", None)
+                if runtime:
+                    environ["XDG_RUNTIME_DIR"] = runtime
+                self.lock = powerprofiles.power_action_lock
+                self.assertEqual(self.run_command("set", BALANCED), (1, "", "failed: XDG_RUNTIME_DIR is not set, so "
+                                                                            "changes cannot be kept apart\n"))
 
 
 class DispatchTest(unittest.TestCase):

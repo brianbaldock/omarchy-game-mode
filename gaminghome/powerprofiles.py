@@ -54,12 +54,15 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import fcntl
 import functools
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import time
 
 from gi.repository import Gio, GLib
 
@@ -699,6 +702,60 @@ NOTE_TEXTS = {CHANGED_ELSEWHERE: "changed elsewhere: another program has changed
               NOT_REMEMBERED: "not remembered: Omarchy could not keep {profile} for this power source"}
 
 
+LOCK_TIMEOUT_S = 2.0            # how long a change waits for the one before it, as the keyboard's does
+LOCK_RETRY_S = 0.05
+
+
+class PowerLockError(RuntimeError):
+    """The lock that keeps changes from the command line apart could not be taken. The text is ours."""
+
+
+def _take_lock(runtime_dir, timeout, clock, sleep) -> int:
+    if runtime_dir is None:
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if not runtime_dir or not os.path.isabs(runtime_dir):
+        raise PowerLockError("failed: XDG_RUNTIME_DIR is not set, so changes cannot be kept apart")
+    directory = os.path.join(runtime_dir, "omarchy-game-mode")
+    descriptor = -1
+    try:
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        os.chmod(directory, 0o700)
+        descriptor = os.open(os.path.join(directory, "power.lock"),
+                             os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("not a regular file")
+        os.fchmod(descriptor, 0o600)
+        deadline = clock() + timeout
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return descriptor
+            except BlockingIOError:
+                remaining = deadline - clock()
+                if remaining <= 0:
+                    raise PowerLockError("timeout: another change of the power profile is still running; "
+                                         "try again") from None
+                sleep(min(LOCK_RETRY_S, remaining))
+    except BaseException as error:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if isinstance(error, OSError):
+            raise PowerLockError("failed: the lock that keeps changes apart cannot be taken") from None
+        raise
+
+
+@contextlib.contextmanager
+def power_action_lock(runtime_dir: str | None = None, timeout: float = LOCK_TIMEOUT_S, *, clock=time.monotonic,
+                      sleep=time.sleep):
+    """One change of the power profile from the command line at a time, so that repeated key presses do not
+    interleave: a private lock in the user's runtime directory, next to the keyboard's."""
+    descriptor = _take_lock(runtime_dir, timeout, clock, sleep)
+    try:
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def _wait(predicate, seconds: float) -> bool:
     """Run the main loop until ``predicate`` holds, for ``seconds`` at most. Whether it held."""
     context = GLib.MainContext.default()
@@ -721,18 +778,34 @@ def _status(snapshot: Snapshot) -> str:
     return "\n".join(lines)
 
 
-def main(args: list[str], usage: str = "", stdout=None, stderr=None, make_source=None) -> int:
+def main(args: list[str], usage: str = "", stdout=None, stderr=None, make_source=None, lock=None) -> int:
     """``power [status]``, ``power set PROFILE`` and ``power cycle``: print or change the profile, then exit.
 
     It needs neither the window nor a running Gaming Home: it starts a source of its own, waits a bounded time for
-    the first reading, acts, waits a bounded time for the outcome and for Omarchy's command, stops and exits. 0 is
-    success, 1 a change or a reading that failed (with one line on stderr saying why) and 2 bad usage."""
+    the first reading, acts, waits a bounded time for the outcome and for Omarchy's command, stops and exits. A
+    change waits for one still running from an earlier press (``lock``). Choosing another profile ends every hold
+    other programs have on one, as the daemon does for any change. 0 is success (and ``--help``), 1 a change or a
+    reading that failed (with one line on stderr saying why) and 2 bad usage."""
     stdout, stderr = stdout or sys.stdout, stderr or sys.stderr
     action = args[0] if args else "status"
+    if action in ("--help", "-h", "help") and len(args) == 1:
+        print(usage, file=stdout)
+        return 0
     if not (action in ("status", "cycle") and len(args) <= 1 or action == "set" and len(args) == 2
             and args[1] in PROFILES):
         print(usage, file=stderr)
         return 2
+    if action == "status":
+        return _run(action, args, stdout, stderr, make_source)
+    try:
+        with (lock or power_action_lock)():
+            return _run(action, args, stdout, stderr, make_source)
+    except PowerLockError as error:
+        print(str(error), file=stderr)
+        return 1
+
+
+def _run(action, args, stdout, stderr, make_source) -> int:
     source = (make_source or PowerProfiles)(lambda: None)
     source.start()
     try:
