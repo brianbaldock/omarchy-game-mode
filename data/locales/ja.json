@@ -195,7 +195,7 @@
   "power.reason.denied": "このセッションには電源プロファイルを変更する権限がありません。",
   "power.reason.unsupported": "このデバイスにはそのプロファイルがありません。",
   "power.reason.timeout": "電源サービスが時間内に応答しませんでした。",
-  "power.reason.unavailable": "電源サービスが応答しません。",
+  "power.reason.unavailable": "その時点では電源サービスに接続できませんでした。",
   "power.reason.failed": "問題が発生しました。",
   "power.note.changed-elsewhere": "あなたが変更した後に、別のプログラムが電源プロファイルを変更しました。Omarchy Game Mode はそのままにします。",
   "power.note.not-remembered": "プロファイルは設定されましたが、次回のために保持するよう Omarchy に伝えられませんでした。",

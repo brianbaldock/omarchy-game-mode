@@ -275,7 +275,7 @@ class BlocksTest(unittest.TestCase):
         words = {DENIED: "Couldn't switch to Performance. This session isn't allowed to change the power profile.",
                  UNSUPPORTED: "Couldn't switch to Performance. This device doesn't offer that profile.",
                  TIMEOUT: "Couldn't switch to Performance. The power service didn't answer in time.",
-                 UNAVAILABLE: "Couldn't switch to Performance. The power service isn't responding.",
+                 UNAVAILABLE: "Couldn't switch to Performance. The power service couldn't be reached just then.",
                  FAILED: "Couldn't switch to Performance. Something went wrong.",
                  "org.freedesktop.Strange": "Couldn't switch to Performance. Something went wrong."}
         for code, text in words.items():
@@ -288,6 +288,21 @@ class BlocksTest(unittest.TestCase):
         source.fail(DENIED)
         failure = block(self.blocks(source, visit=visit), "failure")
         self.assertEqual((failure.tone, control_names([failure])), ("warn", [DISMISS]))
+
+    def test_a_choice_made_before_this_visits_first_reading_does_not_call_the_service_broken(self):
+        # Until the service is read again the last visit's reading is shown, and a choice made meanwhile ends at once
+        # as unavailable; a moment later the service answers as usual, and the sheet must not contradict that.
+        source = started(active=BALANCED)
+        source.stop()
+        source.read_at_start = False
+        source.start()
+        visit = opened(source)
+        visit.press(option_name(PERFORMANCE))
+        source.read()
+        blocks = self.blocks(source, visit=visit)
+        self.assertEqual(block(blocks, "failure").text,
+                         "Couldn't switch to Performance. The power service couldn't be reached just then.")
+        self.assertEqual([o.profile for o in options(blocks) if o.current or o.pending], [BALANCED])
 
     def test_the_notes_say_what_happened_after_a_choice_and_carry_dismiss_without_a_failure(self):
         source = started(active=BALANCED, answers="now")

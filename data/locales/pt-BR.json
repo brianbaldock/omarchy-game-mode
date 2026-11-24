@@ -195,7 +195,7 @@
   "power.reason.denied": "Esta sessão não tem permissão para mudar o perfil de energia.",
   "power.reason.unsupported": "Este dispositivo não oferece esse perfil.",
   "power.reason.timeout": "O serviço de energia não respondeu a tempo.",
-  "power.reason.unavailable": "O serviço de energia não está respondendo.",
+  "power.reason.unavailable": "Não foi possível contatar o serviço de energia naquele momento.",
   "power.reason.failed": "Algo deu errado.",
   "power.note.changed-elsewhere": "Outro programa mudou o perfil de energia depois de você. O Omarchy Game Mode o deixa como está.",
   "power.note.not-remembered": "O perfil está aplicado, mas não foi possível pedir ao Omarchy que o guarde para a próxima vez.",

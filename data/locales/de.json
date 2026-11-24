@@ -195,7 +195,7 @@
   "power.reason.denied": "Diese Sitzung darf das Energieprofil nicht ändern.",
   "power.reason.unsupported": "Dieses Gerät bietet dieses Profil nicht an.",
   "power.reason.timeout": "Der Energiedienst hat nicht rechtzeitig geantwortet.",
-  "power.reason.unavailable": "Der Energiedienst antwortet nicht.",
+  "power.reason.unavailable": "Der Energiedienst war gerade nicht erreichbar.",
   "power.reason.failed": "Etwas ist schiefgelaufen.",
   "power.note.changed-elsewhere": "Ein anderes Programm hat das Energieprofil nach dir geändert. Omarchy Game Mode lässt es dabei.",
   "power.note.not-remembered": "Das Profil ist eingestellt, aber Omarchy konnte nicht angewiesen werden, es für das nächste Mal zu behalten.",

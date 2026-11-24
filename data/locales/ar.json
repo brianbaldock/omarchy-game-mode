@@ -195,7 +195,7 @@
   "power.reason.denied": "لا يُسمح لهذه الجلسة بتغيير وضع الطاقة.",
   "power.reason.unsupported": "لا يوفّر هذا الجهاز هذا الوضع.",
   "power.reason.timeout": "لم تستجب خدمة الطاقة في الوقت المناسب.",
-  "power.reason.unavailable": "خدمة الطاقة لا تستجيب.",
+  "power.reason.unavailable": "تعذّر الوصول إلى خدمة الطاقة في تلك اللحظة.",
   "power.reason.failed": "حدث خطأ ما.",
   "power.note.changed-elsewhere": "غيّر برنامج آخر وضع الطاقة بعد أن غيّرته. يتركه ⁦Omarchy Game Mode⁩ كما هو.",
   "power.note.not-remembered": "تم ضبط الوضع، لكن تعذّر إبلاغ ⁦Omarchy⁩ بالاحتفاظ به للمرة القادمة.",

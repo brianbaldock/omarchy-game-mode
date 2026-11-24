@@ -225,7 +225,7 @@ DEFAULTS = {
     "power.reason.denied": "This session isn't allowed to change the power profile.",
     "power.reason.unsupported": "This device doesn't offer that profile.",
     "power.reason.timeout": "The power service didn't answer in time.",
-    "power.reason.unavailable": "The power service isn't responding.",
+    "power.reason.unavailable": "The power service couldn't be reached just then.",
     "power.reason.failed": "Something went wrong.",
     "power.note.changed-elsewhere": "Another program changed the power profile after you did. Gaming Home leaves it as it is.",
     "power.note.not-remembered": "The profile is set, but Omarchy could not be told to keep it for next time.",
