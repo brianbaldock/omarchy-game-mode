@@ -6,19 +6,25 @@ none), a scratch sysfs tree and a stand-in for Omarchy's ``omarchy-powerprofiles
 real daemon or changes the machine's profile.
 """
 
+import ast
 import os
 import shutil
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from gi.repository import Gio, GLib
 
+from fakes import fake_ppd
+from fakes.clockwork import Timers
 from fakes.fake_inputplumber import PrivateBus
 from fakes.fake_ppd import BUS_NAME, INTERFACE, OBJECT_PATH, PROPERTIES_IFACE, TYPES, FakePPD
+from fakes.fake_upower import activatable_bus_config
 from fakes.loop import pump
 from gaminghome import power, powerprofiles
-from gaminghome.power import BALANCED, PERFORMANCE, PROFILES, SAVER, Evidence, Hold
-from gaminghome.powerprofiles import Unusable, read_properties
+from gaminghome.power import (ABSENT, BALANCED, ERROR, PERFORMANCE, PROFILES, READY, SAVER, UNKNOWN, Evidence,
+                              Hold)
+from gaminghome.powerprofiles import PowerProfiles, Unusable, read_properties
 
 SCRATCH = Path(__file__).resolve().parent / "scratch" / "powerprofiles"
 
@@ -235,6 +241,445 @@ class HelperEnvironmentTest(unittest.TestCase):
     def test_a_directory_that_cannot_be_put_in_a_path_is_left_out(self):
         self.assertEqual(powerprofiles.helper_environment("/opt/a:b/omarchy-powerprofiles-set", {}),
                          {"PATH": "/usr/local/bin:/usr/bin:/bin"})
+
+
+class BusCase(unittest.TestCase):
+    """Against the fake daemon on a private bus. Every test ends by checking each call its sources sent."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bus = PrivateBus.start()
+        cls.addClassCleanup(cls.bus.stop)
+
+    def setUp(self):
+        self.root = scratch(self, "sys")
+        self.kernel("performance", "1")
+        self.timers = Timers()
+        self.fakes, self.sources, self.seen = [], [], []
+        self.addCleanup(self.finish)
+
+    def kernel(self, firmware, boost):
+        for relative, text in ((powerprofiles.PLATFORM_PROFILE, firmware), (powerprofiles.CPU_BOOST, boost)):
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{text}\n", encoding="utf-8")
+
+    def finish(self):
+        for source in self.sources:
+            source.stop()
+        try:
+            senders = {source._connection.get_unique_name() for source in self.sources}
+            for fake in self.fakes:
+                for call in fake.calls:
+                    if call.sender in senders:
+                        self.assert_allowed(call, fake)
+        finally:
+            self.bus.close_connections()
+
+    def assert_allowed(self, call, fake):
+        """A call of the client: on the allow-list, to the owner's unique name, never starting a service."""
+        self.assertEqual((call.path, call.interface), (OBJECT_PATH, PROPERTIES_IFACE), call)
+        if call.member == "GetAll":
+            self.assertEqual(call.arguments, (INTERFACE,), call)
+        else:
+            self.assertEqual(call.member, "Set", call)
+            self.assertEqual(call.arguments[:2], (INTERFACE, "ActiveProfile"), call)
+            self.assertIn(call.arguments[2], PROFILES, call)
+        self.assertEqual(call.destination, fake.unique_name, call)
+        self.assertFalse(call.auto_start, call)
+
+    def fake(self, own=True, **state) -> FakePPD:
+        fake = FakePPD(self.bus, **state)
+        self.fakes.append(fake)
+        if own:
+            self.assertTrue(fake.own())
+        return fake
+
+    def source(self, on_change=None, **options) -> PowerProfiles:
+        options = {"connection": self.bus.connect(), "schedule": self.timers.schedule, "cancel": self.timers.cancel,
+                   "find_helper": lambda: None, "sysfs_root": str(self.root), **options}
+        source = PowerProfiles(on_change or (lambda: self.seen.append(source.snapshot)), **options)
+        self.sources.append(source)
+        return source
+
+    def ready(self, source=None) -> PowerProfiles:
+        source = source or self.source()
+        source.start()
+        self.assertTrue(pump(lambda: source.snapshot.state == READY and source.idle), "the service was not read")
+        return source
+
+    def sent(self, fake, source) -> list:
+        return fake.sent_by(source._connection.get_unique_name())
+
+    @staticmethod
+    def deliver(source, changed=None, sender=None, path=OBJECT_PATH, epoch=None, parameters=None):
+        """Hand the source a PropertiesChanged the way the bus would, without the bus."""
+        if parameters is None:
+            parameters = GLib.Variant("(sa{sv}as)", (INTERFACE, changed or {}, []))
+        source._on_properties_changed(None, sender or source.owner, path, PROPERTIES_IFACE, "PropertiesChanged",
+                                      parameters, source._epoch if epoch is None else epoch)
+
+
+class ReadingTest(BusCase):
+    def test_a_cold_start_reads_the_service_once_and_shows_what_it_said(self):
+        fake = self.fake()
+        source = self.ready()
+        snapshot = source.snapshot
+        self.assertEqual((snapshot.state, snapshot.active, snapshot.available, snapshot.degraded, snapshot.holds),
+                         (READY, PERFORMANCE, PROFILES, (), ()))
+        self.assertEqual((snapshot.pending, snapshot.failure, snapshot.note, snapshot.usable), ("", None, "", True))
+        self.assertEqual(snapshot.evidence, Evidence("performance", "on"))
+        self.assertEqual([call.member for call in self.sent(fake, source)], ["GetAll"])
+        self.assertEqual(source.owner, fake.unique_name)
+
+    def test_until_the_service_answers_nothing_is_known(self):
+        fake = self.fake()
+        fake.hold = lambda call: True
+        source = self.source()
+        source.start()
+        self.assertTrue(pump(lambda: fake.held))
+        self.assertEqual((source.snapshot.state, source.snapshot.visible, source.idle), (UNKNOWN, False, False))
+        fake.answer_held()
+        self.assertTrue(pump(lambda: source.snapshot.state == READY))
+
+    def test_without_a_service_the_state_is_absent_and_nothing_is_sent(self):
+        bystander = self.fake(own=False)
+        source = self.source()
+        source.start()
+        self.assertTrue(pump(lambda: source.snapshot.state == ABSENT))
+        source.retry()
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual((bystander.calls, source.idle, source.snapshot.visible), ([], True, False))
+
+    def test_garbage_from_the_service_is_an_error_until_a_retry_reads_it_once(self):
+        fake = self.fake()
+        fake.garbage = GLib.Variant("(s)", ("not properties",))
+        source = self.source()
+        source.start()
+        self.assertTrue(pump(lambda: source.snapshot.state == ERROR))
+        self.assertEqual((source.snapshot.active, source.snapshot.available, source.snapshot.visible), ("", (), True))
+        fake.garbage = None
+        source.retry()
+        source.retry()                                                 # one read, however often it is asked
+        self.assertTrue(pump(lambda: source.snapshot.state == READY))
+        source.retry()                                                 # nothing to retry once it is read
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual(fake.count("GetAll"), 2)
+
+    def test_a_reply_over_the_cap_or_with_too_many_profiles_is_an_error(self):
+        for spoil in ({"extra": {"Padding": GLib.Variant("s", "x" * powerprofiles.MAX_REPLY_BYTES)}},
+                      {"profiles": fake_ppd.RC73YA * 3}):
+            with self.subTest(spoil=list(spoil)):
+                fake = self.fake(profiles=spoil.get("profiles", fake_ppd.RC73YA))
+                fake.extra.update(spoil.get("extra", {}))
+                source = self.source()
+                source.start()
+                self.assertTrue(pump(lambda: source.snapshot.state == ERROR))
+                source.stop()
+                fake.release()
+
+    def test_a_reading_that_runs_out_of_time_is_an_error(self):
+        fake = self.fake()
+        fake.hold = lambda call: True
+        source = self.source()
+        with mock.patch.object(powerprofiles, "CALL_TIMEOUT_MS", 100):
+            source.start()
+            self.assertTrue(pump(lambda: source.snapshot.state == ERROR, 3))
+        self.assertTrue(source.idle)
+        fake.hold = None
+        source.retry()
+        self.assertTrue(pump(lambda: source.snapshot.state == READY))
+
+    def test_a_refused_reading_is_an_error_and_the_services_words_are_not_kept(self):
+        fake = self.fake()
+        fake.failures["GetAll"] = ("org.freedesktop.DBus.Error.AccessDenied", "words of the daemon")
+        source = self.source()
+        source.start()
+        self.assertTrue(pump(lambda: source.snapshot.state == ERROR))
+        self.assertNotIn("words", repr(source.snapshot))
+
+    def test_a_wrongly_typed_property_is_read_as_its_empty_value(self):
+        fake = self.fake()
+        fake.extra["ActiveProfile"] = GLib.Variant("i", 3)
+        snapshot = self.ready().snapshot
+        self.assertEqual((snapshot.state, snapshot.active, snapshot.available), (READY, "", PROFILES))
+
+    def test_profiles_only_the_placeholder_backs_are_not_offered(self):
+        self.fake(active=BALANCED, profiles=fake_ppd.PLACEHOLDER)
+        snapshot = self.ready().snapshot
+        self.assertEqual((snapshot.active, snapshot.available, snapshot.usable, snapshot.visible),
+                         (BALANCED, (), False, False))
+
+    def test_drivers_are_judged_per_profile_and_one_real_profile_is_no_choice(self):
+        self.fake(active=BALANCED, profiles=((SAVER, "", "placeholder"), (BALANCED, "amd_pstate", "placeholder"),
+                                             (PERFORMANCE, "", "")))
+        snapshot = self.ready().snapshot
+        self.assertEqual((snapshot.state, snapshot.available, snapshot.usable, snapshot.visible),
+                         (READY, (BALANCED,), False, False))
+
+    def test_an_active_profile_this_version_does_not_know_is_unknown(self):
+        self.fake(active="low-power", profiles=fake_ppd.RC73YA + (("low-power", "amd_pstate", "platform_profile"),))
+        snapshot = self.ready().snapshot
+        self.assertEqual((snapshot.active, snapshot.available, snapshot.usable), ("", PROFILES, True))
+
+
+class SignalTest(BusCase):
+    def test_what_the_service_announces_is_followed_without_asking_again(self):
+        fake = self.fake()
+        source = self.ready()
+        self.kernel("quiet", "0")
+        fake.external(SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.active == SAVER))
+        self.assertEqual(source.snapshot.evidence, Evidence("quiet", "off"))
+        fake.set_degraded("lap-detected,high-operating-temperature")
+        self.assertTrue(pump(lambda: source.snapshot.degraded == (power.LAP, power.HEAT)))
+        fake.add_hold(PERFORMANCE, "\u202eorg.example.Game\u200f" + "x" * 10_000, reason="a reason nobody sees")
+        self.assertTrue(pump(lambda: source.snapshot.holds))
+        self.assertEqual(source.snapshot.holds, (Hold(PERFORMANCE, "org.example.Game" + "x" * 16),))
+        self.assertNotIn("nobody", repr(source.snapshot))
+        self.assertEqual(source.snapshot.note, "")                      # nobody asked for anything here
+        self.assertEqual([call.member for call in self.sent(fake, source)], ["GetAll"])
+        self.assertTrue(source.idle)
+
+    def test_a_hold_stays_listed_when_another_program_changes_the_profile(self):
+        fake = self.fake(active=PERFORMANCE)
+        fake.add_hold(PERFORMANCE, "org.example.Game", signal=False)
+        source = self.ready()
+        fake.external(BALANCED)
+        self.assertTrue(pump(lambda: source.snapshot.active == BALANCED))
+        self.assertEqual(source.snapshot.holds, (Hold(PERFORMANCE, "org.example.Game"),))   # listed, not in force
+
+    def test_signals_of_anyone_but_the_owner_and_of_other_objects_are_ignored(self):
+        fake = self.fake(active=PERFORMANCE)
+        source = self.ready()
+        saver = {"ActiveProfile": GLib.Variant("s", SAVER)}
+        self.bus.connect().emit_signal(None, OBJECT_PATH, PROPERTIES_IFACE, "PropertiesChanged",
+                                       GLib.Variant("(sa{sv}as)", (INTERFACE, saver, [])))
+        for path, interface in ((OBJECT_PATH, "org.example.Other"), (fake_ppd.LEGACY_PATH, fake_ppd.LEGACY_INTERFACE)):
+            fake.connection.emit_signal(None, path, PROPERTIES_IFACE, "PropertiesChanged",
+                                        GLib.Variant("(sa{sv}as)", (interface, saver, [])))
+        fake.set_degraded("lap-detected")                              # after those, from the owner itself
+        self.assertTrue(pump(lambda: source.snapshot.degraded == (power.LAP,)))
+        self.assertFalse(pump(lambda: source.snapshot.active != PERFORMANCE, 0.05))
+        for sender, path, epoch in ((":1.999", OBJECT_PATH, None), (None, fake_ppd.LEGACY_PATH, None),
+                                    (None, OBJECT_PATH, source._epoch - 1)):
+            self.deliver(source, saver, sender=sender, path=path, epoch=epoch)
+        self.assertEqual(source.snapshot.active, PERFORMANCE)
+
+    def test_a_change_that_changes_nothing_keeps_the_same_snapshot_and_tells_nobody(self):
+        self.fake()
+        source = self.ready()
+        snapshot, told = source.snapshot, len(self.seen)
+        self.deliver(source, {"ActiveProfile": GLib.Variant("s", PERFORMANCE), "Version": GLib.Variant("s", "0.31")})
+        self.assertIs(source.snapshot, snapshot)
+        self.assertEqual(len(self.seen), told)
+
+    def test_a_signal_the_source_cannot_use_is_an_error_until_a_retry(self):
+        self.fake()
+        too_many = GLib.Variant("aa{sv}", [{"Profile": GLib.Variant("s", BALANCED)}] * 9)
+        for parameters in (GLib.Variant("(s)", (INTERFACE,)),
+                           GLib.Variant("(sa{sv}as)", (INTERFACE, {"Profiles": too_many}, [])),
+                           GLib.Variant("(sa{sv}as)", (INTERFACE, {"x": GLib.Variant("s", "x" * 70_000)}, []))):
+            with self.subTest(parameters=parameters.get_type_string()):
+                source = self.ready()
+                self.deliver(source, parameters=parameters)
+                self.assertEqual((source.snapshot.state, source.snapshot.active), (ERROR, ""))
+                source.retry()
+                self.assertTrue(pump(lambda: source.snapshot.state == READY))
+                source.stop()
+
+
+class OwnerTest(BusCase):
+    def test_the_owner_leaving_is_absent_and_a_new_owner_is_read_from_scratch(self):
+        first = self.fake(active=PERFORMANCE)
+        first.add_hold(PERFORMANCE, "org.example.Game", signal=False)
+        source = self.ready()
+        first.release()
+        self.assertTrue(pump(lambda: source.snapshot.state == ABSENT))
+        snapshot = source.snapshot
+        self.assertEqual((snapshot.active, snapshot.available, snapshot.holds, source.owner), ("", (), (), None))
+        asked = len(first.calls)
+        second = self.fake(active=SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.state == READY))
+        self.assertEqual((source.snapshot.active, source.snapshot.holds, source.owner), (SAVER, (), second.unique_name))
+        first.external(BALANCED)                                       # the old owner no longer counts
+        second.set_degraded("lap-detected")
+        self.assertTrue(pump(lambda: source.snapshot.degraded == (power.LAP,)))
+        self.assertEqual((source.snapshot.active, len(first.calls)), (SAVER, asked))
+
+    def test_a_late_reply_for_a_previous_owner_is_ignored(self):
+        first = self.fake(active=PERFORMANCE)
+        first.hold = lambda call: True
+        source = self.source()
+        source.start()
+        self.assertTrue(pump(lambda: first.held))
+        first.release()
+        self.assertTrue(pump(lambda: source.snapshot.state == ABSENT))
+        self.fake(active=SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.state == READY))
+        first.answer_held()
+        self.assertFalse(pump(lambda: source.snapshot.active != SAVER, 0.1))
+
+
+class LifecycleTest(BusCase):
+    def test_a_started_untouched_source_holds_no_timer_no_call_and_no_process(self):
+        fake = self.fake()
+        source = self.ready()
+        self.assertEqual((source.idle, self.timers.pending, self.timers.delays), (True, {}, []))
+        calls = len(fake.calls)
+        self.assertFalse(pump(timeout=0.08))
+        self.assertEqual(len(fake.calls), calls)
+
+    def test_start_and_stop_are_idempotent_and_each_start_reads_once(self):
+        fake = self.fake()
+        source = self.source()
+        source.start()
+        source.start()
+        self.assertTrue(pump(lambda: source.snapshot.state == READY and source.idle))
+        source.stop()
+        source.stop()
+        source.start()
+        self.assertTrue(pump(lambda: fake.count("GetAll") == 2 and source.idle))
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual(fake.count("GetAll"), 2)
+
+    def test_while_stopped_nothing_is_heard_asked_or_told(self):
+        fake = self.fake()
+        source = self.ready()
+        source.stop()
+        told, calls = len(self.seen), len(fake.calls)
+        fake.external(SAVER)
+        source.retry()
+        source.dismiss()
+        self.assertFalse(pump(timeout=0.08))
+        self.assertEqual((len(self.seen), len(fake.calls), source.snapshot.active, source.owner),
+                         (told, calls, PERFORMANCE, None))
+
+    def test_what_was_last_read_stays_across_stop_and_start_so_the_header_does_not_blink(self):
+        fake = self.fake()
+        source = self.ready()
+        before = source.snapshot
+        source.stop()
+        self.assertIs(source.snapshot, before)
+        fake.hold = lambda call: True
+        source.start()
+        self.assertTrue(pump(lambda: fake.held))
+        self.assertEqual(source.snapshot, before)
+        fake.external(SAVER)                                           # while the reading is on its way
+        fake.answer_held()
+        self.assertTrue(pump(lambda: source.snapshot.active == SAVER and source.idle))
+
+    def test_stopping_mid_read_leaves_nothing_behind_and_tells_nobody(self):
+        fake = self.fake()
+        fake.hold = lambda call: True
+        source = self.source()
+        source.start()
+        self.assertTrue(pump(lambda: fake.held))
+        source.stop()
+        told = len(self.seen)
+        fake.answer_held()
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual((len(self.seen), source.snapshot.state, source.idle, source.owner),
+                         (told, UNKNOWN, True, None))
+
+    def test_an_exception_in_on_change_does_not_break_the_source(self):
+        fake = self.fake()
+        told = []
+
+        def on_change():
+            told.append(source.snapshot.active)
+            raise RuntimeError("the window is gone")
+        source = self.ready(self.source(on_change))
+        fake.external(SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.active == SAVER))
+        self.assertEqual((told[-1], source.handler_error), (SAVER, "RuntimeError"))
+
+    def test_a_call_outside_the_allow_list_is_refused_and_never_sent(self):
+        fake = self.fake()
+        source = self.ready()
+        sent = len(fake.calls)
+        for path, interface, member, parameters in (
+                (OBJECT_PATH, INTERFACE, "HoldProfile", GLib.Variant("(sss)", (PERFORMANCE, "", "org.example.Game"))),
+                (OBJECT_PATH, PROPERTIES_IFACE, "Set", set_call(False, "b", name="BatteryAware")),
+                (OBJECT_PATH, PROPERTIES_IFACE, "Set", set_call("turbo")),
+                (OBJECT_PATH, PROPERTIES_IFACE, "Get", GLib.Variant("(ss)", (INTERFACE, "ActiveProfile")))):
+            with self.subTest(member=member), self.assertRaises(ValueError):
+                source._call(path, interface, member, parameters, "()", 1000, lambda *_: None)
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual(len(fake.calls), sent)
+
+
+class WatchTest(unittest.TestCase):
+    def setUp(self):
+        self.root = str(scratch(self, "sys"))
+
+    def test_the_name_is_only_watched_on_the_system_bus_so_the_daemon_is_never_started(self):
+        source = PowerProfiles(lambda: None, sysfs_root=self.root)
+        with mock.patch.object(powerprofiles.Gio, "bus_watch_name", return_value=7) as watch, \
+                mock.patch.object(powerprofiles.Gio, "bus_unwatch_name") as unwatch:
+            source.start()
+            source.start()
+            self.assertEqual(watch.call_count, 1)
+            self.assertEqual(watch.call_args.args[:3],
+                             (Gio.BusType.SYSTEM, BUS_NAME, Gio.BusNameWatcherFlags.NONE))
+            source.stop()
+            source.stop()
+            unwatch.assert_called_once_with(7)
+
+    def test_nothing_is_watched_or_read_before_start(self):
+        with mock.patch.object(powerprofiles.Gio, "bus_watch_name") as watch:
+            source = PowerProfiles(lambda: None, sysfs_root=self.root)
+            source.stop()
+        watch.assert_not_called()
+        self.assertEqual(source.snapshot, power.Snapshot())
+
+    def test_the_module_names_no_call_that_holds_a_profile_or_writes_anything_else(self):
+        text = Path(powerprofiles.__file__).read_text(encoding="utf-8")
+        strings = {node.value for node in ast.walk(ast.parse(text))
+                   if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+        self.assertFalse(strings & {"HoldProfile", "ReleaseProfile", "SetActionEnabled", "BatteryAware", "Get",
+                                    "Introspect"})
+        self.assertNotIn("net.hadess", text)
+        self.assertNotIn("call_sync", text)
+        self.assertNotIn("AUTO_START", text.replace("NO_AUTO_START", ""))
+
+
+class NeverStartedTest(unittest.TestCase):
+    """This private bus *can* start the daemon by its name, and a control name proves that it would."""
+
+    CONTROL = "org.example.Control"
+
+    def setUp(self):
+        directory = scratch(self, "activation")
+        self.started, self.control = directory / "daemon-started", directory / "control-started"
+        config = activatable_bus_config(directory / "bus", {BUS_NAME: self.started, self.CONTROL: self.control})
+        self.bus = PrivateBus.start(config)
+        self.addCleanup(self.bus.stop)
+        self.start_service(self.CONTROL)
+        if not pump(self.control.exists, 3):
+            self.skipTest("this bus cannot start services here")
+
+    def start_service(self, name):
+        """Ask the bus to start ``name``. The command only leaves its marker, so no reply is awaited."""
+        self.bus.connect().call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                                "StartServiceByName", GLib.Variant("(su)", (name, 0)), None, Gio.DBusCallFlags.NONE,
+                                5000, None, lambda _bus, _result, _data: None, None)
+
+    def test_the_bus_starts_the_daemon_when_it_is_asked_to(self):
+        self.start_service(BUS_NAME)
+        self.assertTrue(pump(self.started.exists, 3), "this bus cannot start the daemon: the next test proves nothing")
+
+    def test_watching_reading_and_asking_never_start_it(self):
+        source = PowerProfiles(lambda: None, connection=self.bus.connect(), find_helper=lambda: None,
+                               sysfs_root=str(self.started.parent))
+        self.addCleanup(source.stop)
+        source.start()
+        self.assertTrue(pump(lambda: source.snapshot.state == ABSENT))
+        source.retry()
+        source.stop()
+        source.start()
+        self.assertTrue(pump(lambda: source.snapshot.state == ABSENT))
+        self.assertFalse(pump(self.started.exists, 0.3))
 
 
 class FakeServiceTest(unittest.TestCase):

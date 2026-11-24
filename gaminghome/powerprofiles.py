@@ -7,18 +7,24 @@ asks; this module says how that reaches the machine.
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 import os
 
 from gi.repository import Gio, GLib
 
 from . import power
-from .power import DENIED, FAILED, PROFILES, TIMEOUT, UNAVAILABLE, Evidence, Hold
+from .power import (ABSENT, CHANGED_ELSEWHERE, DENIED, ERROR, FAILED, PROFILES, READY, TIMEOUT, UNAVAILABLE, UNKNOWN,
+                    Evidence, Failure, Hold, Snapshot)
 
 BUS_NAME = "org.freedesktop.UPower.PowerProfiles"
 OBJECT_PATH = "/org/freedesktop/UPower/PowerProfiles"
 INTERFACE = "org.freedesktop.UPower.PowerProfiles"
 PROPERTIES_IFACE = "org.freedesktop.DBus.Properties"
 ACTIVE_PROFILE = "ActiveProfile"
+
+CALL_TIMEOUT_MS = 5_000         # a reading of the service
+SET_TIMEOUT_MS = 5_000          # a change: PPD answers in milliseconds
 
 MAX_REPLY_BYTES = 64 * 1024     # PPD answers GetAll with about a kilobyte
 MAX_PROFILES = 8                # PPD knows three
@@ -154,3 +160,283 @@ def helper_environment(script: str, environ) -> dict[str, str]:
     environment = {"PATH": ":".join(dict.fromkeys([*entries, *HELPER_PATH]))}
     environment.update({name: environ[name] for name in HELPER_ENVIRONMENT if name in environ})
     return environment
+
+
+def _timeout_add(milliseconds, callback):
+    def fire():
+        callback()
+        return GLib.SOURCE_REMOVE
+    return GLib.timeout_add(milliseconds, fire)
+
+
+def _guarded(method):
+    """For what the main loop or the window calls: an exception never escapes, and never wedges the source."""
+    @functools.wraps(method)
+    def wrapper(self, *args):
+        try:
+            return method(self, *args)
+        except Exception as error:  # noqa: BLE001
+            self._went_wrong(error)
+            return None
+    return wrapper
+
+
+def _service(state: str) -> dict:
+    """The fields of a snapshot that come from the service, as they are before it says anything."""
+    return {"state": state, "active": "", "available": (), "degraded": (), "holds": ()}
+
+
+class PowerProfiles:
+    """The power profile source of ``power.py``, backed by power-profiles-daemon on the system bus.
+
+    ``on_change`` is called on the main loop after ``snapshot`` changed. The keyword arguments replace the system in
+    tests: ``connection`` the system bus, ``schedule(milliseconds, function)`` and ``cancel(token)`` the timers,
+    ``find_helper()`` and ``run_helper(argv, environment, on_exit)`` how Omarchy's command is found and run, and
+    ``sysfs_root`` where the kernel's files are.
+    """
+
+    def __init__(self, on_change, *, connection: Gio.DBusConnection | None = None, schedule=_timeout_add,
+                 cancel=GLib.source_remove, find_helper=None, run_helper=None, sysfs_root: str = SYSFS_ROOT):
+        self._on_change = on_change
+        self._connection = connection
+        self._schedule, self._cancel = schedule, cancel
+        self._find_helper, self._run_helper = find_helper, run_helper
+        self._root = sysfs_root
+        self._snapshot = self._announced = Snapshot()
+        self.handler_error: str | None = None    # the kind of exception ``on_change`` last raised
+        self.internal_error: str | None = None   # the kind of exception this source last caught in itself
+        self._started = False
+        self._visit = 0          # one more at each start() and stop(): name watch callbacks of another are dropped
+        self._epoch = 0          # one more per owner and per visit: replies and signals of another are dropped
+        self._fresh = False      # nothing has been heard of the name in this visit yet
+        self._watch = None
+        self._bus: Gio.DBusConnection | None = None
+        self._owner: str | None = None
+        self._subscription: int | None = None
+        self._cancellable: Gio.Cancellable | None = None
+        self._reading = False
+        self._armed = False      # a request of this visit succeeded: another program's change is worth a note
+
+    # ---- what the window reads ---------------------------------------------
+    @property
+    def snapshot(self) -> Snapshot:
+        return self._snapshot
+
+    @property
+    def owner(self) -> str | None:
+        """The unique bus name every call goes to, or None."""
+        return self._owner
+
+    @property
+    def idle(self) -> bool:
+        """No call in flight, no timer and no process: the source only waits for the service to say something."""
+        return not self._reading and not self._snapshot.pending
+
+    # ---- lifecycle ---------------------------------------------------------
+    @_guarded
+    def start(self):
+        if self._started:
+            return
+        self._started, self._fresh = True, True
+        self._visit += 1
+        self._epoch += 1
+        self._update(evidence=read_evidence(self._root))
+        self._watch = self._watch_name(self._visit)
+        self._announce()
+
+    @_guarded
+    def stop(self):
+        """Idempotent. What was last read stays; a request on its way is forgotten, and nothing reports any more."""
+        watch, self._watch = self._watch, None
+        self._started = False
+        self._visit += 1
+        self._forget_owner()
+        self._armed = False
+        self._update(pending="", failure=None, note="")
+        if watch is not None:
+            self._unwatch_name(watch)
+
+    def _watch_name(self, visit):
+        flags = Gio.BusNameWatcherFlags.NONE          # watch only: never start the service
+        appeared = functools.partial(self._appeared, visit)
+        vanished = functools.partial(self._vanished, visit)
+        if self._connection is not None:
+            return Gio.bus_watch_name_on_connection(self._connection, BUS_NAME, flags, appeared, vanished)
+        return Gio.bus_watch_name(Gio.BusType.SYSTEM, BUS_NAME, flags, appeared, vanished)
+
+    @staticmethod
+    def _unwatch_name(watch):
+        Gio.bus_unwatch_name(watch)
+
+    def _forget_owner(self):
+        """Drop the current owner: what is in flight to it is cancelled, and its replies and signals no longer count."""
+        self._epoch += 1
+        if self._cancellable is not None:
+            self._cancellable.cancel()
+        if self._bus is not None and self._subscription is not None:
+            self._bus.signal_unsubscribe(self._subscription)
+        self._bus = self._owner = self._subscription = self._cancellable = None
+        self._reading = False
+
+    # ---- the owner of the name ---------------------------------------------
+    @_guarded
+    def _appeared(self, visit, connection, _name, owner):
+        if visit != self._visit or owner == self._owner:
+            return
+        changes = self._owner_gone() if self._owner is not None else {}
+        if not self._fresh:
+            changes.update(_service(UNKNOWN))     # a new owner is read from scratch
+        self._fresh = False
+        self._bus, self._owner = connection, owner
+        self._cancellable = Gio.Cancellable()
+        self._subscription = connection.signal_subscribe(
+            owner, PROPERTIES_IFACE, "PropertiesChanged", OBJECT_PATH, INTERFACE, Gio.DBusSignalFlags.NONE,
+            self._on_properties_changed, self._epoch)
+        self._update(**changes)
+        self._read()
+        self._announce()
+
+    @_guarded
+    def _vanished(self, visit, _connection, _name):
+        if visit != self._visit:
+            return
+        changes = self._owner_gone()
+        changes.update(_service(ABSENT))
+        self._fresh = False
+        self._update(**changes)
+        self._announce()
+
+    def _owner_gone(self) -> dict:
+        """The owner left or was replaced: a request on its way to it ends as UNAVAILABLE."""
+        pending = self._snapshot.pending
+        self._forget_owner()
+        self._armed = False
+        changes = {"pending": "", "note": ""}
+        if pending:
+            changes["failure"] = Failure(UNAVAILABLE, pending)
+        return changes
+
+    # ---- reading -----------------------------------------------------------
+    def _read(self):
+        self._reading = True
+        if not self._call(OBJECT_PATH, PROPERTIES_IFACE, "GetAll", GLib.Variant("(s)", (INTERFACE,)), "(a{sv})",
+                          CALL_TIMEOUT_MS, self._on_read):
+            self._reading = False
+            self._update(**_service(ERROR))
+
+    def _call(self, path, interface, member, parameters, reply_type, timeout, callback, *data) -> bool:
+        """Send one call to the current owner: the one place that sends. It refuses anything not ``allowed``."""
+        if not allowed(path, interface, member, parameters):
+            raise ValueError(f"{interface}.{member} is not a call this module sends")
+        if self._bus is None or not Gio.dbus_is_unique_name(self._owner or ""):
+            return False                              # Gio drops a call to a malformed name and never answers it
+        try:
+            self._bus.call(self._owner, path, interface, member, parameters, GLib.VariantType(reply_type),
+                           Gio.DBusCallFlags.NO_AUTO_START, timeout, self._cancellable, callback,
+                           (self._epoch, *data))
+        except (TypeError, ValueError, GLib.Error):
+            return False
+        return True
+
+    @staticmethod
+    def _finish(bus, result):
+        """The reply of a call, or the error it ended with."""
+        try:
+            return bus.call_finish(result)
+        except Exception as error:  # noqa: BLE001 - a cancelled call, a time-out, an error of the service
+            return error
+
+    @_guarded
+    def _on_read(self, bus, result, data):
+        reply = self._finish(bus, result)
+        if data[0] != self._epoch:
+            return                                    # an answer for a previous owner, or for a stopped source
+        self._reading = False
+        fields = None
+        if isinstance(reply, GLib.Variant) and reply.get_size() <= MAX_REPLY_BYTES:
+            try:
+                fields = read_properties(reply.unpack()[0])
+            except (Unusable, IndexError):
+                fields = None
+        changes = _service(ERROR) if fields is None else {**_service(READY), **fields}
+        failure = self._snapshot.failure
+        if fields and failure is not None and failure.code == TIMEOUT and fields["active"] == failure.profile:
+            changes["failure"] = None
+        self._update(evidence=read_evidence(self._root), **changes)
+        self._announce()
+
+    @_guarded
+    def _on_properties_changed(self, _bus, sender, path, _interface, _member, parameters, epoch):
+        if epoch != self._epoch or sender != self._owner or path != OBJECT_PATH:
+            return
+        if self._reading or self._snapshot.state != READY:
+            return                                    # the reading on its way is newer, or there is nothing to update
+        changes = {"evidence": read_evidence(self._root)}
+        try:
+            if parameters.get_type_string() != "(sa{sv}as)" or parameters.get_size() > MAX_REPLY_BYTES:
+                raise Unusable("not a change of properties")
+            interface, changed, _invalidated = parameters.unpack()
+            if interface != INTERFACE:
+                return
+            fields = read_properties(changed, complete=False)
+        except Unusable:
+            fields, changes = {}, {**changes, **_service(ERROR)}
+        changes.update(fields)
+        if fields.get("active", self._snapshot.active) != self._snapshot.active:
+            self._profile_changed(fields["active"], changes)
+        self._update(**changes)
+        self._announce()
+
+    def _profile_changed(self, active: str, changes: dict):
+        """What a change of the active profile announced by the service means for the request of this visit."""
+        failure = self._snapshot.failure
+        if failure is not None and failure.code == TIMEOUT and active == failure.profile:
+            changes["failure"] = None
+        if self._armed and not self._snapshot.pending:
+            changes["note"] = CHANGED_ELSEWHERE
+
+    # ---- operations --------------------------------------------------------
+    @_guarded
+    def retry(self):
+        """Read the service again after it could not be read. Nothing otherwise."""
+        if self._started and self._snapshot.state == ERROR and self._owner is not None and not self._reading:
+            self._read()
+            self._announce()
+
+    @_guarded
+    def dismiss(self):
+        self._armed = False
+        self._update(failure=None, note="")
+        self._announce()
+
+    # ---- the snapshot ------------------------------------------------------
+    def _update(self, **changes):
+        """A new snapshot only when something changed: an unchanged one stays the same object."""
+        snapshot = dataclasses.replace(self._snapshot, **changes)
+        if snapshot != self._snapshot:
+            self._snapshot = snapshot
+
+    def _announce(self):
+        """Tell the window the snapshot changed since it was last told. Never while stopped."""
+        if not self._started or self._snapshot == self._announced:
+            return
+        self._announced = self._snapshot
+        try:
+            self._on_change()
+        except Exception as error:  # noqa: BLE001 - the window's trouble must not become the source's
+            self.handler_error = type(error).__name__
+
+    def _went_wrong(self, error):
+        """Something unexpected raised: end what was in flight, so the source keeps working. Its text is not kept."""
+        self.internal_error = type(error).__name__
+        changes = {}
+        if self._reading:
+            self._reading = False
+            changes.update(_service(ERROR))
+        if self._snapshot.pending:
+            changes.update(pending="", failure=Failure(FAILED, self._snapshot.pending))
+        try:
+            self._update(**changes)
+            self._announce()
+        except Exception:  # noqa: BLE001
+            pass
