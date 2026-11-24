@@ -547,21 +547,38 @@ def main():
             app.quit()
             return False
 
+        stepped = [-1]                  # the window's frame counter when the last step had run
+
+        def drawn():
+            """A frame was drawn after the last step. Broadway draws few frames without a browser, and a picture
+            taken before that frame shows the styles from before the step, such as the focus ring where it was."""
+            clock = window.get_frame_clock()
+            return clock is not None and clock.get_frame_counter() > stepped[0]
+
         def run(index=0, tries=0):
             try:
                 if index > 0:
                     name = f"{language}-{width}x{height}-{steps[index - 1][0]}{suffix}"
+                    fresh = drawn()
+                    if not fresh and tries < 10:
+                        GLib.timeout_add(300, run, index, tries + 1)
+                        return False
                     if not shoot(window, name):
                         if tries < 10:                              # the first frame can come late
                             GLib.timeout_add(300, run, index, tries + 1)
                             return False
                         print(f"{name}: nothing rendered", file=sys.stderr)
+                    elif not fresh:
+                        print(f"{name}: no frame was drawn after the step, so the picture may show the one before",
+                              file=sys.stderr)
                 if index == len(steps):
                     if bluetooth:
                         check_behaviour(bluetooth, language, window, source)
                     app.quit()
                     return False
                 steps[index][1]()
+                clock = window.get_frame_clock()
+                stepped[0] = clock.get_frame_counter() if clock is not None else -1
             except Exception:
                 return fail()
             GLib.timeout_add(800, run, index + 1)
