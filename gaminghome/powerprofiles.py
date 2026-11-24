@@ -15,7 +15,7 @@ from gi.repository import Gio, GLib
 
 from . import power
 from .power import (ABSENT, CHANGED_ELSEWHERE, DENIED, ERROR, FAILED, PROFILES, READY, TIMEOUT, UNAVAILABLE, UNKNOWN,
-                    Evidence, Failure, Hold, Snapshot)
+                    UNSUPPORTED, Evidence, Failure, Hold, Snapshot)
 
 BUS_NAME = "org.freedesktop.UPower.PowerProfiles"
 OBJECT_PATH = "/org/freedesktop/UPower/PowerProfiles"
@@ -215,6 +215,7 @@ class PowerProfiles:
         self._subscription: int | None = None
         self._cancellable: Gio.Cancellable | None = None
         self._reading = False
+        self._live = False       # the service was read in this visit, from the current owner
         self._armed = False      # a request of this visit succeeded: another program's change is worth a note
 
     # ---- what the window reads ---------------------------------------------
@@ -237,7 +238,7 @@ class PowerProfiles:
     def start(self):
         if self._started:
             return
-        self._started, self._fresh = True, True
+        self._started, self._fresh, self._live = True, True, False
         self._visit += 1
         self._epoch += 1
         self._update(evidence=read_evidence(self._root))
@@ -310,7 +311,7 @@ class PowerProfiles:
         """The owner left or was replaced: a request on its way to it ends as UNAVAILABLE."""
         pending = self._snapshot.pending
         self._forget_owner()
-        self._armed = False
+        self._live = self._armed = False
         changes = {"pending": "", "note": ""}
         if pending:
             changes["failure"] = Failure(UNAVAILABLE, pending)
@@ -358,6 +359,7 @@ class PowerProfiles:
                 fields = read_properties(reply.unpack()[0])
             except (Unusable, IndexError):
                 fields = None
+        self._live = fields is not None
         changes = _service(ERROR) if fields is None else {**_service(READY), **fields}
         failure = self._snapshot.failure
         if fields and failure is not None and failure.code == TIMEOUT and fields["active"] == failure.profile:
@@ -396,6 +398,51 @@ class PowerProfiles:
             changes["note"] = CHANGED_ELSEWHERE
 
     # ---- operations --------------------------------------------------------
+    @_guarded
+    def set_profile(self, profile):
+        """Ask the service for ``profile``. Returns at once: ``power.py`` says what follows."""
+        snapshot = self._snapshot
+        if not self._started or snapshot.pending:
+            return                                    # ignored while a request is on its way, and while stopped
+        self._armed = False
+        asked = profile if profile in PROFILES else ""
+        if snapshot.state != READY or not self._live:   # what is shown may be the last visit's until it is read
+            self._update(failure=Failure(UNAVAILABLE, asked), note="")
+        elif profile not in snapshot.available:
+            self._update(failure=Failure(UNSUPPORTED, asked), note="")
+        elif profile == snapshot.active:
+            # The service would do nothing (and keep another program's hold), so it is not asked.
+            self._armed = True
+            self._update(failure=None, note="")
+        elif self._call(OBJECT_PATH, PROPERTIES_IFACE, "Set",
+                        GLib.Variant("(ssv)", (INTERFACE, ACTIVE_PROFILE, GLib.Variant("s", profile))), "()",
+                        SET_TIMEOUT_MS, self._on_set, profile):
+            self._update(pending=profile, failure=None, note="")
+        else:
+            self._update(failure=Failure(FAILED, profile), note="")
+        self._announce()
+
+    @_guarded
+    def _on_set(self, bus, result, data):
+        reply = self._finish(bus, result)
+        epoch, profile = data
+        if epoch != self._epoch:
+            return                                    # forgotten: the owner left, or the source was stopped
+        snapshot = self._snapshot
+        changes = {"pending": "", "evidence": read_evidence(self._root)}
+        if isinstance(reply, GLib.Variant):
+            # The reply is the outcome: the service applied the profile, and announced it, before it answered.
+            if snapshot.state == READY:
+                self._armed = True
+                if snapshot.active != profile:
+                    changes["note"] = CHANGED_ELSEWHERE
+        else:
+            code = failure_code(reply)
+            if code != TIMEOUT or snapshot.active != profile:  # a profile announced in time is no time-out
+                changes["failure"] = Failure(code, profile)
+        self._update(**changes)
+        self._announce()
+
     @_guarded
     def retry(self):
         """Read the service again after it could not be read. Nothing otherwise."""

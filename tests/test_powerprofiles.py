@@ -22,8 +22,8 @@ from fakes.fake_ppd import BUS_NAME, INTERFACE, OBJECT_PATH, PROPERTIES_IFACE, T
 from fakes.fake_upower import activatable_bus_config
 from fakes.loop import pump
 from gaminghome import power, powerprofiles
-from gaminghome.power import (ABSENT, BALANCED, ERROR, PERFORMANCE, PROFILES, READY, SAVER, UNKNOWN, Evidence,
-                              Hold)
+from gaminghome.power import (ABSENT, BALANCED, CHANGED_ELSEWHERE, DENIED, ERROR, FAILED, PERFORMANCE, PROFILES, READY,
+                              SAVER, TIMEOUT, UNAVAILABLE, UNKNOWN, UNSUPPORTED, Evidence, Failure, Hold)
 from gaminghome.powerprofiles import PowerProfiles, Unusable, read_properties
 
 SCRATCH = Path(__file__).resolve().parent / "scratch" / "powerprofiles"
@@ -303,9 +303,16 @@ class BusCase(unittest.TestCase):
         return source
 
     def ready(self, source=None) -> PowerProfiles:
+        """Start a source and wait for its own reading of the service (a restarted one shows the last one at once)."""
         source = source or self.source()
+        sender = source._connection.get_unique_name()
+
+        def readings():
+            return sum(call.member == "GetAll" for fake in self.fakes for call in fake.sent_by(sender))
+        before = readings()
         source.start()
-        self.assertTrue(pump(lambda: source.snapshot.state == READY and source.idle), "the service was not read")
+        self.assertTrue(pump(lambda: readings() > before and source.snapshot.state == READY and source.idle),
+                        "the service was not read")
         return source
 
     def sent(self, fake, source) -> list:
@@ -582,6 +589,39 @@ class LifecycleTest(BusCase):
         self.assertEqual((len(self.seen), source.snapshot.state, source.idle, source.owner),
                          (told, UNKNOWN, True, None))
 
+    def test_stop_clears_the_request_its_failure_and_its_note_and_keeps_what_was_read(self):
+        fake = self.fake(active=BALANCED)
+        source = self.ready()
+        fake.deny = True
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: source.snapshot.failure is not None))
+        source.stop()
+        self.assertEqual((source.snapshot.failure, source.snapshot.state, source.snapshot.active),
+                         (None, READY, BALANCED))
+        self.ready(source)
+        fake.deny = False
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: not source.snapshot.pending))
+        fake.external(SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.note == CHANGED_ELSEWHERE))
+        source.stop()
+        self.assertEqual((source.snapshot.note, source.snapshot.active), ("", SAVER))
+
+    def test_stop_forgets_a_request_on_its_way_and_the_next_start_reads_the_service_again(self):
+        fake = self.fake(active=SAVER)
+        fake.hold = lambda call: call.member == "Set"
+        source = self.ready()
+        source.set_profile(BALANCED)
+        self.assertTrue(pump(lambda: fake.held))
+        told = len(self.seen)
+        source.stop()
+        self.assertEqual((source.snapshot.pending, source.snapshot.failure, source.idle), ("", None, True))
+        fake.answer_held()                                             # the service carries it out all the same
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual((len(self.seen), source.snapshot.active, self.timers.pending), (told, SAVER, {}))
+        self.ready(source)
+        self.assertEqual((source.snapshot.active, source.snapshot.failure), (BALANCED, None))
+
     def test_an_exception_in_on_change_does_not_break_the_source(self):
         fake = self.fake()
         told = []
@@ -607,6 +647,287 @@ class LifecycleTest(BusCase):
                 source._call(path, interface, member, parameters, "()", 1000, lambda *_: None)
         self.assertFalse(pump(timeout=0.05))
         self.assertEqual(len(fake.calls), sent)
+
+
+class SetTest(BusCase):
+    def sets(self, fake, source) -> list:
+        return [call.arguments[2] for call in self.sent(fake, source) if call.member == "Set"]
+
+    def settle(self, source):
+        self.assertTrue(pump(lambda: not source.snapshot.pending and source.idle), "the request did not end")
+
+    def test_every_profile_can_be_chosen_from_every_other_one(self):
+        fake = self.fake(active=SAVER)
+        source = self.ready()
+        for profile in (BALANCED, PERFORMANCE, SAVER, PERFORMANCE, BALANCED, SAVER):
+            with self.subTest(profile=profile):
+                before = source.snapshot.active
+                source.set_profile(profile)
+                self.assertEqual((source.snapshot.pending, source.snapshot.active, self.seen[-1].pending),
+                                 (profile, before, profile))
+                self.settle(source)
+                snapshot = source.snapshot
+                self.assertEqual((snapshot.active, snapshot.failure, snapshot.note), (profile, None, ""))
+        self.assertEqual(self.sets(fake, source), [BALANCED, PERFORMANCE, SAVER, PERFORMANCE, BALANCED, SAVER])
+        self.assertEqual(fake.count("GetAll"), 1)
+
+    def test_the_reply_is_the_outcome_and_nothing_waits_after_it(self):
+        fake = self.fake(active=BALANCED)
+        fake.late = lambda call: call.member == "Set"
+        source = self.ready()
+        self.kernel("performance", "1")
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: source.snapshot.active == PERFORMANCE))     # applied and announced ...
+        self.assertEqual(source.snapshot.pending, PERFORMANCE)                    # ... but only the answer ends it
+        fake.answer_held()
+        self.settle(source)
+        self.assertEqual((source.snapshot.failure, source.snapshot.note), (None, ""))
+        self.assertEqual((self.timers.pending, self.timers.delays, fake.count("GetAll")), ({}, [], 1))
+
+    def test_choosing_the_active_profile_asks_the_service_nothing(self):
+        fake = self.fake(active=PERFORMANCE)
+        fake.add_hold(PERFORMANCE, "org.example.Game", signal=False)
+        source = self.ready()
+        source.set_profile(PERFORMANCE)
+        snapshot = source.snapshot
+        self.assertEqual((snapshot.pending, snapshot.failure, snapshot.note, source.idle), ("", None, "", True))
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual((self.sets(fake, source), len(fake.holds)), ([], 1))
+        self.assertEqual(source.snapshot.holds, (Hold(PERFORMANCE, "org.example.Game"),))
+
+    def test_choosing_another_profile_ends_every_hold(self):
+        fake = self.fake(active=PERFORMANCE)
+        fake.add_hold(PERFORMANCE, "org.example.Game", signal=False)
+        fake.add_hold(SAVER, "org.example.Reader", signal=False)
+        source = self.ready()
+        self.assertEqual(len(source.snapshot.holds), 2)
+        source.set_profile(BALANCED)
+        self.settle(source)
+        self.assertEqual((source.snapshot.active, source.snapshot.holds, fake.released), (BALANCED, (), [1, 2]))
+
+    def test_without_a_service_that_was_read_a_request_is_unavailable_and_nothing_is_sent(self):
+        source = self.source()
+        source.set_profile(PERFORMANCE)                                # not started: ignored
+        self.assertIsNone(source.snapshot.failure)
+        source.start()
+        self.assertTrue(pump(lambda: source.snapshot.state == ABSENT))
+        source.set_profile(PERFORMANCE)
+        self.assertEqual(source.snapshot.failure, Failure(UNAVAILABLE, PERFORMANCE))
+        fake = self.fake()
+        fake.garbage = GLib.Variant("(s)", ("garbage",))
+        self.assertTrue(pump(lambda: source.snapshot.state == ERROR))
+        source.set_profile(SAVER)
+        self.assertEqual(source.snapshot.failure, Failure(UNAVAILABLE, SAVER))
+        self.assertEqual(self.sets(fake, source), [])
+
+    def test_a_request_before_this_visits_own_reading_is_unavailable(self):
+        fake = self.fake(active=BALANCED)
+        source = self.ready()
+        source.stop()
+        fake.hold = lambda call: True
+        source.start()                                                 # the last reading is shown at once
+        source.set_profile(PERFORMANCE)
+        self.assertEqual((source.snapshot.state, source.snapshot.failure), (READY, Failure(UNAVAILABLE, PERFORMANCE)))
+        self.assertTrue(pump(lambda: fake.held))
+        source.set_profile(SAVER)                                      # the reading is still on its way
+        self.assertEqual(source.snapshot.failure, Failure(UNAVAILABLE, SAVER))
+        fake.hold = None
+        fake.answer_held()
+        self.assertTrue(pump(lambda: source.idle))
+        source.set_profile(PERFORMANCE)
+        self.settle(source)
+        self.assertEqual((source.snapshot.active, source.snapshot.failure, self.sets(fake, source)),
+                         (PERFORMANCE, None, [PERFORMANCE]))
+
+    def test_a_profile_the_machine_does_not_offer_is_unsupported_and_nothing_is_sent(self):
+        fake = self.fake(active=BALANCED, profiles=fake_ppd.PLACEHOLDER)
+        source = self.ready()
+        for profile, asked in ((BALANCED, BALANCED), (PERFORMANCE, PERFORMANCE), ("turbo", ""), (None, ""), ([], "")):
+            with self.subTest(profile=profile):
+                source.set_profile(profile)
+                self.assertEqual(source.snapshot.failure, Failure(UNSUPPORTED, asked))
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual(self.sets(fake, source), [])
+
+    def test_a_request_is_ignored_while_another_is_on_its_way(self):
+        fake = self.fake(active=BALANCED)
+        fake.hold = lambda call: call.member == "Set"
+        source = self.ready()
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: fake.held))
+        source.set_profile(SAVER)
+        source.set_profile(PERFORMANCE)
+        self.assertEqual(source.snapshot.pending, PERFORMANCE)
+        fake.answer_held()
+        self.settle(source)
+        self.assertEqual((source.snapshot.active, self.sets(fake, source)), (PERFORMANCE, [PERFORMANCE]))
+
+    def test_each_refusal_becomes_its_failure_without_the_services_words(self):
+        fake = self.fake(active=BALANCED)
+        source = self.ready()
+        for setup, code in ((lambda: setattr(fake, "deny", True), DENIED),
+                            (lambda: fake.failures.update(Set=("org.freedesktop.DBus.Error.InvalidArgs", "words")),
+                             FAILED),
+                            (lambda: fake.failures.update(Set=("org.freedesktop.DBus.Error.Failed", "words")), FAILED),
+                            (lambda: fake.failures.update(Set=("org.freedesktop.DBus.Error.ServiceUnknown", "words")),
+                             UNAVAILABLE)):
+            with self.subTest(code=code):
+                fake.deny = False
+                fake.failures.clear()
+                setup()
+                source.set_profile(PERFORMANCE)
+                self.settle(source)
+                snapshot = source.snapshot
+                self.assertEqual((snapshot.failure, snapshot.active, snapshot.note), (Failure(code, PERFORMANCE),
+                                                                                      BALANCED, ""))
+                self.assertNotIn("words", repr(snapshot))
+                source.dismiss()
+                self.assertIsNone(source.snapshot.failure)
+
+    def test_a_new_request_clears_the_failure_of_the_last_one(self):
+        fake = self.fake(active=BALANCED)
+        fake.deny = True
+        source = self.ready()
+        source.set_profile(PERFORMANCE)
+        self.settle(source)
+        fake.deny = False
+        source.set_profile(SAVER)
+        self.assertEqual((source.snapshot.failure, source.snapshot.pending), (None, SAVER))
+        self.settle(source)
+        self.assertEqual((source.snapshot.active, source.snapshot.failure), (SAVER, None))
+
+    def test_a_request_that_runs_out_of_time_is_a_timeout_that_goes_when_the_profile_arrives(self):
+        fake = self.fake(active=BALANCED)
+        fake.hold = lambda call: call.member == "Set"
+        source = self.ready()
+        with mock.patch.object(powerprofiles, "SET_TIMEOUT_MS", 100):
+            source.set_profile(PERFORMANCE)
+            self.assertTrue(pump(lambda: source.snapshot.failure is not None, 3))
+        self.assertEqual((source.snapshot.failure, source.snapshot.pending, source.idle),
+                         (Failure(TIMEOUT, PERFORMANCE), "", True))
+        fake.answer_held()                                             # the service was only slow
+        self.assertTrue(pump(lambda: source.snapshot.failure is None))
+        self.assertEqual((source.snapshot.active, source.snapshot.note), (PERFORMANCE, ""))
+
+    def test_a_timeout_after_the_profile_was_announced_is_no_failure(self):
+        fake = self.fake(active=BALANCED)
+        fake.late = lambda call: call.member == "Set"
+        source = self.ready()
+        with mock.patch.object(powerprofiles, "SET_TIMEOUT_MS", 100):
+            source.set_profile(PERFORMANCE)
+            self.assertTrue(pump(lambda: not source.snapshot.pending, 3))
+        self.assertEqual((source.snapshot.active, source.snapshot.failure), (PERFORMANCE, None))
+
+    def test_the_owner_leaving_during_a_request_ends_it_as_unavailable(self):
+        fake = self.fake(active=BALANCED)
+        fake.hold = lambda call: call.member == "Set"
+        source = self.ready()
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: fake.held))
+        fake.release()
+        self.assertTrue(pump(lambda: source.snapshot.state == ABSENT))
+        snapshot = source.snapshot
+        self.assertEqual((snapshot.failure, snapshot.pending, source.idle),
+                         (Failure(UNAVAILABLE, PERFORMANCE), "", True))
+
+    def test_the_reply_of_an_owner_that_restarted_mid_call_is_ignored(self):
+        first = self.fake(active=BALANCED)
+        first.hold = lambda call: call.member == "Set"
+        source = self.ready()
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: first.held))
+        first.release()
+        self.assertTrue(pump(lambda: source.snapshot.state == ABSENT))
+        second = self.fake(active=SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.state == READY))
+        first.answer_held()                                            # applies there, answers here: too late
+        self.assertFalse(pump(lambda: source.snapshot.active != SAVER or source.snapshot.note, 0.1))
+        self.assertEqual((source.snapshot.failure, self.sets(second, source)), (Failure(UNAVAILABLE, PERFORMANCE), []))
+
+    def test_no_public_method_raises_whatever_it_is_given(self):
+        self.fake()
+        source = self.ready()
+        for argument in (None, 3, [], {}, object(), "x" * 10_000):
+            source.set_profile(argument)
+        source.retry()
+        source.dismiss()
+        self.assertEqual(source.internal_error, None)
+
+
+class ChangedElsewhereTest(BusCase):
+    def chosen(self, profile, active=BALANCED):
+        fake = self.fake(active=active)
+        source = self.ready()
+        source.set_profile(profile)
+        self.assertTrue(pump(lambda: not source.snapshot.pending))
+        return fake, source
+
+    def test_another_programs_change_after_a_successful_request_is_noted_and_kept(self):
+        fake, source = self.chosen(PERFORMANCE)
+        self.assertEqual(source.snapshot.note, "")
+        fake.external(SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.note == CHANGED_ELSEWHERE))
+        self.assertEqual(source.snapshot.active, SAVER)
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual([call.arguments[2] for call in fake.writes()], [PERFORMANCE])     # nothing switched back
+
+    def test_choosing_the_active_profile_counts_as_a_request(self):
+        fake, source = self.chosen(BALANCED)
+        fake.external(PERFORMANCE)
+        self.assertTrue(pump(lambda: source.snapshot.note == CHANGED_ELSEWHERE))
+
+    def test_a_change_when_nothing_was_asked_or_after_dismiss_or_a_failure_is_not_noted(self):
+        fake = self.fake(active=BALANCED)
+        source = self.ready()
+        fake.external(SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.active == SAVER))
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: not source.snapshot.pending))
+        source.dismiss()
+        fake.external(BALANCED)
+        self.assertTrue(pump(lambda: source.snapshot.active == BALANCED))
+        fake.deny = True
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: source.snapshot.failure is not None))
+        fake.external(SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.active == SAVER))
+        self.assertEqual(source.snapshot.note, "")
+        self.assertNotIn(CHANGED_ELSEWHERE, [snapshot.note for snapshot in self.seen])
+
+    def test_a_change_while_the_request_is_on_its_way_and_ours_lands_last_is_not_noted(self):
+        fake = self.fake(active=BALANCED)
+        fake.hold = lambda call: call.member == "Set"
+        source = self.ready()
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: fake.held))
+        fake.external(SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.active == SAVER))
+        self.assertEqual((source.snapshot.pending, source.snapshot.note), (PERFORMANCE, ""))
+        fake.answer_held()
+        self.assertTrue(pump(lambda: not source.snapshot.pending))
+        self.assertEqual((source.snapshot.active, source.snapshot.note), (PERFORMANCE, ""))
+
+    def test_a_change_between_the_services_answer_and_its_arrival_is_noted(self):
+        fake = self.fake(active=BALANCED)
+        fake.late = lambda call: call.member == "Set"
+        source = self.ready()
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: fake.held))
+        fake.external(SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.active == SAVER))
+        fake.answer_held()
+        self.assertTrue(pump(lambda: not source.snapshot.pending))
+        self.assertEqual((source.snapshot.active, source.snapshot.note, source.snapshot.failure),
+                         (SAVER, CHANGED_ELSEWHERE, None))
+
+    def test_stop_forgets_the_request_and_the_next_visit_notes_nothing(self):
+        fake, source = self.chosen(PERFORMANCE)
+        source.stop()
+        source.start()
+        self.assertTrue(pump(lambda: source.idle and fake.count("GetAll") == 2))
+        fake.external(SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.active == SAVER))
+        self.assertEqual(source.snapshot.note, "")
 
 
 class WatchTest(unittest.TestCase):
@@ -676,6 +997,8 @@ class NeverStartedTest(unittest.TestCase):
         source.start()
         self.assertTrue(pump(lambda: source.snapshot.state == ABSENT))
         source.retry()
+        source.set_profile(PERFORMANCE)
+        self.assertEqual(source.snapshot.failure, Failure(UNAVAILABLE, PERFORMANCE))
         source.stop()
         source.start()
         self.assertTrue(pump(lambda: source.snapshot.state == ABSENT))
