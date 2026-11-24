@@ -333,6 +333,77 @@ sudo systemctl mask inputplumber.service        # undo with: systemctl unmask
 Other programs that had the controller open, such as Steam or AntiMicroX, may need a
 restart after either change.
 
+## Touch keyboard
+
+Install the optional Wayland keyboard from the AUR:
+
+```bash
+omarchy pkg aur add wvkbd
+```
+
+The package provides `wvkbd-mobintl` (with `wvkbd` accepted as a backend as well).
+Game Mode accepts only that trusted executable from `/usr/bin`, `/usr/local/bin`
+or `/bin` (after resolving symlinks). It verifies the running process's executable
+and ownership, binds it to the current Wayland/Hyprland session, checks wvkbd's age
+and every thread's signal mask, and then uses a pidfd to signal it. These checks
+are a best-effort safety net, not an acknowledgement: wvkbd has no confirmation
+API. If multiple valid instances exist, Game Mode refuses to choose one.
+
+It does not grab devices or inject input: wvkbd itself uses Wayland's
+virtual-keyboard protocol.
+
+```bash
+omarchy-game-mode keyboard toggle
+```
+
+`show`, `hide` and `status` are also available. With Hyprland, Game Mode queries the
+exact `wvkbd` layer-shell namespace, so toggle can choose show or hide directly and
+already-correct show/hide requests do nothing. Without Hyprland, visibility is
+`unknown` and toggle is best-effort. If nothing is running, `show` and `toggle`
+start the keyboard visible; `hide` is a successful no-op. `hyprctl` and
+the keyboard executable use the same trusted-path rule; an unavailable or untrusted
+`hyprctl` makes visibility unknown and uses a 720p sizing fallback. Direct CLI
+actions are serialized so rapid hotkey invocations do not race one another.
+
+The wvkbd signal mapping was verified against the installed wvkbd 0.21 manual and
+upstream source: `SIGUSR1` hides, `SIGUSR2` shows and `SIGRTMIN` toggles.
+Real-hardware touch behaviour is not verified by automated tests.
+
+An optional `keyboardArgs` list in
+`~/.config/omarchy-game-mode/settings.json` can append only these wvkbd 0.21
+arguments:
+
+- `-H` / `-L`: decimal height, 160-600.
+- `--fn`: `"<family> <size>"`, with an ASCII family and size 12-32.
+- `--no-popup`, `--no-highlight`, `--no-feedback`, `--non-exclusive`.
+
+Everything else is ignored with a reason in `keyboard status`; Game Mode always
+chooses the executable. In particular, `--hidden`, `--auto` and output/debug flags
+are not accepted. `keyboardCommand` from older experiments is preserved but never
+executed. With no `keyboardArgs`, Game Mode supplies only monitor-based `-H`/`-L`
+sizes.
+
+In a custom Omarchy Hyprland Lua bindings file, F13-F24 are unbound hardware-key
+candidates by default (unlike `SUPER + K`, which opens keybindings):
+
+```lua
+o.bind("F13", "Toggle touch keyboard", "omarchy-game-mode keyboard toggle")
+```
+
+Hardware-button routing is configured separately. Game Mode exposes
+`omarchy-game-mode keyboard toggle` for any launcher, compositor binding or input
+daemon to call; Game Mode itself does not claim or remap the ROG Ally
+Keyboard/Armoury buttons.
+
+### Known limits
+
+- Aliases or symlinks within trusted, root-owned system binary directories are
+  accepted; defending against a compromised system is outside this threat model.
+- Concurrent individual pin add/remove operations are not merged; only the
+  resident app edits pins, while the settings lock preserves unrelated keys.
+- Equivalent but textually different UWSM session environment values are refused;
+  Game Mode intentionally does not canonicalize them.
+
 ## Install
 
 From source (needs `python`, `python-gobject` and `gtk4`):

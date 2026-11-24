@@ -2,18 +2,29 @@
 
 from __future__ import annotations
 
+import copy
+import fcntl
 import json
+import logging
 import os
 import re
 import shutil
+import stat
+import tempfile
+import time
 import tomllib
 from pathlib import Path
 
 from . import APP_ID, LEGACY_APP_IDS
 
 SETTINGS_VERSION = 1
+SETTINGS_MAX_BYTES = 1024 * 1024
+SETTINGS_LOCK_RETRY_S = 0.05
+SETTINGS_LOCK_TIMEOUT_S = 1.5
 AUTOSTART_MARKER = "X-Omarchy-Game-Mode-Owned=true"
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+LOGGER = logging.getLogger(__name__)
+HOME = Path.home()
 
 
 def config_home(env=os.environ) -> Path:
@@ -26,16 +37,78 @@ def state_home(env=os.environ) -> Path:
 
 def atomic_write(path: Path, text: str):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temp = Path(temp_name)
     try:
-        with open(temp, "w", encoding="utf-8") as handle:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp, path)
     finally:
+        if descriptor >= 0:
+            os.close(descriptor)
         if temp.exists():
             temp.unlink()
+
+
+class SettingsFileTooLarge(ValueError):
+    pass
+
+
+class SettingsFileNotRegular(ValueError):
+    pass
+
+
+class SettingsLockTimeout(BlockingIOError):
+    pass
+
+
+def _lock_settings(descriptor: int):
+    deadline = time.monotonic() + SETTINGS_LOCK_TIMEOUT_S
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError as error:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SettingsLockTimeout("settings save lock timed out after 1.5 seconds") from error
+            time.sleep(min(SETTINGS_LOCK_RETRY_S, remaining))
+
+
+def _read_settings_document(path: Path) -> dict:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise SettingsFileNotRegular(f"{path} is not a regular file")
+        if metadata.st_size > SETTINGS_MAX_BYTES:
+            raise SettingsFileTooLarge(f"settings file exceeds {SETTINGS_MAX_BYTES} bytes")
+        raw = b""
+        while len(raw) <= SETTINGS_MAX_BYTES:
+            chunk = os.read(descriptor, min(65536, SETTINGS_MAX_BYTES + 1 - len(raw)))
+            if not chunk:
+                break
+            raw += chunk
+    finally:
+        os.close(descriptor)
+    if len(raw) > SETTINGS_MAX_BYTES:
+        raise SettingsFileTooLarge(f"settings file exceeds {SETTINGS_MAX_BYTES} bytes")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (RecursionError, UnicodeError, ValueError) as error:
+        raise ValueError(str(error)) from error
+    if not isinstance(data, dict):
+        raise ValueError("settings must be an object")
+    return data
 
 
 class Settings:
@@ -45,35 +118,182 @@ class Settings:
         self.path = path or config_home() / "omarchy-game-mode" / "settings.json"
         self.language = "system"
         self.library: list[str] | None = None
+        self.library_present = False
         self.mapper_managed = False
+        self._keyboard_args = None
+        self._keyboard_args_changed = False
+        self.keyboard_args_present = False
+        self.legacy_keyboard_command_present = False
         self.load_error: str | None = None
+        self.load_failed = False
+        self.save_error: str | None = None
+        self._reported_save_errors: set[str] = set()
+        self._original = {}
+        self._document_valid = False
         self.load()
 
+    @property
+    def keyboard_args(self):
+        return self._keyboard_args
+
+    @keyboard_args.setter
+    def keyboard_args(self, value):
+        self._keyboard_args = value
+        self._keyboard_args_changed = True
+
     def load(self):
+        self.load_error = None
+        self.load_failed = False
         try:
-            with open(self.path, encoding="utf-8") as handle:
-                data = json.load(handle)
+            data = _read_settings_document(self.path)
         except FileNotFoundError:
+            self._document_valid = False
+            self._record_original()
             return
-        except (OSError, ValueError) as error:
-            self.load_error = str(error)
+        except (OSError, RecursionError, UnicodeError, ValueError) as error:
+            self.load_error = self.sanitize_error(error)
+            self.load_failed = True
+            self._document_valid = False
+            self._record_original()
             return
-        if not isinstance(data, dict):
-            self.load_error = "settings must be an object"
+        disk_version = data.get("version")
+        if (
+            isinstance(disk_version, int)
+            and not isinstance(disk_version, bool)
+            and disk_version > SETTINGS_VERSION
+        ):
+            self.load_error = (
+                f"settings version {disk_version} is newer than supported version {SETTINGS_VERSION}"
+            )
+            self.load_failed = True
+            self._document_valid = False
+            self._record_original()
             return
+        self._document_valid = True
         language = data.get("language")
-        if isinstance(language, str) and (language == "system" or re.match(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$", language)):
+        valid_language = language == "system" or (
+            isinstance(language, str) and re.match(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$", language)
+        )
+        if valid_language:
             self.language = language
         self.mapper_managed = data.get("manageAntimicrox") is True
+        self.keyboard_args_present = "keyboardArgs" in data
+        self._keyboard_args = data.get("keyboardArgs")
+        self.legacy_keyboard_command_present = "keyboardCommand" in data
         library = data.get("library")
+        self.library_present = "library" in data
         if isinstance(library, list):
-            self.library = [i for i in dict.fromkeys(library) if isinstance(i, str) and re.match(r"^[a-z0-9-]{1,48}$", i)]
+            strings = (i for i in library if isinstance(i, str) and re.match(r"^[a-z0-9-]{1,48}$", i))
+            self.library = list(dict.fromkeys(strings))
+        self._record_original()
+
+    def _record_original(self):
+        self._original = {
+            "language": self.language,
+            "manageAntimicrox": self.mapper_managed,
+            "library": copy.deepcopy(self.library),
+            "library_present": self.library_present,
+            "keyboard_args_present": self.keyboard_args_present,
+        }
+
+    def _refuse_save(self, reason: str, message: str) -> bool:
+        self.save_error = self.sanitize_error(message)
+        if reason not in self._reported_save_errors:
+            LOGGER.warning("%s; refusing to save settings", self.save_error)
+            self._reported_save_errors.add(reason)
+        return False
+
+    @staticmethod
+    def sanitize_error(message) -> str:
+        text = " ".join(str(message or "unknown error").splitlines())
+        home = str(HOME)
+        if home:
+            text = text.replace(home, "~")
+        return text[:300]
 
     def save(self):
-        data = {"version": SETTINGS_VERSION, "language": self.language, "manageAntimicrox": self.mapper_managed}
-        if self.library is not None:
-            data["library"] = self.library
-        atomic_write(self.path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        self.save_error = None
+        if self.load_failed:
+            return self._refuse_save(
+                "load-failed",
+                f"settings could not be loaded: {self.sanitize_error(self.load_error)}",
+            )
+        target = Path(os.path.realpath(self.path))
+        lock_path = target.with_name(f".{target.name}.lock")
+        descriptor = -1
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(
+                lock_path,
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+            os.fchmod(descriptor, 0o600)
+            _lock_settings(descriptor)
+            document_valid = False
+            try:
+                data = _read_settings_document(target)
+                document_valid = True
+            except FileNotFoundError:
+                data = {}
+            except (OSError, RecursionError, UnicodeError, ValueError) as error:
+                return self._refuse_save(
+                    f"read:{type(error).__name__}",
+                    f"settings could not be read safely: {error}",
+                )
+            disk_version = data.get("version")
+            if (
+                isinstance(disk_version, int)
+                and not isinstance(disk_version, bool)
+                and disk_version > SETTINGS_VERSION
+            ):
+                message = f"settings version {disk_version} is newer than supported version {SETTINGS_VERSION}"
+                return self._refuse_save("future-version", message)
+            data["version"] = SETTINGS_VERSION
+            if not document_valid or self.language != self._original["language"]:
+                data["language"] = self.language
+            if not document_valid or self.mapper_managed != self._original["manageAntimicrox"]:
+                data["manageAntimicrox"] = self.mapper_managed
+            library_changed = (
+                self.library != self._original["library"]
+                or self.library_present != self._original["library_present"]
+            )
+            if not document_valid or library_changed:
+                if self.library is not None:
+                    data["library"] = self.library
+                else:
+                    data.pop("library", None)
+            args_changed = (
+                self._keyboard_args_changed
+                or self.keyboard_args_present != self._original["keyboard_args_present"]
+            )
+            if args_changed:
+                if self.keyboard_args_present or self.keyboard_args is not None:
+                    data["keyboardArgs"] = self.keyboard_args
+                else:
+                    data.pop("keyboardArgs", None)
+            text = json.dumps(data, indent=2, ensure_ascii=True) + "\n"
+            if len(text.encode("utf-8")) > SETTINGS_MAX_BYTES:
+                return self._refuse_save(
+                    "serialized-too-large",
+                    f"serialized settings exceeds {SETTINGS_MAX_BYTES} bytes",
+                )
+            atomic_write(target, text)
+        except SettingsLockTimeout as error:
+            return self._refuse_save("lock-timeout", str(error))
+        except (OSError, RecursionError, TypeError, UnicodeError, ValueError) as error:
+            return self._refuse_save(f"write:{type(error).__name__}", str(error))
+        finally:
+            if descriptor >= 0:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                os.close(descriptor)
+        self._document_valid = True
+        self._keyboard_args_changed = False
+        self._record_original()
+        return True
 
     def pinned(self, catalog) -> list[str]:
         known = set(catalog.ids)
@@ -82,6 +302,7 @@ class Settings:
         return [i for i in self.library if i in known]
 
     def set_pinned(self, catalog, app_id: str, pinned: bool):
+        previous = self.library
         current = self.pinned(catalog)
         if pinned and app_id not in current:
             current.append(app_id)
@@ -90,7 +311,10 @@ class Settings:
         # Keep pins of ids unknown to this catalog version untouched.
         unknown = [i for i in (self.library or []) if i not in set(catalog.ids)]
         self.library = current + unknown
-        self.save()
+        if not self.save():
+            self.library = previous
+            return False
+        return True
 
 
 # ---- autostart -------------------------------------------------------------
