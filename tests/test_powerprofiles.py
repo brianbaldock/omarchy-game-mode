@@ -53,12 +53,18 @@ def stand_in(directory: Path, mode="ok", gate=False) -> Path:
              "readlink /proc/$$/fd/0 /proc/$$/fd/1 /proc/$$/fd/2 > fds", "command -v python3 > python3"]
     if gate:
         os.mkfifo(directory / "gate")
-        lines += [": > waiting", f'read line < "{directory}/gate"']
+        lines += [": > waiting", f'read line < "{directory}/gate"', ": > done"]
     lines += {"ok": ["exit 0"], "fail": ["exit 1"], "hang": ["sleep 30 &", "echo $! > child", "sleep 30"]}[mode]
     script = directory / "omarchy-powerprofiles-set"
     script.write_text("\n".join(lines) + "\n", encoding="utf-8")
     script.chmod(0o755)
     return script
+
+
+def stat_fields(text: str) -> list[str]:
+    """The fields of a /proc/PID/stat line after the command's name, which may hold spaces and parentheses: the
+    state is [0], the process group [2] and the start time [19]."""
+    return text.rsplit(")", 1)[1].split()
 
 
 def gone(pid: int) -> bool:
@@ -410,12 +416,14 @@ class ReadingTest(BusCase):
                       {"profiles": fake_ppd.RC73YA * 3}):
             with self.subTest(spoil=list(spoil)):
                 fake = self.fake(profiles=spoil.get("profiles", fake_ppd.RC73YA))
-                fake.extra.update(spoil.get("extra", {}))
                 source = self.source()
-                source.start()
-                self.assertTrue(pump(lambda: source.snapshot.state == ERROR))
-                source.stop()
-                fake.release()
+                try:
+                    fake.extra.update(spoil.get("extra", {}))
+                    source.start()
+                    self.assertTrue(pump(lambda: source.snapshot.state == ERROR))
+                finally:
+                    source.stop()
+                    fake.release()                                     # the next one needs the name
 
     def test_a_reading_that_runs_out_of_time_is_an_error(self):
         fake = self.fake()
@@ -975,10 +983,19 @@ class RememberTest(BusCase):
         self.addCleanup(self.end_stand_ins)
 
     def end_stand_ins(self):
-        """A failed test must not leave a stand-in behind: end every group one recorded, and let GLib reap it."""
+        """A failed test must not leave a stand-in behind. A group is ended as a whole only when the stand-in leads
+        it and it is not the test's own (a regression could have left the stand-in in the runner's group); else only
+        the stand-in itself, if that number is still the same process. Then GLib reaps it."""
         for stat in self.home.glob("*/record/stat"):
             with contextlib.suppress(OSError, ValueError, IndexError):
-                os.killpg(int(stat.read_text().rsplit(")", 1)[1].split()[2]), signal.SIGKILL)
+                text = stat.read_text()
+                pid, group = int(text.split()[0]), int(stat_fields(text)[2])
+                if group == pid and group != os.getpgrp():
+                    os.killpg(group, signal.SIGKILL)
+                else:
+                    with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+                        if stat_fields(handle.read())[19] == stat_fields(text)[19]:
+                            os.kill(pid, signal.SIGKILL)
         pump(lambda: not any(source.helping for source in self.sources), 3)
 
     def with_helper(self, script) -> PowerProfiles:
@@ -990,7 +1007,7 @@ class RememberTest(BusCase):
         return {"argv": (record / "argv").read_text().splitlines(),
                 "environ": dict(entry.split("=", 1) for entry in (record / "environ").read_text().split("\0") if entry),
                 "stdin": (record / "stdin").read_text(), "fds": (record / "fds").read_text().splitlines(),
-                "pid": int(stat.split()[0]), "group": int(stat.rsplit(")", 1)[1].split()[2]),
+                "pid": int(stat.split()[0]), "group": int(stat_fields(stat)[2]),
                 "python3": (record / "python3").read_text().strip()}
 
     def child_of(self, script) -> int:
@@ -1102,6 +1119,7 @@ class RememberTest(BusCase):
                          ([powerprofiles.HELPER_LIMIT_MS], True, None))
         self.open_gate(script)
         self.assertTrue(pump(lambda: not source.helping))
+        self.assertTrue((script.parent / "record" / "done").exists(), "the command did not run on after stop()")
         self.assertEqual((len(self.seen), source.snapshot.note, self.timers.pending, self.timers.cancelled),
                          (told, "", {}, [limit]))
 

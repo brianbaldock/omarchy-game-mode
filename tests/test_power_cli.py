@@ -117,10 +117,12 @@ class PowerCommandTest(unittest.TestCase):
         for spoil, reason in cases:
             with self.subTest(reason=reason):
                 fake = self.fake(active=BALANCED)
-                spoil(fake)
-                self.assertEqual(self.run_command("set", PERFORMANCE), (1, "", reason + "\n"))
-                self.assertEqual(fake.active, BALANCED)
-                fake.release()
+                try:
+                    spoil(fake)
+                    self.assertEqual(self.run_command("set", PERFORMANCE), (1, "", reason + "\n"))
+                    self.assertEqual(fake.active, BALANCED)
+                finally:
+                    fake.release()                                     # the next one needs the name
 
     def test_a_change_that_runs_out_of_time_is_a_timeout(self):
         fake = self.fake(active=BALANCED)
