@@ -14,6 +14,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 
 from gi.repository import Gio, GLib
 
@@ -599,3 +600,84 @@ class PowerProfiles:
             self._announce()
         except Exception:  # noqa: BLE001
             pass
+
+
+# ---- the ``power`` command ---------------------------------------------------------------------------------------
+
+FIRST_READING_S = CALL_TIMEOUT_MS / 1000 + 1                        # the bus says who owns the name, then one read
+OUTCOME_S = (SET_TIMEOUT_MS + HELPER_LIMIT_MS) / 1000 + 1           # the reply, then Omarchy's command
+STATE_REASONS = {ABSENT: "unavailable: power-profiles-daemon is not running",
+                 ERROR: "failed: power-profiles-daemon could not be read",
+                 UNKNOWN: "timeout: power-profiles-daemon did not answer in time"}
+FAILURE_REASONS = {DENIED: "denied: this session may not change the power profile",
+                   UNSUPPORTED: "unsupported: this machine does not offer {profile}",
+                   UNAVAILABLE: "unavailable: power-profiles-daemon cannot be reached",
+                   TIMEOUT: "timeout: power-profiles-daemon did not answer in time",
+                   FAILED: "failed: power-profiles-daemon did not change the profile"}
+NOTE_TEXTS = {CHANGED_ELSEWHERE: "changed elsewhere: another program has changed the profile since",
+              NOT_REMEMBERED: "not remembered: Omarchy could not keep {profile} for this power source"}
+
+
+def _wait(predicate, seconds: float) -> bool:
+    """Run the main loop until ``predicate`` holds, for ``seconds`` at most. Whether it held."""
+    context = GLib.MainContext.default()
+    expired = []
+    timer = GLib.timeout_add(max(1, round(seconds * 1000)), lambda: expired.append(True) or GLib.SOURCE_REMOVE)
+    try:
+        while not predicate() and not expired:
+            context.iteration(True)
+    finally:
+        if not expired:
+            GLib.source_remove(timer)
+    return predicate()
+
+
+def _status(snapshot: Snapshot) -> str:
+    lines = [snapshot.active or "unknown", "offered: " + (", ".join(snapshot.available) or "none")]
+    if snapshot.degraded:
+        lines.append("performance held back: " + ", ".join(snapshot.degraded))
+    lines += [f"held: {hold.profile}" + (f" by {hold.name}" if hold.name else "") for hold in snapshot.holds]
+    return "\n".join(lines)
+
+
+def main(args: list[str], usage: str = "", stdout=None, stderr=None, make_source=None) -> int:
+    """``power [status]``, ``power set PROFILE`` and ``power cycle``: print or change the profile, then exit.
+
+    It needs neither the window nor a running Gaming Home: it starts a source of its own, waits a bounded time for
+    the first reading, acts, waits a bounded time for the outcome and for Omarchy's command, stops and exits. 0 is
+    success, 1 a change or a reading that failed (with one line on stderr saying why) and 2 bad usage."""
+    stdout, stderr = stdout or sys.stdout, stderr or sys.stderr
+    action = args[0] if args else "status"
+    if not (action in ("status", "cycle") and len(args) <= 1 or action == "set" and len(args) == 2
+            and args[1] in PROFILES):
+        print(usage, file=stderr)
+        return 2
+    source = (make_source or PowerProfiles)(lambda: None)
+    source.start()
+    try:
+        _wait(lambda: source.snapshot.state != UNKNOWN, FIRST_READING_S)
+        snapshot = source.snapshot
+        if snapshot.state != READY:
+            print(STATE_REASONS[snapshot.state], file=stderr)
+            return 1
+        if action == "status":
+            print(_status(snapshot), file=stdout)
+            return 0
+        profile = args[1] if action == "set" else power.next_profile(snapshot.active, snapshot.available)
+        if not profile:
+            print("unknown profile: the active one is not one this machine offers, so there is no next one",
+                  file=stderr)
+            return 1
+        source.set_profile(profile)
+        _wait(lambda: not source.snapshot.pending and source.idle, OUTCOME_S)
+        snapshot = source.snapshot
+        if snapshot.failure is not None or snapshot.pending:
+            code = snapshot.failure.code if snapshot.failure is not None else TIMEOUT
+            print(FAILURE_REASONS[code].format(profile=profile), file=stderr)
+            return 1
+        print(snapshot.active or "unknown", file=stdout)
+        if snapshot.note:
+            print(NOTE_TEXTS[snapshot.note].format(profile=profile), file=stderr)
+        return 0
+    finally:
+        source.stop()
