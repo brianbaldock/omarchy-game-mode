@@ -358,6 +358,30 @@ class BlocksTest(unittest.TestCase):
         self.assertEqual([(item.key, control_names([item])) for item in blocks if isinstance(item, Notice)],
                          [("failure", [DISMISS]), ("note", [])])
 
+    def test_a_failure_leaves_the_sheet_once_the_profile_it_asked_for_is_active_after_all(self):
+        # The client takes an answer that comes within about ten seconds and drops the time-out itself. Later, or
+        # when another program made the switch, the failure stays, and next to the check mark it would say the
+        # opposite of what the sheet shows.
+        for case, code, then in (("answered in time", TIMEOUT, lambda source: source.finish()),
+                                 ("answered too late", TIMEOUT, lambda source: (source.expire(), source.finish())),
+                                 ("switched by another program", DENIED,
+                                  lambda source: source.change(active=PERFORMANCE))):
+            with self.subTest(case):
+                source = started(active=BALANCED)
+                visit = opened(source)
+                visit.press(option_name(PERFORMANCE))
+                source.fail(code)
+                self.assertIn("failure", keys(self.blocks(source, visit=visit)))
+                then(source)
+                blocks = self.blocks(source, visit=visit)
+                self.assertEqual(([o.profile for o in options(blocks) if o.current], control_names(blocks)[-2:]),
+                                 ([PERFORMANCE], [option_name(PERFORMANCE), CLOSE]))
+                self.assertNotIn("failure", keys(blocks))
+        snapshot = Snapshot(READY, PERFORMANCE, PROFILES, failure=Failure(TIMEOUT, PERFORMANCE), note=CHANGED_ELSEWHERE)
+        blocks = PowerSheet(SimpleNamespace(snapshot=snapshot)).blocks(ENGLISH, ON_BATTERY)
+        self.assertEqual([(item.key, control_names([item])) for item in blocks if isinstance(item, Notice)],
+                         [("note", [DISMISS])])
+
     def test_performance_held_back_is_one_sentence_for_every_reason_and_nothing_for_none(self):
         cases = {(HEAT,): "Performance is limited right now: the device is too hot.",
                  (LAP,): "Performance is limited right now: it is on a lap.",

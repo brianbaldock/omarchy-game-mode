@@ -59,6 +59,15 @@ def failure_text(failure: power.Failure, t) -> str:
     return t("power.failure", action=t("power.failed", profile=profile_title(failure.profile, t)), reason=reason)
 
 
+def shown_failure(snapshot: power.Snapshot) -> power.Failure | None:
+    """The failure the sheet shows. None once the profile it asked for is the active one after all: an answer that
+    came too late to count, or another program, made it so, and "Couldn't switch" would contradict the check mark."""
+    failure = snapshot.failure
+    if failure is not None and failure.profile in PROFILES and failure.profile == snapshot.active:
+        return None
+    return failure
+
+
 def degraded_text(reasons, t) -> str:
     """One sentence for every reason the service holds performance back; "" for none, which promises nothing."""
     parts = [t(f"power.degraded.{reason}") for reason in DEGRADED_REASONS if reason in reasons]
@@ -318,8 +327,9 @@ class PowerSheet:
     def _notices(snapshot: power.Snapshot, t) -> list[Block]:
         notices: list[Block] = []
         dismiss = (Control(DISMISS, t("power.dismiss")),)
-        if snapshot.failure is not None:
-            notices.append(Notice("failure", dismiss, text=failure_text(snapshot.failure, t), tone="warn"))
+        failure = shown_failure(snapshot)
+        if failure is not None:
+            notices.append(Notice("failure", dismiss, text=failure_text(failure, t), tone="warn"))
         if snapshot.note in NOTES:
             notices.append(Notice("note", () if notices else dismiss, text=t(f"power.note.{snapshot.note}")))
         if not snapshot.usable:
