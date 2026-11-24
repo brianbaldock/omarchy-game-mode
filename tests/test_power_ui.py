@@ -691,8 +691,22 @@ class TranslationTest(unittest.TestCase):
                     self.assertIsNone(jargon.search(text), f"{language}: {key}: {text}")
 
     def test_the_sheet_never_says_that_a_choice_was_remembered(self):
-        for key in ("power.sources", "power.note.changed-elsewhere"):
-            self.assertIsNone(re.search(r"remember|kept|saved", self.strings("en")[key], re.I), key)
+        # Gaming Home cannot always tell whether Omarchy kept a choice. Neither the words nor the sheet after a switch,
+        # whatever came of it, may say that it did; that Omarchy keeps a profile per power source, or could not be
+        # told to keep this one, is no such claim.
+        claim = re.compile(r"remember|\bsaved?\b|\bkept\b|will keep|keeps (it|your|this|the choice)\b", re.I)
+        texts = [text for key, text in self.strings("en").items() if key.startswith("power.")]
+        for then in (lambda source: None, FakePower.not_remembered, lambda source: source.change(active=SAVER)):
+            source = started(active=BALANCED)
+            visit = opened(source)
+            visit.press(option_name(PERFORMANCE))
+            source.finish()
+            then(source)
+            for battery in (ON_BATTERY, Battery(64, CHARGING), Battery(100, FULL)):
+                texts += [getattr(item, name, "") for item in visit.blocks(ENGLISH, battery)
+                          for name in ("text", "title", "body", "status")]
+        for text in texts:
+            self.assertIsNone(claim.search(text), text)
 
     def test_names_from_other_programs_and_the_kernel_stay_left_to_right_inside_arabic(self):
         strings = self.strings("ar")
