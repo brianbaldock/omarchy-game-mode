@@ -137,6 +137,14 @@ class DocsTest(unittest.TestCase):
         self.assertNotIn("the way the system's locale does", section)
         self.assertIn("reading the bar's `shell.json`", CONTRIBUTING)
 
+    def test_the_bluetooth_text_says_what_the_switch_does_and_that_no_real_device_was_tried(self):
+        section = README[README.index("## Bluetooth"):README.index("## Controls")]
+        for fact in ("for the whole computer", "stays after a restart", "reconnect by itself",
+                     "Only while Gaming Home is shown", "PINs with letters", "announce no name",
+                     "starts on the other device", "**Not yet tested on real devices:**", "an address is never shown"):
+            self.assertIn(fact, section)
+        self.assertIsNone(re.search(r"bluez|rfkill|d-?bus", section, re.I))
+
     @needs_site
     def test_website_says_the_clock_ticks_only_while_home_is_shown(self):
         self.assertNotIn("Nothing polls in the background", SITE)
