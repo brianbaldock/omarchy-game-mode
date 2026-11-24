@@ -250,10 +250,6 @@ tap.
   for nothing. The sheet holds no timer of its own and nothing in it moves while nothing
   changes: "Switching…" is a static line.
 
-<!-- measured: filled in by the maintainer -->
-**On the ROG Xbox Ally:** what each profile does on the device is to be filled in here by the
-maintainer from measurements.
-
 How far this has been checked:
 
 - **Automated tests:** what the button and the sheet show for each profile, a switch on its
@@ -265,10 +261,35 @@ How far this has been checked:
   asked for until the answer, and that a failure does not greet the next visit. The sheet was
   rendered headless with GTK Broadway in English, German, Japanese and Arabic, at 1280x720,
   1920x1080 and 1280x600, by a script that fails when the sheet does the wrong thing.
-- **Not yet tested on real devices:** none of this has run on a handheld yet: how the D-pad
-  and touch feel, whether the system allows a switch from Gaming Home as it is started at
-  login, other programs switching the profile while the sheet is open, and how the glyphs
-  look at the device's scale.
+- **Not yet tested on real devices:** the button and the sheet have not run on a handheld
+  yet: how the D-pad and touch feel, whether the system allows a switch from Gaming Home as
+  it is started at login, other programs switching the profile while the sheet is open, and
+  how the glyphs look at the device's scale.
+
+### What the profiles do on a ROG Xbox Ally
+
+Measured on one ROG Xbox Ally (RC73YA), on AC power, with a synthetic game-like load: three
+busy CPU threads plus a 4K GPU job for six minutes per profile, each started from the same
+temperature. The figures are the steady state after the first minute; the chip bursts a
+little higher for a short time at the start (about 22.6 W in Performance and 16.8 W in
+Balanced).
+
+| Profile | Chip power | CPU clock | GPU work | CPU work | Temperature |
+| --- | --- | --- | --- | --- | --- |
+| Power saver | 6 W | 1.5 GHz | 34 % | 44 % | 46-48 °C |
+| Balanced | 15 W | 2.9 GHz | 88 % | 87 % | about 72 °C |
+| Performance | 20 W | 3.4 GHz | 100 % | 100 % | 83-85 °C |
+
+The work columns are relative to Performance. Performance over Balanced is therefore a
+modest gain: about 13 % in this mixed load (about 6 % in a GPU-only test and 14 % in a
+CPU-only one), for about 5 W more power and about 12 °C more heat. Power saver gives up most
+of the speed for 30 % of the power.
+
+What this does not show: battery power, real games, long sessions in a warm room, other
+models (the Xbox Ally X has a different chip), or noise (the fan hardly differed between
+Power saver and Balanced). The wattage cannot be set on this model, because the kernel has
+no power limits for the RC73YA; Gaming Home offers the three profiles the firmware provides
+and nothing more.
 
 ## Controls
 
