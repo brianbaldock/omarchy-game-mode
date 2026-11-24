@@ -4309,5 +4309,23 @@ class VibrationTest(World):
              "rumble": False, "haptics_report": "", "xbox_layout": False, "interface": ""}])
 
 
+class ReadmeTest(unittest.TestCase):
+    """The README describes these results with the words and names the code uses."""
+
+    def test_vibration_and_buttons_on_a_node_only_root_can_read_are_documented(self):
+        readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+        checked = readme[readme.index("What it checks:"):readme.index("What it never does:")]
+        title = next(check.title for check in checks.INPUT if check.id == "input.vibration")
+        for phrase in (f"**{title}:** whether the kernel offers games rumble (`FF_RUMBLE`)", "haptics output report",
+                       "and not that any program can make the controller vibrate"):
+            self.assertIn(phrase, checked)
+        button_test = readme[readme.index("### Hardware button test"):readme.index("## Xbox Remote Play")]
+        small_buttons = [control.name for control in buttons.CONTROLS if control.key in ("armoury", "library")]
+        where = buttons.ALLY_KEY_NODES.partition(" these buttons ")[2]
+        for phrase in (*small_buttons, f"the back paddles {where}", "marks them not tested",
+                       "`sudo evtest /dev/input/event5`"):
+            self.assertIn(phrase, button_test)
+
+
 if __name__ == "__main__":
     unittest.main()

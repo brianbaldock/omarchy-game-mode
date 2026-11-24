@@ -192,6 +192,12 @@ What it checks:
   the ROG Xbox Ally's built-in pad lists generically numbered buttons and no standard
   right-stick click), InputPlumber, Handheld Daemon and AntiMicroX, and controller
   interfaces that another daemon has hidden.
+- **Vibration:** whether the kernel offers games rumble (`FF_RUMBLE`) on each controller
+  and, for a physical controller, whether its HID report descriptor declares a haptics
+  output report. On Linux 7.2 the ROG Xbox Ally's built-in pad declares one (report 0x0D,
+  laid out like the Xbox One controller's) but the kernel offers no force feedback for
+  it, so games cannot make it vibrate through evdev. The doctor verifies these two facts,
+  both read from sysfs, and not that any program can make the controller vibrate.
 
 What it never does:
 
@@ -292,6 +298,12 @@ so leave nothing open that a stray press could affect. It tests the controller t
 games see: the virtual controller of a handheld daemon such as InputPlumber when one is
 running, otherwise the built-in one. Devices it is not allowed to read are listed with
 the reason.
+
+On the ROG Xbox Ally the small buttons (Armoury Crate, top left; Library, top right) and
+the back paddles arrive as keyboard keys on a node only root can read, so without a
+handheld daemon the test may see nothing for them. It then marks them not tested instead
+of failed and prints the command that shows them, `sudo evtest` with each such node it
+found (for example `sudo evtest /dev/input/event5`); it never runs it.
 
 Nothing about your controller is assumed. At the end the test lists where it differs
 from an Xbox-style pad on Linux, for example an Xbox button that sends the View code (so
