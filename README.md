@@ -43,10 +43,14 @@ This is an independent preview, not an official Omarchy component.
 - **Clock and battery**: the header shows the time and, on a machine with a battery, its
   charge, so you can see both while the desktop bar is covered by Gaming Home. See
   [Clock and battery](#clock-and-battery).
+- **Bluetooth**: a header button shows whether Bluetooth is off, on or connected, and its
+  sheet turns Bluetooth on or off, connects the devices this computer remembers and adds
+  new ones, with the controller, a mouse or touch. See [Bluetooth](#bluetooth).
 - **Theme**: uses your current Omarchy theme colors when they can be read, with a dark
   fallback. There are no background images. Nothing redraws by itself while Gaming Home is
-  hidden. While it is shown and at rest, only the clock (once a minute) and the battery
-  (when its level or state changes) change by themselves. The launcher itself makes no
+  hidden. While it is shown and at rest, only the clock (once a minute), the battery
+  (when its level or state changes) and Bluetooth (when a device or Bluetooth itself
+  changes) change by themselves. The launcher itself makes no
   network requests. Only the `doctor` command, when you run it, sends the diagnostic
   probes listed under [Doctor](#doctor).
 
@@ -136,6 +140,85 @@ How far this has been checked:
   no UPower (its absence was only simulated), and how Hyprland treats a Gaming Home that
   stays mapped behind another window.
 
+## Bluetooth
+
+The header has a Bluetooth button between the clock and Settings, so that a controller,
+headphones or a keyboard can be connected without leaving Gaming Home. The button is there
+only when the computer has a Bluetooth adapter, or when Bluetooth is there but could not be
+read. Like the rest of Home, it is selected with the D-pad, a click or a tap. In a window
+narrower than 1400 pixels, such as a handheld's 1280x720 screen, the header shows the
+logo without the app's name, so that the clock, the battery and the buttons keep their
+room.
+
+- **Button.** Its icon shows Bluetooth off (struck through and dimmed), on, or connected to
+  at least one device (with two dots, in the accent color). The warning color means that
+  Bluetooth could not be read. With a mouse or touchpad, its tooltip says which and names
+  the connected devices; the D-pad and touch do not show tooltips.
+- **Sheet.** A, Enter, a click or a tap on the button opens it. From the top: a line when
+  something failed, with Dismiss; the Bluetooth switch; **My devices**, the devices this
+  computer remembers, each with Connect or Disconnect and Forget; **Add a device**, with
+  Search. When something fails, or the sheet opens on a failure, the focus goes to Dismiss,
+  so that the line is in view; Dismiss takes it back to the device the failure was about
+  when that device is in My devices.
+  A device keeps its place in the list when it connects. A device without a name
+  is listed as "Unnamed device" and devices with the same name are numbered: an address is
+  never shown. While Bluetooth is busy with something, such as connecting a device, the
+  buttons that would have to wait for it, Search among them, are dimmed and do nothing;
+  the focus stays where it is.
+- **Switch.** It turns Bluetooth on or off for the whole computer, not only for Gaming
+  Home. Omarchy's own Bluetooth command does the switching, and with it the choice stays
+  after a restart; on a system without that command it may last only until the next one.
+- **Search and Pair.** Put the device in pairing mode, then press Search: the devices found
+  nearby are listed with Pair, and the search ends by itself after 45 seconds or with Stop
+  searching. Pair adds the device: it pairs with it, lets it reconnect by itself from then
+  on and connects to it. When the device asks for something, the sheet shows it in place
+  of the lists: a six-digit number to compare (Yes, it matches, or No), a code to type on
+  the device, or a PIN or passkey to enter on a digit pad. A device that was added can
+  reconnect by itself when it is on and in range; Forget, which asks first, removes it and
+  stops that.
+- **Controller, keyboard, mouse and touch.** The D-pad moves between the controls and A
+  presses one. B and Escape take back the Forget question, or give up a pairing that asks
+  something or says "Pairing with …" (Cancel then reads "Canceling…" until Bluetooth lets
+  go, which can take up to ten seconds), and otherwise close the sheet; Menu closes it at
+  once. Closing the sheet, whichever way, ends the search and gives up such a pairing too.
+  A device can have paired already by the time its pairing is given up. It then stays in My
+  devices, without the trust that lets it reconnect by itself unless the pairing had just
+  got that far, and once Bluetooth reports it, the sheet says so, at once or the next time
+  it opens. Nothing is reported once Gaming Home has been hidden in between, since it then
+  stops looking at Bluetooth: such a device is simply in My devices. A pairing that has got
+  as far as "Connecting to …" goes on, as Connect does. On the digit pad the D-pad moves
+  between the keys; a keyboard's digits and Backspace type and erase, and Enter answers
+  while the focus is on the pad (on Cancel or Close, Enter presses that button). The pad
+  and the numbers read left to right in every language.
+- **When it runs.** Only while Gaming Home is shown. Hiding Gaming Home closes the sheet and
+  puts the focus back on the Bluetooth button, ends the search, gives up a pairing that asks
+  something or is still at "Pairing with …" and stops looking at Bluetooth until Gaming
+  Home is shown again. The sheet holds no timer of its own and nothing in it moves while
+  nothing changes: "Searching…" is a static line.
+- **Not supported yet:** PINs with letters (the pad has digits only), devices that announce
+  no name (they are left out of the nearby list), and pairing that starts on the other
+  device: Gaming Home answers only the device it is adding.
+
+How far this has been checked:
+
+- **Automated tests:** what the button and the sheet show for Bluetooth off, on, connected,
+  unreadable and gone; the digit pad (length, leading zeros, Erase, Done); the words of
+  every failure in the seven languages; where the focus goes after a change; and, against a
+  scripted Bluetooth stand-in, that B, Escape, Close, Menu, another sheet, rebuilding the
+  window and hiding it each end the search and give up a pairing that asks something, that
+  leaving the sheet gives up one still at "Pairing with …" too and lets one at
+  "Connecting to …" go on, that a device reported to have paired before its pairing was
+  given up is told about, also at the next visit, and that a click arriving after the
+  sheet has closed does nothing. The stand-in copies a few habits of the part of Gaming
+  Home that talks to Bluetooth: it can report a change a moment later, take its time over
+  a cancel and report one that came after the device had paired, and it forgets
+  everything when stopped. Its timing and its errors are scripted. The sheet was rendered
+  headless with GTK Broadway in English, German, Japanese and Arabic, at 1280x720,
+  1920x1080 and 1280x600, by a script that fails when the sheet does the wrong thing.
+- **Not yet tested on real devices:** none of this has run against real Bluetooth hardware
+  yet: connecting, pairing with each kind of question, the switch, a device that goes away,
+  and how the D-pad and touch feel on a handheld.
+
 ## Controls
 
 | Input | Action |
@@ -144,7 +227,8 @@ How far this has been checked:
 | B | Back, or go to the Desktop from Home |
 | D-pad / left stick | Move selection (repeats only while held) |
 | LB / RB | Switch Home / Discover |
-| Menu (Start) | Settings |
+| Menu (Start) | Settings, or close Settings or the Bluetooth sheet |
+| B in the Bluetooth sheet | Take back the Forget question or give up a pairing that has not reached "Connecting to …", then close the sheet |
 | **Hold View + Menu for 0.8 s** | Show Game Mode from anywhere |
 
 Keyboard (arrows, Enter, Escape), mouse and touch work everywhere.
@@ -556,7 +640,9 @@ the autostart file Game Mode created.
 
 `omarchy-game-mode status` reports what Game Mode sees, including the controllers it
 reads and, under `inputplumber`, what a running InputPlumber manages. Review it before
-posting: window titles can contain private information.
+posting: window titles can contain private information. Its `selected` field names the
+control that has the focus; on the Bluetooth digit pad it says only `bt:pad`, not which
+key, so a PIN being typed is not given away.
 
 `omarchy-game-mode doctor` is described in the next section. It always answers in the
 terminal you ran it from, even while Game Mode is running.

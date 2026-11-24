@@ -14,13 +14,19 @@ from gi.repository import Gdk, GLib, Gtk, Pango
 
 from . import APP_ID
 from .battery import CHARGING, describe
+from .bluetoothsheet import (CANCEL, CLOSE, PAD, PAD_KEYS, Actions, BluetoothSheet, Pad, Power, Problem, Question,
+                             Row, Text, button_view, choose_focus, control_states, opening_focus)
 from .core import (ACTIVATE, AUTO, BACK, DESKTOP, DOWN, GAME, LEFT, MENU, NEXT_TAB, PREV_TAB, RIGHT, UP)
 
 CATEGORY_ICONS = {"native": "controller", "streaming": "cloud", "retro": "retro", "stores": "store"}
 WIDE_WIDTH = 1600
+NARROW_WIDTH = 1400    # below this the header shows the logo without the app's name: the chips and buttons need the room
 WIDE_HEIGHT = 950
 COMPACT_HEIGHT = 800
 BATTERY_FILL_PX = 20   # the fill of a full battery: the width of the glyph's body inside its border and padding
+BT_TEXT_CSS = {"title": "gh-sheet-title", "section": "gh-sheet-label", "body": "gh-sheet-body",
+               "muted": "gh-option-body"}
+BT_WRAP_CHARS = 30     # the natural width of a wrapping text in the Bluetooth sheet, so that none widens the sheet
 
 CSS = Template("""
 @define-color gh_bg $background;
@@ -32,7 +38,7 @@ CSS = Template("""
 @define-color gh_warning $warning;
 @define-color gh_danger $danger;
 
-.gh-card, .gh-tile, .gh-pill, .gh-option, .gh-lang, .gh-tab, .gh-icon-button, .gh-toast-button { background-image: none; }
+.gh-card, .gh-tile, .gh-pill, .gh-option, .gh-lang, .gh-tab, .gh-icon-button, .gh-toast-button, .gh-pad-key { background-image: none; }
 
 window.gh-window {
   background-color: @gh_bg;
@@ -221,7 +227,71 @@ window.gh-window {
 .gh-toggle-state { min-height: 32px; min-width: 56px; padding: 0 12px; border-radius: 16px; background: alpha(@gh_fg, 0.12); font-weight: 800; }
 .gh-toggle-state.on { background: @gh_accent; color: @gh_bg; }
 .gh-disabled-note { font-size: 13px; color: @gh_warning; }
+
+/* Bluetooth: the header button and its sheet */
+.gh-icon-button.off { color: @gh_muted; }
+.gh-icon-button.connected { color: @gh_accent; }
+.gh-icon-button.warn, .gh-icon-button.warn.selected { background: alpha(@gh_warning, 0.16); color: @gh_warning; }
+.gh-bt-sheet .gh-option { min-height: 56px; }
+.gh-pill.danger { background-color: @gh_danger; color: @gh_bg; }
+.gh-pill.danger.selected { background-color: mix(@gh_danger, @gh_fg, 0.15); border-color: @gh_fg; }
+.gh-bt-card {
+  min-height: 64px; padding: 4px 10px; border-radius: 22px;
+  background-color: alpha(@gh_fg, 0.05); border: 2px solid alpha(@gh_fg, 0.06);
+}
+.gh-bt-card.connected { border-color: alpha(@gh_success, 0.45); }
+.gh-bt-card.danger { background-color: alpha(@gh_danger, 0.08); border-color: alpha(@gh_danger, 0.6); }
+.gh-bt-panel { padding: 18px 20px; }
+.gh-bt-badge { min-width: 48px; min-height: 48px; border-radius: 14px; background-color: alpha(@gh_accent, 0.16); color: @gh_accent; }
+.gh-bt-status { font-size: 13px; color: @gh_muted; }
+.gh-bt-status.connected { color: @gh_success; }
+.gh-bt-state { font-size: 14px; font-weight: 700; color: @gh_muted; }
+.gh-bt-problem {
+  padding: 10px 14px; border-radius: 20px;
+  background-color: alpha(@gh_warning, 0.10); border: 2px solid alpha(@gh_warning, 0.5);
+}
+.gh-bt-problem > image { color: @gh_warning; }
+.gh-bt-problem-text { font-size: 15px; font-weight: 700; }
+.gh-switch { min-width: 52px; min-height: 30px; padding: 3px; border-radius: 18px; background-color: alpha(@gh_fg, 0.18); }
+.gh-switch.on { background-color: @gh_accent; }
+.gh-switch-knob { min-width: 24px; min-height: 24px; border-radius: 12px; background-color: @gh_fg; }
+.gh-switch.on .gh-switch-knob { background-color: @gh_bg; }
+.gh-bt-question { font-size: 18px; font-weight: 700; }
+.gh-bt-digit { min-width: 30px; font-size: 44px; font-weight: 800; font-feature-settings: "tnum"; }
+.gh-bt-digit.typed { color: @gh_accent; }
+.gh-bt-digit.pending { color: alpha(@gh_fg, 0.35); }
+.gh-bt-entry {
+  min-height: 60px; padding: 0 18px; border-radius: 18px; background-color: alpha(@gh_fg, 0.07);
+  font-size: 32px; font-weight: 800; letter-spacing: 6px; font-feature-settings: "tnum";
+}
+.gh-pad-key {
+  min-width: 76px; min-height: 64px; padding: 0; border-radius: 18px;
+  background-color: alpha(@gh_fg, 0.07); color: @gh_fg; font-size: 24px; font-weight: 800;
+  border: 2px solid transparent; box-shadow: none;
+}
+.gh-pad-key:hover { background-color: alpha(@gh_fg, 0.12); }
+.gh-pad-key.primary { background-color: @gh_accent; color: @gh_bg; }
+.gh-pad-key.selected { background-color: alpha(@gh_accent, 0.18); }
+.gh-pad-key.primary.selected { background-color: mix(@gh_accent, @gh_fg, 0.15); border-color: @gh_fg; }
+/* A control that would do nothing now: what it shows fades and a colored fill goes, but its border and shadow stay,
+   so the focus ring on it is as strong as on any other control. */
+.gh-bt-sheet .gh-nav.dimmed > * { opacity: 0.45; }
+.gh-bt-sheet .gh-pill.dimmed, .gh-bt-sheet .gh-pad-key.dimmed { background-color: alpha(@gh_fg, 0.07); color: @gh_fg; }
+.gh-bt-sheet .gh-pill.dimmed.selected, .gh-bt-sheet .gh-pad-key.dimmed.selected { border-color: @gh_accent; }
+.gh-compact .gh-bt-panel { padding: 14px 18px; }
+.gh-compact .gh-bt-digit { font-size: 36px; }
 """)
+
+
+def layout_classes(width: int, height: int) -> tuple[str, ...]:
+    """The window's layout classes for its size: wide or compact by height, and narrow by width."""
+    if width >= WIDE_WIDTH and height >= WIDE_HEIGHT:
+        layout = ("gh-wide",)
+    elif height < COMPACT_HEIGHT:
+        layout = ("gh-compact",)
+    else:
+        layout = ()
+    return layout + ("gh-narrow",) if width < NARROW_WIDTH else layout
 
 
 def icon_name(theme: Gtk.IconTheme, name: str, category: str | None = None) -> str:
@@ -291,6 +361,11 @@ class HomeWindow(Gtk.ApplicationWindow):
         self._tiles: dict[str, Gtk.Button] = {}
         # The clock and the battery run only while this window is mapped: nothing here wakes a hidden Gaming Home.
         self._status = runtime.header_status(self._update_clock, self._update_battery)
+        # So does Bluetooth, and a search or a pairing started in its sheet ends with the sheet.
+        self._bluetooth = BluetoothSheet(runtime.bluetooth(self._on_bluetooth))
+        self._bt_content = None
+        self._bt_buttons = {}
+        self._bt_focus = None
         self.connect("map", self._on_map)
         self.connect("unmap", self._on_unmap)
         self.connect("destroy", self._on_unmap)
@@ -313,6 +388,10 @@ class HomeWindow(Gtk.ApplicationWindow):
         return Gtk.IconTheme.get_for_display(self.get_display())
 
     def build(self):
+        # Rebuilding drops whatever sheet was open; a language change even clears ``sheet`` before it calls this.
+        self._leave_bluetooth()
+        if self.sheet == "bluetooth":
+            self.sheet = None
         self._library_ids = []
         self._library_cards = {}
         self._tiles = {}
@@ -338,6 +417,7 @@ class HomeWindow(Gtk.ApplicationWindow):
         self.stack.set_visible_child_name(self.page)
         self.refresh()
         self._status.repaint()
+        self._paint_bluetooth_button()
 
     def _build_header(self):
         header = hbox(16, valign=Gtk.Align.CENTER)
@@ -346,8 +426,12 @@ class HomeWindow(Gtk.ApplicationWindow):
         logo.set_pixel_size(44)
         brand.append(logo)
         titles = box(valign=Gtk.Align.CENTER)
-        # The title can give way when the header is tight, so the chips and the settings button keep their room.
-        titles.append(label(self.t("app.name"), "gh-brand-title", ellipsize=True))
+        # The title can give way when the header is tight, so the chips and the buttons keep their room; in a
+        # narrow window (the handheld's 1280 pixels) it gives way to the logo alone, and the tooltip names the app.
+        self.brand_title = label(self.t("app.name"), "gh-brand-title", ellipsize=True)
+        self.brand_title.set_visible("gh-narrow" not in (self._layout or ()))
+        brand.set_tooltip_text(self.t("app.name"))
+        titles.append(self.brand_title)
         brand.append(titles)
         header.append(brand)
 
@@ -392,6 +476,17 @@ class HomeWindow(Gtk.ApplicationWindow):
 
         self.clock_label = label("", "gh-chip gh-clock", valign=Gtk.Align.CENTER)
         header.append(self.clock_label)
+
+        # Hidden until the source finds an adapter or a Bluetooth service it could not read.
+        self.bluetooth_button = Gtk.Button(css_classes=["gh-icon-button", "gh-nav"], valign=Gtk.Align.CENTER,
+                                           visible=False)
+        self.bluetooth_button.set_name("bluetooth")
+        self.bluetooth_icon = Gtk.Image(icon_name=icon_name(self.icons, "bluetooth"), pixel_size=24)
+        self.bluetooth_button.set_child(self.bluetooth_icon)
+        self.bluetooth_button.update_property([Gtk.AccessibleProperty.LABEL], [self.t("bluetooth.title")])
+        self.bluetooth_button.connect("clicked", lambda *_: self.open_bluetooth())
+        self._hover_selects(self.bluetooth_button)
+        header.append(self.bluetooth_button)
 
         self.settings_button = Gtk.Button(css_classes=["gh-icon-button", "gh-nav"], valign=Gtk.Align.CENTER)
         self.settings_button.set_name("settings")
@@ -737,12 +832,25 @@ class HomeWindow(Gtk.ApplicationWindow):
             return t("status.inLibrary"), "accent"
         return t("status.installed"), "ok"
 
-    # ---- clock and battery -----------------------------------------------
+    # ---- clock, battery and Bluetooth --------------------------------------
     def _on_map(self, *_):
         self._status.start()
+        self._bluetooth.start()
 
     def _on_unmap(self, *_):
         self._status.stop()
+        if self.sheet == "bluetooth":
+            # The sheet goes with the window, so no prompt or search of it greets the user after a game, and the focus
+            # goes back to the button that opened it, as when the sheet is closed. It goes there before the sheet's
+            # widgets do: GTK moves a focus left in removed widgets on to the next control at the first frame after
+            # the window is shown again, and a window already hidden cannot call that off by taking the focus.
+            self.sheet = None
+            self.root.set_sensitive(True)
+            if not (self.bluetooth_button.get_visible() and self.bluetooth_button.grab_focus()):
+                self._focus_default()
+            self.scrim.set_visible(False)
+        self._leave_bluetooth()
+        self._bluetooth.stop()
 
     def _on_active_changed(self, *_):
         if self.is_active() and self.get_mapped():
@@ -750,6 +858,8 @@ class HomeWindow(Gtk.ApplicationWindow):
 
     def stop_status(self):
         self._status.stop()
+        self._leave_bluetooth()
+        self._bluetooth.stop()
 
     def _update_clock(self, text, date):
         """Show the time and, as its tooltip, the date. Only the clock label is touched, never the rest of the window."""
@@ -772,6 +882,332 @@ class HomeWindow(Gtk.ApplicationWindow):
         for tone in ("ok", "warn", "bad"):
             (self.battery_chip.add_css_class if tone == battery.tone else self.battery_chip.remove_css_class)(tone)
         self.battery_chip.set_tooltip_text(describe(battery, self.t))
+
+    # ---- Bluetooth ---------------------------------------------------------
+    def _on_bluetooth(self):
+        """The source reports a change: repaint the button and, when it is open, the sheet, never the whole window.
+        Each setter below does nothing when it is given what its widget already shows."""
+        self._bluetooth.sync()
+        self._paint_bluetooth_button()
+        if self.sheet == "bluetooth":
+            self._render_bluetooth()
+
+    def _paint_bluetooth_button(self):
+        view = button_view(self._bluetooth.snapshot, self.t)
+        button = self.bluetooth_button
+        if not view.visible and self.get_focus() is button:
+            self.settings_button.grab_focus()
+        button.set_visible(view.visible)
+        self._bt_set_icon(self.bluetooth_icon, view.icon)
+        for tone in ("off", "connected", "warn"):
+            (button.add_css_class if tone == view.tone else button.remove_css_class)(tone)
+        button.set_tooltip_text(view.tooltip or None)
+
+    def open_bluetooth(self):
+        if self.sheet == "bluetooth":
+            return
+        self.sheet = "bluetooth"
+        self._bluetooth.enter()
+        content = box(spacing=8, css="gh-sheet gh-bt-sheet", width_request=780)
+        content.nav_rows = []
+        self._bt_content, self._bt_buttons, self._bt_focus = content, {}, None
+        self._set_sheet(content)
+        holder = self.scrim.get_first_child()
+        holder.set_margin_top(16)
+        holder.set_margin_bottom(16)
+        self._render_bluetooth(opening=True)
+        self.runtime.on_ui_changed()
+
+    def _leave_bluetooth(self):
+        """Every way the Bluetooth sheet goes away ends here: B, Close, Escape and Menu, another sheet taking its
+        place, the window being built again and the window being hidden. Its search ends with it, and so does a
+        pairing still in its pairing step.
+
+        Its widgets go as well. GTK clicks a button a moment after A or Enter and calls that off only when the
+        button is unrealized, so a hidden sheet could still act; and nothing typed on the pad stays in a label.
+        """
+        content, self._bt_content, self._bt_buttons, self._bt_focus = self._bt_content, None, {}, None
+        holder = content.get_ancestor(Gtk.ScrolledWindow.__gtype__) if content is not None else None
+        if holder is not None and holder.get_parent() is not None:
+            holder.get_parent().remove(holder)
+        self._bluetooth.leave()
+
+    def _render_bluetooth(self, focus=None, opening=False):
+        """Bring the open sheet up to date in place. A part that still has the same controls keeps its widgets and
+        is only updated, so the focus, its ring and the scroll position stay where they were; the sheet's
+        ScrolledWindow is never replaced. ``focus`` names the control a press wants focused next."""
+        content = self._bt_content
+        if content is None:
+            return
+        blocks = self._bluetooth.blocks(self.t)
+        old = {part.bt_key: part for part in self._iter_children(content)}
+        previous, fresh, buttons, rows = None, [], {}, []
+        for block in blocks:
+            part = old.pop(block.key, None)
+            if part is not None and part.bt_shape != block.shape:
+                content.remove(part)
+                part = None
+            if part is None:
+                part = self._bt_part(block)
+                content.insert_child_after(part, previous)
+                fresh.append(block)
+            else:
+                part.bt_update(block)
+                if part.get_prev_sibling() is not previous:
+                    content.reorder_child_after(part, previous)
+            previous = part
+            buttons.update(part.bt_buttons)
+            rows.extend([part.bt_buttons[name] for name in row] for row in block.rows)
+        for part in old.values():
+            content.remove(part)
+        content.nav_rows, self._bt_buttons = rows, buttons
+        controls = control_states(blocks)
+        first = focus or next((block.first for block in fresh if block.first), None)
+        if opening:
+            first = first or opening_focus(controls)
+        current = self.get_focus()
+        wanted = current.get_name() if current is not None and current.get_name() in buttons else self._bt_focus
+        target = choose_focus(wanted, controls, first)
+        if target is not None:
+            if current is not buttons[target]:
+                buttons[target].grab_focus()
+        elif current is not None and current.get_root() is None:
+            self.set_focus(None)        # it was on a part that is gone, and what takes its place is disabled for now
+
+    def _bt_part(self, block):
+        build = {Text: self._bt_text, Problem: self._bt_problem, Power: self._bt_power, Row: self._bt_row,
+                 Question: self._bt_question, Pad: self._bt_pad, Actions: self._bt_actions}[type(block)]
+        part, update, buttons = build(block)
+        part.bt_key, part.bt_shape, part.bt_update, part.bt_buttons = block.key, block.shape, update, buttons
+        update(block)
+        return part
+
+    def _bt_button(self, control, css="gh-pill"):
+        button = Gtk.Button(css_classes=css.split() + ["gh-nav"], valign=Gtk.Align.CENTER)
+        button.set_name(control.name)
+        if control.icon:
+            button.set_child(Gtk.Image(icon_name=icon_name(self.icons, control.icon), pixel_size=26))
+            button.set_tooltip_text(control.text)
+            button.update_property([Gtk.AccessibleProperty.LABEL], [control.text])
+        button.connect("clicked", self._on_bt_clicked)
+        self._hover_selects(button)
+        return button
+
+    @classmethod
+    def _bt_apply(cls, button, control):
+        if not control.icon and button.get_label() != control.text:
+            button.set_label(control.text)
+        cls._bt_dim(button, not control.enabled)
+        for style in ("primary", "danger"):
+            (button.add_css_class if style == control.style else button.remove_css_class)(style)
+
+    @staticmethod
+    def _bt_dim(button, dimmed):
+        """A control that would do nothing now is dimmed and announced as disabled, but stays sensitive: GTK takes
+        the focus away from an insensitive widget, and the focus must stay where the user left it."""
+        if button.has_css_class("dimmed") != dimmed:
+            (button.add_css_class if dimmed else button.remove_css_class)("dimmed")
+            button.update_state([Gtk.AccessibleState.DISABLED], [dimmed])
+
+    def _bt_set_icon(self, image, icon):
+        name = icon_name(self.icons, icon)
+        if image.get_icon_name() != name:
+            image.set_from_icon_name(name)
+
+    def _bt_badge(self):
+        holder = box(css="gh-bt-badge", valign=Gtk.Align.CENTER, hexpand=False, vexpand=False)
+        image = Gtk.Image(pixel_size=26, hexpand=True, vexpand=True)
+        holder.append(image)
+        return holder, image
+
+    def _on_bt_clicked(self, button):
+        name = button.get_name()
+        if self.sheet != "bluetooth" or self._bt_buttons.get(name) is not button:
+            return                      # a click that GTK delivers after the sheet changed or went away
+        if name == CLOSE:
+            self.close_sheet()
+        else:
+            self._render_bluetooth(self._bluetooth.press(name))
+
+    def _bt_text(self, block):
+        text = label("", BT_TEXT_CSS[block.tone], wrap=True, max_chars=BT_WRAP_CHARS, hexpand=True)
+        if block.tone != "section":
+            return text, lambda b: text.set_text(b.text), {}
+        part = hbox(12, margin_top=6)
+        status = label("", "gh-bt-status", valign=Gtk.Align.CENTER)
+        part.append(text)
+        part.append(status)
+
+        def update(b):
+            text.set_text(b.text)
+            status.set_text(b.status)
+            status.set_visible(bool(b.status))
+        return part, update, {}
+
+    def _bt_problem(self, block):
+        part = hbox(14, "gh-bt-problem")
+        icon = Gtk.Image(icon_name=icon_name(self.icons, "warning"), pixel_size=22, valign=Gtk.Align.CENTER)
+        texts = box(spacing=4, hexpand=True, valign=Gtk.Align.CENTER)
+        text = label("", "gh-bt-problem-text", wrap=True, max_chars=BT_WRAP_CHARS)
+        hint = label("", "gh-option-body", wrap=True, max_chars=BT_WRAP_CHARS)
+        texts.append(text)
+        texts.append(hint)
+        dismiss = self._bt_button(block.controls[0])
+        for child in (icon, texts, dismiss):
+            part.append(child)
+
+        def update(b):
+            text.set_text(b.text)
+            hint.set_text(b.hint)
+            hint.set_visible(bool(b.hint))
+            self._bt_apply(dismiss, b.controls[0])
+        return part, update, {dismiss.get_name(): dismiss}
+
+    def _bt_power(self, block):
+        button = Gtk.Button(css_classes=["gh-option", "gh-nav"])
+        button.set_name(block.controls[0].name)
+        content = hbox(16)
+        texts = box(spacing=2, hexpand=True, valign=Gtk.Align.CENTER)
+        title = label("", "gh-option-title", wrap=True, max_chars=BT_WRAP_CHARS)
+        hint = label("", "gh-option-body", wrap=True, max_chars=BT_WRAP_CHARS)
+        texts.append(title)
+        texts.append(hint)
+        state = label("", "gh-bt-state", valign=Gtk.Align.CENTER)
+        track = hbox(css="gh-switch", valign=Gtk.Align.CENTER, hexpand=False)
+        knob = box(css="gh-switch-knob", hexpand=True, valign=Gtk.Align.CENTER)
+        track.append(knob)
+        for child in (texts, state, track):
+            content.append(child)
+        button.set_child(content)
+        button.connect("clicked", self._on_bt_clicked)
+        self._hover_selects(button)
+
+        def update(b):
+            title.set_text(b.title)
+            hint.set_text(b.hint)
+            state.set_text(b.status)
+            (track.add_css_class if b.on else track.remove_css_class)("on")
+            knob.set_halign(Gtk.Align.END if b.on else Gtk.Align.START)
+            self._bt_dim(button, not b.controls[0].enabled)
+        return button, update, {button.get_name(): button}
+
+    def _bt_row(self, block):
+        part = hbox(14, "gh-bt-card")
+        holder, image = self._bt_badge()
+        texts = box(spacing=2, hexpand=True, valign=Gtk.Align.CENTER)
+        title, status = label("", "gh-option-title", ellipsize=True), label("", "gh-bt-status", ellipsize=True)
+        texts.append(title)
+        texts.append(status)
+        part.append(holder)
+        part.append(texts)
+        buttons = {}
+        for control in block.controls:
+            buttons[control.name] = button = self._bt_button(control)
+            part.append(button)
+
+        def update(b):
+            self._bt_set_icon(image, b.icon)
+            title.set_text(b.title)
+            status.set_text(b.status)
+            status.set_visible(bool(b.status))
+            for widget in (part, status):
+                (widget.add_css_class if b.connected else widget.remove_css_class)("connected")
+            for control in b.controls:
+                self._bt_apply(buttons[control.name], control)
+        return part, update, buttons
+
+    def _bt_question(self, block):
+        """A question in a device's place is a row like the device's; a pairing's question is a panel."""
+        inline = bool(block.icon)
+        part = hbox(14, "gh-bt-card") if inline else box(spacing=16, css="gh-bt-card gh-bt-panel")
+        if block.danger:
+            part.add_css_class("danger")
+        image = None
+        if inline:
+            holder, image = self._bt_badge()
+            part.append(holder)
+        # A pairing that has paired offers nothing to press: its words take the whole panel, in the middle of its height.
+        text = label("", "gh-option-title" if inline else "gh-bt-question", wrap=True, max_chars=BT_WRAP_CHARS,
+                     hexpand=True, valign=Gtk.Align.CENTER, vexpand=not block.controls)
+        part.append(text)
+        digits = []
+        if block.code:
+            code = hbox(4, halign=Gtk.Align.CENTER)
+            code.set_direction(Gtk.TextDirection.LTR)      # a number reads from the left in every language
+            for index in range(len(block.code)):
+                if index and index % 3 == 0:
+                    code.append(box(width_request=22))
+                digit = label("", "gh-bt-digit", xalign=0.5)
+                digit.set_direction(Gtk.TextDirection.LTR)
+                code.append(digit)
+                digits.append(digit)
+            part.append(code)
+        actions = part if inline else hbox(12)
+        if not inline and block.controls:
+            part.append(actions)
+        buttons = {}
+        for control in block.controls:
+            buttons[control.name] = button = self._bt_button(control)
+            actions.append(button)
+
+        def update(b):
+            if image is not None:
+                self._bt_set_icon(image, b.icon)
+            text.set_text(b.text)
+            for index, digit in enumerate(digits):
+                digit.set_text(b.code[index])
+                if b.typed >= 0:
+                    (digit.add_css_class if index < b.typed else digit.remove_css_class)("typed")
+                    (digit.add_css_class if index >= b.typed else digit.remove_css_class)("pending")
+            for control in b.controls:
+                self._bt_apply(buttons[control.name], control)
+        return part, update, buttons
+
+    def _bt_pad(self, block):
+        part = hbox(28, "gh-bt-card gh-bt-panel")
+        side = box(spacing=16, hexpand=True, valign=Gtk.Align.CENTER)
+        text = label("", "gh-bt-question", wrap=True, max_chars=BT_WRAP_CHARS)
+        entry = label("", "gh-bt-entry", xalign=0.5)
+        entry.set_direction(Gtk.TextDirection.LTR)
+        controls = {control.name: control for control in block.controls}
+        cancel = self._bt_button(controls[CANCEL])
+        cancel.set_halign(Gtk.Align.START)
+        buttons = {cancel.get_name(): cancel}
+        for child in (text, entry, cancel):
+            side.append(child)
+        keys = Gtk.Grid(column_spacing=10, row_spacing=10, column_homogeneous=True, row_homogeneous=True,
+                        valign=Gtk.Align.CENTER)
+        keys.set_direction(Gtk.TextDirection.LTR)          # 1 2 3 from the left in every language
+        for row, names in enumerate(PAD_KEYS):
+            for column, key in enumerate(names):
+                buttons[PAD + key] = button = self._bt_button(controls[PAD + key], "gh-pad-key")
+                button.set_direction(Gtk.TextDirection.LTR)
+                keys.attach(button, column, row, 1, 1)
+        part.append(side)
+        part.append(keys)
+
+        def update(b):
+            text.set_text(b.text)
+            entry.set_text(b.display)
+            for control in b.controls:
+                self._bt_apply(buttons[control.name], control)
+        return part, update, buttons
+
+    def _bt_actions(self, block):
+        part = hbox(16, halign=Gtk.Align.END if block.end else Gtk.Align.FILL)
+        text = label("", "gh-sheet-body", wrap=True, max_chars=BT_WRAP_CHARS, hexpand=True, valign=Gtk.Align.CENTER)
+        part.append(text)
+        buttons = {}
+        for control in block.controls:
+            buttons[control.name] = button = self._bt_button(control)
+            part.append(button)
+
+        def update(b):
+            text.set_text(b.text)
+            text.set_visible(bool(b.text))
+            for control in b.controls:
+                self._bt_apply(buttons[control.name], control)
+        return part, update, buttons
 
     # ---- message / toast -----------------------------------------------
     def _refresh_message(self):
@@ -817,6 +1253,7 @@ class HomeWindow(Gtk.ApplicationWindow):
         self.runtime.on_ui_changed()
 
     def open_settings(self, focus=None):
+        self._leave_bluetooth()
         self.sheet = "settings"
         self._set_sheet(self._build_settings_sheet())
         target = {"mode": f"mode:{self.runtime.mode_choice()}", "language": f"lang:{self.runtime.settings.language}"}.get(focus)
@@ -825,6 +1262,7 @@ class HomeWindow(Gtk.ApplicationWindow):
         self.runtime.on_ui_changed()
 
     def open_app(self, app_id):
+        self._leave_bluetooth()
         self.sheet = ("app", app_id)
         self._render_app_sheet(app_id)
         self._focus_first_in_sheet()
@@ -833,9 +1271,10 @@ class HomeWindow(Gtk.ApplicationWindow):
     def close_sheet(self):
         previous = self.sheet
         self.sheet = None
+        self._leave_bluetooth()
         self.scrim.set_visible(False)
         self.root.set_sensitive(True)
-        name = {"settings": "settings"}.get(previous) if isinstance(previous, str) else f"tile:{previous[1]}" if previous else None
+        name = {"settings": "settings", "bluetooth": "bluetooth"}.get(previous) if isinstance(previous, str) else f"tile:{previous[1]}" if previous else None
         if self.page == "home" and isinstance(previous, tuple):
             name = f"app:{previous[1]}"
         if not (name and self._focus_by_name(name)):
@@ -1076,7 +1515,7 @@ class HomeWindow(Gtk.ApplicationWindow):
             sheet = self._sheet_root()
             rows = getattr(sheet, "nav_rows", []) if sheet else []
             return [r for r in (usable(row) for row in rows) if r]
-        header = [self.tab_home, self.tab_discover, self.settings_button]
+        header = [self.tab_home, self.tab_discover, self.bluetooth_button, self.settings_button]
         if self.page == "home":
             library = [c for c in self._iter_children(self.library_row)]
             rows = [header, [self.hero], library, [self.desktop_button, self.controls_button]]
@@ -1154,9 +1593,14 @@ class HomeWindow(Gtk.ApplicationWindow):
         self._selected = focus if focus is not None and focus.has_css_class("gh-nav") else None
         if self._selected is not None:
             self._selected.add_css_class("selected")
+            if self.sheet == "bluetooth" and focus.get_name() in self._bt_buttons:
+                self._bt_focus = focus.get_name()
 
     def selected_name(self):
-        return self._selected.get_name() if self._selected is not None else None
+        """The name of the selected control, as the status command reports it. Any key of the digit pad is only
+        "bt:pad", so that the keys a PIN is typed with are not told to whoever asks."""
+        name = self._selected.get_name() if self._selected is not None else None
+        return PAD.rstrip(":") if name and name.startswith(PAD) else name
 
     def handle_action(self, action):
         if action in (UP, DOWN, LEFT, RIGHT):
@@ -1165,15 +1609,24 @@ class HomeWindow(Gtk.ApplicationWindow):
         elif action == ACTIVATE:
             focus = self.get_focus()
             if focus is not None and focus.get_sensitive():
-                focus.activate()
+                if focus.get_name().startswith(PAD):
+                    # A digit pressed twice must count twice, and GTK's activation drops a second one within 250 ms.
+                    focus.emit("clicked")
+                else:
+                    focus.activate()
         elif action == BACK:
             self.back()
         elif action == MENU:
-            self.close_sheet() if self.sheet == "settings" else self.open_settings()
+            self.close_sheet() if self.sheet in ("settings", "bluetooth") else self.open_settings()
         elif action in (PREV_TAB, NEXT_TAB) and not self.sheet:
             self.show_page("discover" if self.page == "home" else "home")
 
     def back(self):
+        if self.sheet == "bluetooth":
+            handled, focus = self._bluetooth.back()
+            if handled:
+                self._render_bluetooth(focus)
+                return
         if self.sheet:
             self.close_sheet()
         elif self.page != "home":
@@ -1189,6 +1642,18 @@ class HomeWindow(Gtk.ApplicationWindow):
         if keyval == Gdk.KEY_Escape:
             self.back()
             return True
+        if self.sheet == "bluetooth" and self._bluetooth.typing and not state & (
+                Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK):
+            # A keyboard types on the pad too. Enter answers while the focus is on the pad, whichever key it is on;
+            # on Cancel or Close it presses that, as everywhere else.
+            char, focus = chr(Gdk.keyval_to_unicode(keyval)), self.get_focus()
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
+                key = "done" if focus is None or focus.get_name().startswith(PAD) else None
+            else:
+                key = "erase" if keyval == Gdk.KEY_BackSpace else char if char.isascii() and char.isdigit() else None
+            if key is not None:
+                self._render_bluetooth(self._bluetooth.key(key))
+                return True
         if keyval in (Gdk.KEY_Page_Up, Gdk.KEY_Page_Down) and not self.sheet:
             self.show_page("discover" if self.page == "home" else "home")
             return True
@@ -1201,19 +1666,15 @@ class HomeWindow(Gtk.ApplicationWindow):
     # ---- responsive layout ----------------------------------------------
     def do_size_allocate(self, width, height, baseline):
         Gtk.ApplicationWindow.do_size_allocate(self, width, height, baseline)
-        if width >= WIDE_WIDTH and height >= WIDE_HEIGHT:
-            layout = "gh-wide"
-        elif height < COMPACT_HEIGHT:
-            layout = "gh-compact"
-        else:
-            layout = None
+        layout = layout_classes(width, height)
         if layout != self._layout:
             self._layout = layout
             GLib.idle_add(self._apply_layout, layout)
 
     def _apply_layout(self, layout):
-        for name in ("gh-wide", "gh-compact"):
-            (self.add_css_class if name == layout else self.remove_css_class)(name)
+        for name in ("gh-wide", "gh-compact", "gh-narrow"):
+            (self.add_css_class if name in layout else self.remove_css_class)(name)
+        self.brand_title.set_visible("gh-narrow" not in layout)
         return False
 
 
