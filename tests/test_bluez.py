@@ -7,11 +7,13 @@ system bus: the address is always the private bus's, and asking for the system b
 
 import ast
 import contextlib
+import gc
 import json
 import shutil
 import sys
 import textwrap
 import unittest
+import weakref
 from pathlib import Path
 from unittest import mock
 
@@ -713,6 +715,115 @@ class LifecycleTest(BusCase):
         self.assertIs(client.snapshot, bluez.IDLE)
         self.assertEqual(self.sent(fake, client, "UnregisterAgent"), [])        # the closed connection took it
         self.assertEqual(self.sent(fake, client, "CancelPairing"), [])
+
+    def unique_names(self) -> list[tuple]:
+        """(name, old owner, new owner) of every unique name that comes or goes on the bus from now on."""
+        seen = []
+        watcher = self.bus.connect()
+        watcher.signal_subscribe("org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
+                                 "/org/freedesktop/DBus", None, Gio.DBusSignalFlags.NONE,
+                                 lambda *args: seen.append(args[5].unpack()))
+        return seen
+
+    def test_a_connection_that_opens_after_stop_is_closed_at_once(self):
+        self.fake()
+        seen, opened = self.unique_names(), []
+        finish = Gio.DBusConnection.new_for_address_finish
+
+        def keep(result):                               # hold it, as anything else in the process might
+            opened.append(finish(result))
+            return opened[-1]
+
+        client = self.client()
+        with mock.patch.object(Gio.DBusConnection, "new_for_address_finish", keep):
+            client.start()
+            client._cancellable = Gio.Cancellable()     # the opening keeps its own: stop() cannot cancel it now
+            client.stop()
+            self.until(lambda: opened)
+        self.until(lambda: opened[0].is_closed())       # closed by the client, not left to whoever holds it
+        name = opened[0].get_unique_name()
+        self.until(lambda: (name, name, "") in seen)    # and the bus saw it go
+        self.assertEqual((client._connection, len(client.changes), client.error), (None, 0, ""))
+        self.assertTrue(client.idle)
+
+    def test_an_answer_from_an_owner_that_is_gone_is_dropped(self):
+        first = self.fake()
+        client = self.ready()
+        first.hold = lambda call: call[3] == "StartDiscovery"
+        first.failures["StartDiscovery"] = ("org.bluez.Error.NotReady", "Resource Not Ready")
+        client.scan(True)
+        self.until(lambda: first.held)
+        first.release()                                 # BlueZ restarts: the old one keeps its connection a while
+        self.until(lambda: client.snapshot.state == bt.ABSENT)
+        second = self.fake()
+        second.defer = lambda call: call[3] == "StartDiscovery"
+        self.until(lambda: client.snapshot.state == bt.ON)
+        client.scan(True)
+        self.until(lambda: second.deferred)
+        first.answer_held()                             # the old owner's NotReady, for a search it never had
+        self.assertFalse(pump(lambda: client.snapshot.failure is not None, timeout=0.2))
+        second.answer_deferred()
+        self.until(lambda: client._scan_active)
+        self.assertEqual((client.snapshot.scanning, client.snapshot.failure), (True, None))
+
+    def test_a_read_that_a_newer_one_replaced_is_dropped(self):
+        fake = self.fake(adapters=(0, 1))
+        client = self.ready()
+        fake.hold = lambda call: call[3] == "GetManagedObjects"
+        fake.remove_adapter(0)                          # hci1 now: its devices are read
+        fake.add_adapter(0)                             # hci0 again: read once more, before the first answer
+        self.until(lambda: len(fake.held) == 2)
+        fake.failures["GetManagedObjects"] = ("org.freedesktop.DBus.Error.AccessDenied", "no")
+        first, second = fake.held
+        fake.held = [second]
+        first[1]()                                      # the older read fails ...
+        self.until(lambda: client._in_flight == 1)
+        self.assertNotEqual(client.snapshot.state, bt.ERROR)           # ... and nobody cares: a newer one comes
+        del fake.failures["GetManagedObjects"]
+        fake.hold = None
+        fake.answer_held()
+        self.until(lambda: client._in_flight == 0)
+        self.assertEqual((client.snapshot.state, client._adapter), (bt.ON, 0))
+
+    def test_signals_before_the_first_answer_are_left_to_that_answer(self):
+        fake = self.fake()
+        fake.hold = lambda call: call[3] == "GetManagedObjects"
+        client = self.client()
+        client.start()
+        self.until(lambda: fake.held)
+        self.names.add(self.name_of(client))
+        fake.add_adapter(1)                             # announced before the answer, which will include it
+        fake.set("/org/bluez/hci0", ADAPTER, Powered=False, PowerState="off")
+        fake.add_device(PAD, name="Pad")
+        self.assertFalse(pump(lambda: client.snapshot.state != bt.UNKNOWN, timeout=0.1))
+        fake.hold = None
+        fake.answer_held()
+        self.until(lambda: client.snapshot.state == bt.OFF)
+        self.assertEqual([device.name for device in client.snapshot.devices], ["Pad"])
+        self.assertEqual(fake.count("GetManagedObjects"), 1)            # one read: the signals asked for none
+
+    def test_signals_of_an_owner_that_is_gone_are_not_even_delivered(self):
+        delivered = []
+        original = bluez.BlueZ._on_signal
+
+        def spy(client, connection, sender, *rest):
+            delivered.append(sender)
+            return original(client, connection, sender, *rest)
+
+        with mock.patch.object(bluez.BlueZ, "_on_signal", spy):
+            first = self.fake()
+            path = first.add_device(PAD, name="Pad", signal=False)
+            client = self.ready()
+            first.release()                             # gives the name up and stays on the bus
+            self.until(lambda: client.snapshot.state == bt.ABSENT)
+            second = self.fake()
+            self.until(lambda: client.snapshot.state == bt.ON)
+            delivered.clear()
+            first.set(path, DEVICE, Connected=True)     # the old owner still says things
+            first._bus_call("GetId", "()")              # the bus has passed it on before what comes next
+            second.add_device(BUDS, name="Buds")
+            self.until(lambda: second.unique_name in delivered)
+        self.assertNotIn(first.unique_name, delivered)
 
     def test_ids_are_never_reused_across_stop_and_start(self):
         fake = self.fake()
@@ -1767,6 +1878,21 @@ class PowerTest(BusCase):
         client.set_power(True)
         self.assertEqual(client.snapshot.failure, bt.Failure(bt.NOT_READY, bt.POWERING))
         self.assertEqual(self.sent(fake, client), ["GetManagedObjects"])
+
+    def test_stopping_lets_go_of_the_source_at_once(self):
+        self.fake()
+        command = self.waiting_command()
+        client = self.ready(find_power_command=lambda: str(command))
+        client.set_power(False)
+        self.until(lambda: (SCRATCH / "seen.json").exists())
+        client.stop()                                   # the command still runs: nothing may wait for it
+        self.clients.remove(client)
+        gone = weakref.ref(client)
+        del client
+        try:
+            self.until(lambda: gc.collect() is not None and gone() is None, timeout=1)
+        finally:
+            (SCRATCH / "go").touch()
 
     def test_stopping_while_the_command_runs_lets_it_finish_without_waiting_for_it(self):
         self.fake()
