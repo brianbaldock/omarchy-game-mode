@@ -1091,6 +1091,14 @@ class WindowTest(unittest.TestCase):
             self.assertEqual(self.window._on_key(window, None, gdk.KEY_Return, 0, gdk.ModifierType(0)), handled)
         self.assertEqual(source.calls[-1], ("answer", number, "04"))
 
+    def test_the_status_names_the_digit_pad_but_not_its_key(self):
+        window = mock.MagicMock()
+        for name, told in (("bt:pad:4", "bt:pad"), (sheet.PAD_DONE, "bt:pad"), (sheet.SEARCH, sheet.SEARCH)):
+            window._selected.get_name.return_value = name
+            self.assertEqual(self.window.selected_name(window), told)
+        window._selected = None
+        self.assertIsNone(self.window.selected_name(window))
+
     def test_below_1400_pixels_the_header_shows_the_logo_without_the_name(self):
         ui = importlib.import_module("gaminghome.ui")
         self.assertEqual([ui.layout_classes(*size) for size in ((1280, 720), (1280, 800), (1399, 1080), (1400, 900),

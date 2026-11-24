@@ -239,7 +239,7 @@ def scroll_to_end(window):
 def check_shown(word, window, source):
     """What the sheet must look like before its picture is taken."""
     check(window.sheet == "bluetooth", f"the Bluetooth sheet is not open: {window.sheet!r}")
-    focus = window.selected_name()
+    focus = window.get_focus() and window.get_focus().get_name()
     check(focus in window._bt_buttons, f"the focus is outside the sheet: {focus!r}")
     if word in FIRST_FOCUS:                                         # a name, or the start of one that ends in an id
         check(focus.startswith(FIRST_FOCUS[word]), f"the focus is on {focus}, not on {FIRST_FOCUS[word]}")
@@ -343,6 +343,8 @@ def check_behaviour(word, language, window, source):
     elif word == "btpin":
         prompt = source.snapshot.prompt.id
         window._focus_by_name(f"{sheet.PAD}5")                      # Enter answers from any key of the pad
+        check(window.runtime.status()["selected"] == "bt:pad",
+              f"the status tells which key of the pad is selected: {window.runtime.status()['selected']}")
         window._on_key(None, Gdk.KEY_Return, 0, Gdk.ModifierType(0))
         check(source.calls[-1] == ("answer", prompt, "042"), "Enter on the pad did not answer what was typed")
         settle()

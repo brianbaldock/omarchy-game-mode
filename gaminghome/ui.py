@@ -1586,7 +1586,10 @@ class HomeWindow(Gtk.ApplicationWindow):
                 self._bt_focus = focus.get_name()
 
     def selected_name(self):
-        return self._selected.get_name() if self._selected is not None else None
+        """The name of the selected control, as the status command reports it. Any key of the digit pad is only
+        "bt:pad", so that the keys a PIN is typed with are not told to whoever asks."""
+        name = self._selected.get_name() if self._selected is not None else None
+        return PAD.rstrip(":") if name and name.startswith(PAD) else name
 
     def handle_action(self, action):
         if action in (UP, DOWN, LEFT, RIGHT):

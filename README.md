@@ -618,7 +618,9 @@ the autostart file Game Mode created.
 
 `omarchy-game-mode status` reports what Game Mode sees, including the controllers it
 reads and, under `inputplumber`, what a running InputPlumber manages. Review it before
-posting: window titles can contain private information.
+posting: window titles can contain private information. Its `selected` field names the
+control that has the focus; on the Bluetooth digit pad it says only `bt:pad`, not which
+key, so a PIN being typed is not given away.
 
 `omarchy-game-mode doctor` is described in the next section. It always answers in the
 terminal you ran it from, even while Game Mode is running.
