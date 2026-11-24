@@ -2,9 +2,10 @@
 
 A power profile is one of the three that power-profiles-daemon (PPD) offers: power-saver, balanced and performance.
 On hardware that backs them (a firmware platform profile, the CPU's boost and energy preference) a profile changes
-real limits and not only a label; on a machine where nothing backs a profile, PPD's placeholder driver changes
-nothing, and this module does not offer such a profile. The names are PPD's own, which are also Omarchy's and the
-desktop's, so there is nothing to translate between.
+more than a label: measured on one ROG Xbox Ally, on AC power with short synthetic loads, power-saver, balanced and
+performance held the chip to about 6, 18 and 24 W. On a machine where nothing backs a profile, PPD's placeholder
+driver changes nothing, and this module does not offer such a profile. The names are PPD's own, which are also
+Omarchy's and the desktop's, so there is nothing to translate between.
 
 This module is the contract between the window (``ui.py``) and whatever supplies the profile: the PPD client
 (``powerprofiles.py``) in the app and a scripted stand-in in the tests. It holds plain data, a few pure helpers
@@ -15,8 +16,10 @@ Who decides
 PPD's active profile is what is in force now, and a source shows it live: Gaming Home keeps no memory of its own.
 Others change it too. Omarchy's shell switches on every plug and unplug, to the profile Omarchy remembers for that
 power source; asusd does the same with its own AC and battery profiles; a game launcher that uses Feral's GameMode
-sets one per game. Gaming Home does not fight them: it never switches again after another program has changed the
-profile, it says so (``CHANGED_ELSEWHERE``) and leaves it there. Taking a hold for a game (a later, opt-in feature)
+sets one per game. Gaming Home does not fight them: it does not switch again after another program has changed the
+profile, it says so (``CHANGED_ELSEWHERE``) and leaves it there. The one exception is Omarchy's command that a source
+runs to keep a choice: it sets the profile itself, so a change that another program makes in the moments after the
+window was hidden, while that command still runs, can be undone. Taking a hold for a game (a later, opt-in feature)
 belongs to the resident core, which runs while the window is hidden, on a connection of its own. A source of this
 module never takes one.
 
@@ -26,7 +29,9 @@ Lifecycle
 the two a source may watch the PPD service. Outside them it holds nothing at all: no timer, no bus watch or
 subscription and no call in flight (but see the helper below). Both are idempotent, ``start()`` never starts the
 service (starting PPD would stop the other power managers it conflicts with), and ``on_change`` is not called once
-``stop()`` has returned. Nothing is polled: PPD says when the profile changes, whoever changed it.
+``stop()`` has returned. Nothing is polled: PPD says when its active profile changes, whoever changed it, though it
+does not see every write to the files behind a profile (another program's energy preference or boost, or a platform
+profile of ``custom``).
 
 ``stop()`` forgets a request that is still on its way. The service may well carry it out, but the source reports
 nothing about it, clears ``pending`` and starts no timer; the next ``start()`` reads the service again. The one
@@ -69,11 +74,11 @@ ends. A program's name is whatever it called itself, cleaned and short.
 Evidence
 --------
 ``snapshot.evidence`` is what the kernel was told once the profile is set: the firmware's platform profile and
-whether the CPU may boost. A change is never judged by it: the kernel keeps what it was asked for and does not
-check the firmware's answer, other programs write some of these files too (asusd sets the CPU's energy preference
-with the profile), and PPD itself says when the profile changed. Its use is to show the window and the doctor when
-the hardware's view and Gaming Home's differ. The amdgpu power caps are deliberately not part of it: they read the
-same in every profile.
+whether the CPU may boost. A change is never judged by it: the kernel keeps what it was asked for (asus-wmi, the
+ROG Xbox Ally's driver, does not even check the firmware's answer), other programs write some of these files too
+(asusd sets the CPU's energy preference with the profile), and PPD itself says when the profile changed. Its use is
+to show the window and the doctor when the hardware's view and Gaming Home's differ. The amdgpu power caps are
+deliberately not part of it: they read the same in every profile.
 """
 
 from __future__ import annotations

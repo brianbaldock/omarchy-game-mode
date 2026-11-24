@@ -1,9 +1,11 @@
 """The machine's power profile from power-profiles-daemon, for Gaming Home and its ``power`` command.
 
 power-profiles-daemon (PPD) owns the profile: it offers power-saver, balanced and performance, applies one through
-the drivers that back it and announces every change, whoever made it. ``power.py`` says what Gaming Home shows and
-asks; this module is how that reaches the machine. ``PowerProfiles`` is the window's source, and ``main`` the
-``power`` command, which starts a source of its own and needs no window.
+the drivers that back it and announces every change of its active profile, whoever made it (it does not see every
+write to the files behind a profile, such as another program's energy preference or a platform profile of
+``custom``). ``power.py`` says what Gaming Home shows and asks; this module is how that reaches the machine.
+``PowerProfiles`` is the window's source, and ``main`` the ``power`` command, which starts a source of its own and
+needs no window.
 
 Every call it may make, and when
 --------------------------------
@@ -12,7 +14,7 @@ Every call it may make, and when
   the watch back. PPD's legacy name is never used.
 * When an owner appears while the source is started: one ``org.freedesktop.DBus.Properties.GetAll`` of the
   ``org.freedesktop.UPower.PowerProfiles`` interface of ``/org/freedesktop/UPower/PowerProfiles``, and a subscription
-  to that owner's ``PropertiesChanged`` of the same object and interface, which says every change from then on.
+  to that owner's ``PropertiesChanged`` of the same object and interface, which says each change from then on.
   ``retry()`` sends the same ``GetAll`` again, and only after a reading failed.
 * ``set_profile()`` sends one ``org.freedesktop.DBus.Properties.Set`` of ``ActiveProfile`` to one of the three
   profiles: only when the service was read in this visit, offers that profile and is not in it already, and no
@@ -23,7 +25,8 @@ Nothing else: no ``HoldProfile``, ``ReleaseProfile`` or ``SetActionEnabled``, an
 the well-known name, which a new owner could take meanwhile), never lets the bus start a service (``NO_AUTO_START``)
 and gives each call Gio's own time limit (``CALL_TIMEOUT_MS``, ``SET_TIMEOUT_MS``). Replies and signals of an owner
 that left, or for a stopped source, are dropped. Nothing the system says is logged, an error's text is never kept and
-neither is the reason another program gave for its hold.
+neither is the reason another program gave for its hold. No hold is taken here, but choosing another profile ends
+every hold other programs have on one: PPD does that for any change.
 
 Files and the one process
 -------------------------
@@ -44,7 +47,8 @@ Files and the one process
   recorded. After ``stop()`` it is left to finish and reports nothing. That leaves one gap: while the window is
   hidden nothing reads the service, so a change by another program in the few hundred milliseconds the command
   still runs after the window was hidden can be undone by it. The script also decides between AC and battery when it
-  runs, not when the user chose.
+  runs, not when the user chose. And the tools it uses may start a service, which Gaming Home's own calls never do:
+  ``busctl`` (UPower, to tell AC from battery) and ``powerprofilesctl`` (PPD).
 
 Nothing is polled. The only timer is that command's limit. A started source that is left alone holds the name watch
 and the subscription and nothing else (``idle``). A hold is never taken here: that belongs to the resident core.
