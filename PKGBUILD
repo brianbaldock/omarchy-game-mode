@@ -1,6 +1,6 @@
 # Maintainer: Omarchy Game Mode contributors
 pkgname=omarchy-game-mode
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="Controller-first Gaming Home and game store launcher for Omarchy"
 arch=(any)
