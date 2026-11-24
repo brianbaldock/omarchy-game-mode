@@ -639,6 +639,21 @@ class BlocksTest(unittest.TestCase):
                                  texts(self.blocks(source, visit)))
                 visit.press(sheet.DISMISS)
 
+    def test_nothing_found_is_not_said_once_a_device_was_listed_and_is_said_again_after_a_new_search(self):
+        nothing = "Nothing found. Check that the device is in pairing mode."
+        for ending in ("paired", "given up after the bond"):
+            with self.subTest(ending):
+                source = world()
+                visit = opened(source)
+                visit.press(sheet.SEARCH)
+                speaker = source.add_device("Speaker", "speaker")
+                visit.press(f"{sheet.PAIR}{speaker}")                 # a pairing ends the search
+                source.finish() if ending == "paired" else source.finish_cancel(paired=True)
+                self.assertNotIn(nothing, texts(visit.blocks(ENGLISH)))
+                visit.press(sheet.SEARCH)
+                source.set_scanning(False)                            # a search of its own that found nothing
+                self.assertIn(nothing, texts(visit.blocks(ENGLISH)))
+
     def test_search_waits_while_something_runs_and_a_search_that_runs_can_always_stop(self):
         source = world()
         visit = opened(source)

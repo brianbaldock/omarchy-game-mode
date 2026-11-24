@@ -260,6 +260,9 @@ def check_shown(word, window, source):
         check(source.snapshot.truncated, "the source lists every device, so nothing says that more were found")
     if word == "btcancelpaired":
         check_cancel_told(window, source)
+    if word in ("btempty", "btpaired", "btcancelpaired"):          # found nothing, or a device that was paired since
+        said = window.runtime.t("bluetooth.nothingFound") in texts_in(window._bt_content)
+        check(said == (word == "btempty"), f"'Nothing found' is {'missing' if not said else 'said'} in {word}")
 
 
 def check_cancel_told(window, source):

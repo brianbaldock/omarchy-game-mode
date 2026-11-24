@@ -318,6 +318,7 @@ class BluetoothSheet:
         self.forgetting = 0          # the device whose Forget asks for confirmation
         self.entry = DigitEntry()
         self._search_seen = False    # a search was seen running during this visit, so "nothing found" can be said
+        self._listed = False         # a nearby device was listed since Search was pressed: something was found
         self._power_target = None    # what the power switch was last asked for, until that has run, sheet or not
         self._cancelled = None       # the device of the pairing given up, until the source says it has ended
 
@@ -358,7 +359,7 @@ class BluetoothSheet:
         if self.visiting:
             return
         self.visiting = True
-        self.searched = self._search_seen = False
+        self.searched = self._search_seen = self._listed = False
         self.forgetting = 0
         self.entry.clear()
         failure = self.source.snapshot.failure
@@ -372,7 +373,7 @@ class BluetoothSheet:
         if not self.visiting:
             return False
         self.visiting = False
-        self.searched = self._search_seen = False
+        self.searched = self._search_seen = self._listed = False
         self.forgetting = 0
         self.entry.clear()
         give_up = abandonable(self.source.snapshot) and not self.cancelling
@@ -395,6 +396,8 @@ class BluetoothSheet:
             self._search_seen = True
         elif snapshot.failure is not None and snapshot.failure.action == bt.SEARCHING:
             self._search_seen = False               # the source said it searched, and then that it could not start
+        if self.visiting and self.searched and bt.nearby(snapshot.devices):
+            self._listed = True                     # even if it is paired or gone by the time the search ends
         if not pairing(snapshot):
             self._cancelled = None
         if snapshot.activity is None or snapshot.activity.kind != bt.POWERING:
@@ -416,7 +419,7 @@ class BluetoothSheet:
             if snapshot.scanning:
                 self.source.scan(False)
             elif snapshot.state == bt.ON and idle:
-                self.searched = True
+                self.searched, self._listed = True, False
                 self.source.scan(True)
         elif name == RETRY:
             self.source.retry()
@@ -574,7 +577,7 @@ class BluetoothSheet:
             for device in found:
                 blocks.append(Row(f"nearby:{device.id}", (Control(f"{PAIR}{device.id}", t("bluetooth.pair"), idle),),
                                   icon=device_icon(device.kind), title=names[device.id]))
-            if not found and (searching or self._search_seen):
+            if not found and (searching or (self._search_seen and not self._listed)):
                 blocks.append(Text("nearby-empty", tone="muted",
                                    text=t("bluetooth.looking" if searching else "bluetooth.nothingFound")))
         if self.searched and snapshot.truncated:                   # about the nearby list, shown after Search
