@@ -148,10 +148,11 @@ class DocsTest(unittest.TestCase):
     def test_the_power_profile_text_says_what_a_choice_does_what_it_never_does_and_what_was_not_tried(self):
         measured = README.index("### What the profiles do on a ROG Xbox Ally")
         section = " ".join(README[README.index("## Power profile"):measured].split())
-        for fact in ("Until the power source changes", "cannot always tell whether it did", "never switches it back",
-                     "never starts the power service", "never needs a password", "without asking first",
-                     "**Not yet tested on real devices:**"):
+        for fact in ("Until the power source changes", "cannot always tell whether it did", "does not switch it back",
+                     "The one exception is Omarchy's command", "never starts the power service",
+                     "never needs a password", "without asking first", "**Not yet tested on real devices:**"):
             self.assertIn(fact, section)
+        self.assertNotIn("never switches it back", section)      # Omarchy's command may, just after Home is hidden
         # How the service works inside is not described, and numbers are only in what the device measured, which
         # keeps its limits next to them.
         self.assertIsNone(re.search(r"\d+(\.\d+)? ?W\b|d-?bus|polkit|HoldProfile|ActiveProfile|placeholder", section,

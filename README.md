@@ -226,41 +226,48 @@ tap.
   nothing. While a switch is on its way, that profile reads "Switching…" and the others are
   dimmed and do nothing; the focus stays where it is.
 - **Notes.** Below the profiles the sheet says, only when it applies: why a switch failed,
-  with Dismiss; that another program changed the profile after you did; that Omarchy could not
-  be told to keep the choice; that performance is held back right now (the device is too hot,
-  on a lap, or the system limits it); which programs are asking for a profile, because
-  choosing another profile ends their request; and that the firmware was told something that
-  does not go with the active profile. A failure or a note from before is gone when the sheet
-  opens again.
+  with Dismiss (once that profile is active after all, the failure is no longer shown); that
+  another program changed the profile after you did; that Omarchy could not be told to keep
+  the choice; that performance is held back right now (the device is too hot, on a lap, or
+  the system limits it); which programs are asking for a profile, because choosing another
+  profile ends their request; and that what the firmware or the processor was told does not
+  go with the active profile. A failure or a note from before is gone when the sheet opens
+  again.
 - **How long a choice lasts.** Until the power source changes (the charger is plugged in or
   unplugged) or the machine restarts. Omarchy keeps a separate power profile for plugged in
   and for battery and may keep the choice for next time, but Gaming Home cannot always tell
   whether it did, so the sheet says only what Omarchy does in general, and only on a machine
   with a battery.
 - **Other programs.** Omarchy's bar on plug and unplug, asusd, and game launchers that use
-  GameMode change the profile too. Gaming Home shows the profile that is in force, says when
-  another program changed it after you, and never switches it back.
+  GameMode change the profile too. Gaming Home shows the profile that is in force, says so
+  when another program changes it after your choice while Gaming Home is shown, and does not
+  switch it back. The one exception is Omarchy's command that keeps a choice: it sets the
+  profile once more as it records it, so a change that another program makes just after
+  Gaming Home is hidden, while that command still runs (usually a fraction of a second, up to
+  ten seconds under load), can be undone.
 - **Controller, keyboard, mouse and touch.** The D-pad moves between the profiles and the
   buttons, and A presses one. B, Escape, Menu and Close close the sheet; a switch on its way
   goes on.
 - **When it runs.** Gaming Home looks at the power profile only while it is shown (Omarchy's
-  command that keeps a choice may still finish just after it is hidden), and it never starts
-  the power service (power-profiles-daemon): without it there is no button. It never needs a
-  password: when the system does not allow the switch, the sheet says so in one line and asks
-  for nothing. The sheet holds no timer of its own and nothing in it moves while nothing
-  changes: "Switching…" is a static line.
+  command that keeps a choice may still finish just after it is hidden). It never starts the
+  power service (power-profiles-daemon) itself, so without it there is no button, though the
+  tools that Omarchy's command uses can start it or UPower. It never needs a password: when
+  the system does not allow the switch, the sheet says so in one line and asks for nothing.
+  The sheet holds no timer of its own and nothing in it moves while nothing changes:
+  "Switching…" is a static line.
 
 How far this has been checked:
 
 - **Automated tests:** what the button and the sheet show for each profile, a switch on its
   way, each failure, the notes, programs asking for a profile, performance held back and the
-  firmware disagreeing, in the seven languages; where the focus goes after a change; and,
-  against a scripted stand-in that answers as the real one does, that B, Escape, Close, Menu,
-  another sheet, rebuilding the window and hiding it each leave the sheet, that a click
-  arriving after the sheet has closed switches nothing, that the focus stays on the profile
-  asked for until the answer, and that a failure does not greet the next visit. The sheet was
-  rendered headless with GTK Broadway in English, German, Japanese and Arabic, at 1280x720,
-  1920x1080 and 1280x600, by a script that fails when the sheet does the wrong thing.
+  firmware or the processor disagreeing, in the seven languages; where the focus goes after
+  a change; and, against a scripted stand-in that answers as the real one does (late answers
+  included), that B, Escape, Close, Menu, another sheet, rebuilding the window and hiding it
+  each leave the sheet, that a click arriving after the sheet has closed switches nothing,
+  that moving over a profile chooses nothing, that the focus stays on the profile asked for
+  until the answer, and that a failure does not greet the next visit. The sheet was rendered
+  headless with GTK Broadway in English, German, Japanese and Arabic, at 1280x720, 1920x1080
+  and 1280x600, by a script that fails when the sheet does the wrong thing.
 - **Not yet tested on real devices:** the button and the sheet have not run on a handheld
   yet: how the D-pad and touch feel, whether the system allows a switch from Gaming Home as
   it is started at login, other programs switching the profile while the sheet is open, and
@@ -731,15 +738,16 @@ power-profiles-daemon; `cycle` goes from power-saver to balanced to performance 
 through the profiles offered, and does nothing from a profile that is not one of them.
 Choosing a different profile ends every hold other programs have on one, as
 power-profiles-daemon does for any change. When Omarchy's `omarchy-powerprofiles-set` is
-installed, Omarchy keeps the choice for the power source in use once that command has
-finished (usually within a second, up to ten seconds under load). Another program changing
+installed, the command also runs it, so that Omarchy keeps the choice for the power source
+in use, and waits for it to finish (usually within a second; it is stopped after ten seconds,
+and the command says so when Omarchy could not keep the choice). Another program changing
 the profile right then (Omarchy itself does on plug and unplug) can keep the choice from
 being recorded: Gaming Home cannot always tell whether Omarchy recorded the choice when
 another program changed the profile at the same moment. The command needs no running Game
-Mode, waits for a change still running from an earlier press, and exits 1 with a one-line
-reason when a change fails (for example `denied` from an ssh session, which polkit
-refuses) and 2 on bad usage, so a key can run it. For an F14 key (`KEY_F14` is 184, so 192;
-see the touch keyboard's binding above):
+Mode, waits up to two seconds for a change still running from an earlier press, and exits 1
+with a one-line reason when a change fails (for example `denied` from an ssh session, which
+polkit refuses) and 2 on bad usage, so a key can run it. For an F14 key (`KEY_F14` is 184,
+so 192; see the touch keyboard's binding above):
 
 ```lua
 o.bind("code:192", "Cycle the power profile", "omarchy-game-mode power cycle")
