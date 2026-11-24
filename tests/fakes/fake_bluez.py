@@ -38,8 +38,8 @@ refuse the pairing to the device, which comes back from ``Pair()`` as ``Authenti
 
 ``CancelPairing`` while the pairing request exists ends ``Pair()`` with ``AuthenticationCanceled``. Without one (after
 the bond, or with no pairing at all) BlueZ 5.87 removes the device's keys from the kernel and answers
-``DoesNotExist``; the fake records removed keys in ``unpaired`` and drops the link. Cancels that found a pairing
-request are in ``cancelled``. BlueZ is not told of its own unpairing,
+``DoesNotExist``; the fake records removed keys in ``unpaired`` and drops the link, which a device without keys keeps.
+Cancels that found a pairing request are in ``cancelled``. BlueZ is not told of its own unpairing,
 so ``Paired`` and ``Bonded`` stay as they were. A device removed during a pairing gets ``Pair()`` answered first:
 ``AuthenticationCanceled`` while the link is up, ``ConnectionAttemptFailed`` otherwise, and no answer at all once
 the bond is made. Tests need ``dbus-daemon`` and PyGObject; ``PrivateBus.start`` skips them when either is missing.
@@ -649,11 +649,13 @@ class FakeBlueZ:
             invocation.return_value(None)
             return
         # BlueZ 5.87 cancel_pairing() without a pairing request: btd_adapter_remove_bonding(), then DoesNotExist.
+        # The kernel's unpair_device() removes the keys and then drops the link; a device without keys gets
+        # NOT_PAIRED before that, and keeps its link.
         if path in self.objects and self.value(path, DEVICE, "Bonded"):
             self.unpaired.append(path)          # the keys are gone; BlueZ still says Paired and Bonded
-        self.profiles.discard(path)
-        if path in self.objects and self.value(path, DEVICE, "Connected"):
-            self.set(path, DEVICE, Connected=False, ServicesResolved=False)
+            self.profiles.discard(path)
+            if self.value(path, DEVICE, "Connected"):
+                self.set(path, DEVICE, Connected=False, ServicesResolved=False)
         self._error(invocation, "DoesNotExist", "Does Not Exist")
 
     def ask(self, member, *arguments, pairing: Pairing | None = None, then=None) -> AgentCall:

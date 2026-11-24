@@ -19,8 +19,8 @@ from unittest import mock
 
 from gi.repository import Gio, GLib
 
-from fakes.fake_bluez import (ADAPTER, BATTERY, BOND, CANCELED, DEVICE, FAIL, PROPERTIES, REJECTED, WAIT, Changes,
-                              Clock, FakeBlueZ, StandInAgent, address_path, blob, call_agent)
+from fakes.fake_bluez import (ADAPTER, BATTERY, BOND, CANCELED, DEVICE, FAIL, PROPERTIES, REJECTED, WAIT, AgentCall,
+                              Changes, Clock, FakeBlueZ, StandInAgent, address_path, blob, call_agent)
 from fakes.fake_inputplumber import PrivateBus
 from fakes.fake_upower import activatable_bus_config
 from fakes.loop import pump
@@ -306,6 +306,35 @@ class BusCase(unittest.TestCase):
 
         with mock.patch.object(Gio.DBusConnection, "call", spy):
             yield seen
+
+
+class FakeBlueZTest(BusCase):
+    """The fake itself, where the tests rely on it behaving like BlueZ 5.87."""
+
+    def cancel_pairing(self, fake, path) -> AgentCall:
+        record = AgentCall("CancelPairing", ())
+
+        def done(bus, result, _data):
+            try:
+                bus.call_finish(result)
+            except GLib.Error as error:
+                record.error = Gio.DBusError.get_remote_error(error)
+            record.done = True
+
+        self.bus.connect().call(fake.unique_name, path, DEVICE, "CancelPairing", None, None, Gio.DBusCallFlags.NONE,
+                                3000, None, done, None)
+        self.until(lambda: record.done)
+        return record
+
+    def test_a_cancel_without_a_pairing_request_removes_keys_and_link_only_where_there_are_keys(self):
+        fake = self.fake()
+        keyless = fake.add_device(PAD, name="Pad", connected=True, signal=False)
+        bonded = fake.add_device(BUDS, name="Buds", paired=True, connected=True, signal=False)
+        self.assertEqual(self.cancel_pairing(fake, keyless).error, "org.bluez.Error.DoesNotExist")
+        self.assertEqual((fake.unpaired, fake.value(keyless, DEVICE, "Connected")), ([], True))   # NOT_PAIRED
+        self.assertEqual(self.cancel_pairing(fake, bonded).error, "org.bluez.Error.DoesNotExist")
+        self.assertEqual((fake.unpaired, fake.value(bonded, DEVICE, "Connected")), ([bonded], False))
+        self.assertEqual((fake.value(bonded, DEVICE, "Paired"), fake.value(bonded, DEVICE, "Bonded")), (True, True))
 
 
 class ReadingTest(BusCase):
