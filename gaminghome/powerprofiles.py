@@ -37,8 +37,10 @@ Files and the one process
   the service, each ``PropertiesChanged`` and each reply to a ``Set``, and they never decide whether a change worked.
 * Omarchy's ``omarchy-powerprofiles-set autodetect PROFILE``, found on ``PATH``, runs after a change succeeded,
   when the active profile is chosen again, and when a profile whose answer never came (it timed out, or the window
-  was hidden first) shows up in a reading after all, so that Omarchy keeps the choice for the current power source
-  (it switches to what it keeps at every plug and unplug). No shell, stdin closed, output dropped, its own directory
+  was hidden first) shows up in a reading after all, within ``LATE_ANSWER_MS`` of the request (later, the same
+  profile may as well be another program's choice, and the request is forgotten, as it is by ``dismiss()``), so
+  that Omarchy keeps the choice for the current power source (it switches to what it keeps at every plug and
+  unplug). No shell, stdin closed, output dropped, its own directory
   and ``/usr/local/bin:/usr/bin:/bin`` as ``PATH`` (never the inherited one: a version manager's shims there would
   give ``powerprofilesctl`` another Python), only ``HOME``, ``LANG``, ``XDG_RUNTIME_DIR``, ``XDG_STATE_HOME``,
   ``DBUS_SYSTEM_BUS_ADDRESS`` and ``OMARCHY_POWERPROFILES_STATE_DIR`` besides when they are set, and a process group
@@ -85,6 +87,7 @@ ACTIVE_PROFILE = "ActiveProfile"
 CALL_TIMEOUT_MS = 5_000         # a reading of the service
 SET_TIMEOUT_MS = 5_000          # a change: PPD answers in milliseconds
 HELPER_LIMIT_MS = 10_000        # Omarchy's command takes well under a second
+LATE_ANSWER_MS = SET_TIMEOUT_MS + 5_000     # how long after a request its profile still counts as its answer
 
 MAX_REPLY_BYTES = 64 * 1024     # PPD answers GetAll with about a kilobyte
 MAX_PROFILES = 8                # PPD knows three
@@ -263,6 +266,11 @@ class _Run:
         self.ended = False          # ended: another choice, or another profile active now
 
 
+def _boottime() -> float:
+    """Seconds on a clock that never goes back and keeps counting while the machine sleeps."""
+    return time.clock_gettime(time.CLOCK_BOOTTIME)
+
+
 def _timeout_add(milliseconds, callback):
     def fire():
         callback()
@@ -292,15 +300,17 @@ class PowerProfiles:
 
     ``on_change`` is called on the main loop after ``snapshot`` changed. The keyword arguments replace the system in
     tests: ``connection`` the system bus, ``schedule(milliseconds, function)`` and ``cancel(token)`` the timers,
-    ``find_helper()`` and ``run_helper(argv, environment, on_exit)`` how Omarchy's command is found and run, and
-    ``sysfs_root`` where the kernel's files are.
+    ``find_helper()`` and ``run_helper(argv, environment, on_exit)`` how Omarchy's command is found and run,
+    ``sysfs_root`` where the kernel's files are, and ``clock()`` the seconds that tell a late answer from a later
+    coincidence.
     """
 
     def __init__(self, on_change, *, connection: Gio.DBusConnection | None = None, schedule=_timeout_add,
-                 cancel=GLib.source_remove, find_helper=None, run_helper=None, sysfs_root: str = SYSFS_ROOT):
+                 cancel=GLib.source_remove, find_helper=None, run_helper=None, sysfs_root: str = SYSFS_ROOT,
+                 clock=_boottime):
         self._on_change = on_change
         self._connection = connection
-        self._schedule, self._cancel = schedule, cancel
+        self._schedule, self._cancel, self._clock = schedule, cancel, clock
         self._find_helper, self._run_helper = find_helper, run_helper
         self._root = sysfs_root
         self._snapshot = self._announced = Snapshot()
@@ -319,6 +329,8 @@ class PowerProfiles:
         self._live = False       # the service was read in this visit, from the current owner
         self._armed = False      # a request of this visit succeeded: another program's change is worth a note
         self._unconfirmed = ""   # asked for, and its answer never came (timed out, or on its way at stop())
+        self._unconfirmed_until = 0.0       # after this (``clock()``) its profile is no answer to it any more
+        self._sent_at = 0.0                 # when the last request was sent (``clock()``)
         self._helper: _Run | None = None    # the run of Omarchy's command whose outcome is still worth a note
         self._runs: set[_Run] = set()       # every run of it that has not been reaped yet
 
@@ -360,7 +372,7 @@ class PowerProfiles:
         watch, self._watch = self._watch, None
         self._started = False
         if self._snapshot.pending:
-            self._unconfirmed = self._snapshot.pending   # if the next visit finds it done, it is remembered then
+            self._expect(self._snapshot.pending)     # if the next visit finds it done in time, it is remembered then
         self._visit += 1
         self._forget_owner()
         self._armed = False
@@ -474,7 +486,7 @@ class PowerProfiles:
         first, self._live = not self._live, fields is not None
         changes = _service(ERROR) if fields is None else {**_service(READY), **fields}
         if fields is not None:
-            if self._unconfirmed and fields["active"] == self._unconfirmed:
+            if self._late_answer(fields["active"]):
                 self._confirm(changes)
             elif first:
                 self._unconfirmed = ""                # it did not take, or did not stay
@@ -509,10 +521,22 @@ class PowerProfiles:
         """What a change of the active profile announced by the service means for the requests of this visit."""
         if self._snapshot.pending:
             return
-        if self._unconfirmed and active == self._unconfirmed:
+        if self._late_answer(active):
             self._confirm(changes)
         elif self._end_outdated_runs(active) or self._armed:
             changes["note"] = CHANGED_ELSEWHERE
+
+    def _expect(self, profile: str):
+        """``profile`` was asked for and its answer never came. Shown soon enough, it counts as that answer."""
+        self._unconfirmed = profile
+        self._unconfirmed_until = self._sent_at + LATE_ANSWER_MS / 1000
+
+    def _late_answer(self, active: str) -> bool:
+        """Whether ``active`` answers a request whose answer never came: its profile, within ``LATE_ANSWER_MS`` of
+        it. Later the same profile may as well be another program's choice, and the request is forgotten."""
+        if self._unconfirmed and self._clock() > self._unconfirmed_until:
+            self._unconfirmed = ""
+        return bool(self._unconfirmed) and active == self._unconfirmed
 
     def _confirm(self, changes: dict):
         """A request whose answer never came shows up after all: its time-out goes, and it is remembered like any
@@ -544,6 +568,7 @@ class PowerProfiles:
             self._remember(profile)
         else:
             self._end_helper()                        # its choice no longer stands: it must not set it again
+            self._sent_at = self._clock()
             if self._call(OBJECT_PATH, PROPERTIES_IFACE, "Set",
                           GLib.Variant("(ssv)", (INTERFACE, ACTIVE_PROFILE, GLib.Variant("s", profile))), "()",
                           SET_TIMEOUT_MS, self._on_set, profile):
@@ -575,7 +600,7 @@ class PowerProfiles:
             else:
                 changes["failure"] = Failure(code, profile)
                 if code == TIMEOUT:
-                    self._unconfirmed = profile       # it may still come, and is remembered then
+                    self._expect(profile)             # it may still come, and is remembered then
         self._update(**changes)
         if remember:
             self._remember(profile)
@@ -655,7 +680,7 @@ class PowerProfiles:
 
     @_guarded
     def dismiss(self):
-        self._armed = False
+        self._armed, self._unconfirmed = False, ""    # a request the user put aside is not taken up again
         self._update(failure=None, note="")
         self._announce()
 
