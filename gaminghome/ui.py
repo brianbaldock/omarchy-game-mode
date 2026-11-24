@@ -1126,8 +1126,9 @@ class HomeWindow(Gtk.ApplicationWindow):
         if inline:
             holder, image = self._bt_badge()
             part.append(holder)
+        # A pairing that has paired offers nothing to press: its words take the whole panel, in the middle of its height.
         text = label("", "gh-option-title" if inline else "gh-bt-question", wrap=True, max_chars=BT_WRAP_CHARS,
-                     hexpand=True, valign=Gtk.Align.CENTER)
+                     hexpand=True, valign=Gtk.Align.CENTER, vexpand=not block.controls)
         part.append(text)
         digits = []
         if block.code:
@@ -1142,7 +1143,7 @@ class HomeWindow(Gtk.ApplicationWindow):
                 digits.append(digit)
             part.append(code)
         actions = part if inline else hbox(12)
-        if not inline:
+        if not inline and block.controls:
             part.append(actions)
         buttons = {}
         for control in block.controls:
