@@ -2,7 +2,8 @@
 
 ``BluetoothSheet`` holds the window's Bluetooth source and what one visit to the sheet remembers: whether Search
 was pressed, which device asks to be forgotten, the digits typed on the pad. Every way out of the sheet ends in
-``leave``, which stops the search and abandons a pairing, so neither outlives the sheet. ``blocks`` describes the
+``leave``, which stops the search and gives up a pairing that asks something or has not paired the device yet, so
+neither outlives the sheet; a device paired already goes on to connect, as with Connect. ``blocks`` describes the
 sheet from top to bottom as plain data; each block has a stable key and each control a stable name that carries
 the device's id, so the window can update what it shows in place and keep the focus where it was.
 
@@ -148,10 +149,11 @@ def choose_focus(wanted: str | None, controls, first: str | None = None) -> str 
     """The control to focus after the sheet changed, or None when there is none to focus.
 
     ``controls`` are the sheet's controls in order, as ``(name, enabled)``. ``first`` is where a part that has just
-    appeared wants the focus to start (No for a number to compare, Cancel for a question); it wins over the control
-    that had the focus. Otherwise the focus stays on the control of the same name, even one that is disabled while
-    something runs: the window only dims it. When that control is gone, the focus goes to the failure's Dismiss, to
-    Search or to Close, or else to the first enabled control that neither forgets nor pairs a device.
+    appeared wants the focus to start (No for a number to compare, 1 on the digit pad, Cancel for any other question);
+    unless it is disabled, it wins over the control that had the focus. Otherwise the focus stays on the control that
+    had it, even one disabled while something runs (the window only dims it), so the focus is where the user left
+    it. When that control is gone, the focus goes to the failure's Dismiss, to Search or to Close, or else to the
+    first enabled control that neither forgets nor pairs a device.
     """
     enabled = {name: on for name, on in controls}
     if first and enabled.get(first):
@@ -354,7 +356,8 @@ class BluetoothSheet:
         self.sync()
 
     def leave(self) -> bool:
-        """The sheet goes away, whichever way: end the search and abandon a pairing. False when it was not open."""
+        """The sheet goes away, whichever way: end the search, and give up a pairing that can still be given up
+        (``abandonable``). False when it was not open."""
         if not self.visiting:
             return False
         self.visiting = False
