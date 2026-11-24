@@ -27,11 +27,21 @@ addressed to the unique name that owns ``org.bluez`` at that moment (never to th
   soon as the pairing step is over, however it ended. ``Device1.CancelPairing`` when the user cancels or the pairing
   times out, but only before the bond is made. BlueZ announces ``Bonded`` when it stores the keys and then looks up
   the device's services before it answers ``Pair()``; its pairing request is over by then, and BlueZ 5.87 answers a
-  ``CancelPairing`` without one by removing the new keys. So once the device is bonded the client sends nothing,
-  waits for ``Pair()`` (at most ``CALL_TIMEOUT_MS`` after a cancel) and reports ``CANCELED`` or ``TIMEOUT`` with
-  ``paired=True``: the bond stays and nothing more is done to the device. One race remains: a cancel in the few
-  milliseconds between BlueZ storing the keys and this client hearing ``Bonded`` still sends ``CancelPairing``; BlueZ
-  then removes the keys but keeps showing the device as paired, and it has to be forgotten and paired again.
+  ``CancelPairing`` without one by having the kernel delete the new keys and drop the link. So once the device is
+  bonded the client sends nothing, waits for ``Pair()`` (at most ``CALL_TIMEOUT_MS`` after a cancel) and reports
+  ``CANCELED`` or ``TIMEOUT`` with ``paired=True``: the bond stays and nothing more is done to the device. Two races
+  remain, each a few milliseconds wide and possible with any cancel. A ``CancelPairing`` that reaches BlueZ after its
+  pairing request has ended but before this client has heard ``Bonded`` has the kernel delete the new keys and drop
+  the link, yet ``Pair()`` succeeds and BlueZ goes on showing the device as paired and bonded: this client reports
+  ``paired=True``. One that reaches BlueZ while its request is still open but after the kernel has stored and
+  announced the keys makes ``Pair()`` fail with ``AuthenticationCanceled``, so this client reports no pairing, while
+  BlueZ still stores the announced keys and shows the device as bonded, and as paired once it has looked up the
+  device's services (a fresh read shows that at once). If the kernel's own pairing command was still open too, its
+  ``cancel_pair_device`` deletes the fresh keys (``hci_remove_link_key``, or ``smp_cancel_and_remove_pairing`` for LE)
+  and drops the link it made; if not, the keys stay and the device is paired after all. Where keys were deleted, the
+  kernel has none for the device until it is forgotten and paired again, or until bluetoothd restarts and loads the
+  keys it stored. A cancel during the trust step cannot take back the ``Trusted`` write already sent: the device stays
+  paired and trusted, and only the connection is not made.
   A device or adapter that goes away during a pairing: BlueZ answers ``Pair()`` before it announces the removal,
   ``AuthenticationCanceled`` while the link is up (``AUTH_FAILED``) and ``ConnectionAttemptFailed`` while the device
   is still being reached (``UNREACHABLE``). Once the bond is made it drops that answer instead, and the removal ends
@@ -1301,8 +1311,10 @@ class BlueZ:
         if op.kind == CONNECTING or op.stage == STAGE_CONNECT:
             self._abandon_connect(op)
         elif op.stage == STAGE_PAIR and not self._bonded(op):
-            # Before the agent answers: BlueZ then cancels its own pairing request, instead of failing it on the
-            # agent's answer and taking a CancelPairing that comes after as one without a request.
+            # Sent before the agent answers what waits, so that BlueZ ends its own pairing request with
+            # AuthenticationCanceled. The other order is harmless too, only less clean: BlueZ fails the pairing on the
+            # refused answer before any keys exist, and the late CancelPairing becomes an unpair that the kernel
+            # refuses with NOT_PAIRED before it would drop the link.
             self._cancel_pairing(op)
         if op.kind == PAIRING:
             # The agent ends here: what waits is answered Canceled, and anything BlueZ asks from now on, such as a
