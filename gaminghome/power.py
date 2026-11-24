@@ -2,10 +2,10 @@
 
 A power profile is one of the three that power-profiles-daemon (PPD) offers: power-saver, balanced and performance.
 On hardware that backs them (a firmware platform profile, the CPU's boost and energy preference) a profile changes
-more than a label: measured on one ROG Xbox Ally, on AC power with short synthetic loads, the chip drew about 6, 18
-and 24 W in power-saver, balanced and performance. On a machine where nothing backs a profile, PPD's placeholder
-driver changes nothing, and this module does not offer such a profile. The names are PPD's own, which are also
-Omarchy's and the desktop's, so there is nothing to translate between.
+more than a label: measured on one ROG Xbox Ally, on AC power with a six-minute synthetic load, the chip settled at
+about 6, 15 and 20 W in power-saver, balanced and performance. On a machine where nothing backs a profile, PPD's
+placeholder driver changes nothing, and this module does not offer such a profile. The names are PPD's own, which
+are also Omarchy's and the desktop's, so there is nothing to translate between.
 
 This module is the contract between the window (``ui.py``) and whatever supplies the profile: the PPD client
 (``powerprofiles.py``) in the app and a scripted stand-in in the tests. It holds plain data, a few pure helpers
