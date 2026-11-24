@@ -362,7 +362,10 @@ class BluetoothSheet:
 
     # -- controls
     def press(self, name: str) -> str | None:
-        """Do what the control of this name does. Returns the control to focus next when that is another one."""
+        """Do what the control of this name does. Returns the control to focus next when that is another one.
+        Nothing happens once the sheet has left: GTK may still deliver a click it was about to make."""
+        if not self.visiting:
+            return None
         snapshot = self.source.snapshot
         idle = snapshot.activity is None
         prompt = snapshot.prompt

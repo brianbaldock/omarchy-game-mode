@@ -252,6 +252,17 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(source.calls[-2:], [("scan", False), ("stop",)])
         self.assertFalse(visit.visiting)
 
+    def test_a_press_that_arrives_after_the_sheet_left_does_nothing(self):
+        source = world()
+        visit = opened(source)
+        source.add_device("Speaker", "speaker")
+        visit.leave()
+        calls = list(source.calls)
+        for name in (sheet.SEARCH, sheet.POWER, f"{sheet.CONNECT}2", f"{sheet.PAIR}4", f"{sheet.FORGET}3",
+                     sheet.RETRY, sheet.DISMISS):
+            self.assertIsNone(visit.press(name))
+        self.assertEqual((source.calls, visit.forgetting, visit.searched), (calls, 0, False))
+
     def test_what_a_visit_remembers_ends_with_it(self):
         source = world()
         visit = opened(source)
@@ -795,6 +806,31 @@ class WindowTest(unittest.TestCase):
         window.stop_status()
         self.assert_left(source)
         self.assertFalse(source.running)
+
+    def test_a_click_that_arrives_after_the_sheet_changed_or_went_away_is_dropped(self):
+        source = world()
+        window = self.stand_in(source)
+        shown, stale = mock.Mock(), mock.Mock()
+        shown.get_name.return_value = stale.get_name.return_value = sheet.SEARCH
+        window._bt_buttons = {sheet.SEARCH: shown}
+        self.window._on_bt_clicked(window, stale)                    # a button the sheet no longer shows
+        window.sheet = None
+        self.window._on_bt_clicked(window, shown)                    # the sheet has gone
+        self.assertNotIn(("scan", True), source.calls)
+        window.sheet = "bluetooth"
+        self.window._on_bt_clicked(window, shown)
+        self.assertIn(("scan", True), source.calls)
+
+    def test_leaving_takes_the_sheet_widgets_out_of_the_window(self):
+        # GTK calls a pending click off only when the button is unrealized, which removing it does.
+        source = world()
+        window = self.stand_in(source)
+        holder = mock.Mock()
+        window._bt_content = mock.Mock()
+        window._bt_content.get_ancestor.return_value = holder
+        window._leave_bluetooth()
+        holder.get_parent.return_value.remove.assert_called_once_with(holder)
+        self.assertIsNone(window._bt_content)
 
     def test_showing_the_window_starts_bluetooth(self):
         source = FakeBluetooth()

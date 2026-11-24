@@ -155,6 +155,24 @@ def press(window, name):
     check(clicked, f"pressing A on {name} did not click it")
 
 
+def settle(milliseconds=60):
+    """Run the main loop for a moment, as it runs between two presses."""
+    context, deadline = GLib.MainContext.default(), time.monotonic() + milliseconds / 1000
+    while time.monotonic() < deadline:
+        if not context.iteration(False):
+            time.sleep(0.005)
+
+
+def texts_in(widget):
+    """Every text that the labels under this widget hold, shown or not."""
+    found = [widget.get_text()] if isinstance(widget, Gtk.Label) else []
+    child = widget.get_first_child()
+    while child is not None:
+        found.extend(texts_in(child))
+        child = child.get_next_sibling()
+    return found
+
+
 def play(word, window, source):
     """Do in the open sheet what the scenario shows."""
     if word in SEARCHED:
@@ -271,16 +289,53 @@ def check_behaviour(word, language, window, source):
         window.build()
         check(source.calls.count(("cancel",)) > cancels and source.snapshot.activity is None,
               "building the window again during a pairing did not abandon it")
-    elif word in ("btpin", "btpasskey"):
+    elif word == "btpin":
         cancels = source.calls.count(("cancel",))
         window.set_visible(False)
         check(window.sheet is None, "hiding the window left the Bluetooth sheet open")
         check(source.calls.count(("cancel",)) > cancels and not source.running,
               "hiding the window during a pairing did not abandon it and stop Bluetooth")
         check(window._bluetooth.entry.digits == "", "the digits typed outlived the prompt")
+        check(not any("042" in text for text in texts_in(window)), "the digits typed stay in a hidden label")
         window.set_visible(True)
+    elif word == "btpasskey":
+        window.handle_action(core.MENU)
+        check(window.sheet is None and source.calls[-1] == ("cancel",), "Menu did not give up the pairing")
+        check(not any("042" in text for text in texts_in(window)), "the digits typed stay in a hidden label")
     if word != "btnone":
         check_exits(window, source)
+        check_late_clicks(window, source)
+
+
+def check_late_clicks(window, source):
+    """GTK clicks a button 250 ms after A or Enter. A click on its way when the sheet goes must do nothing: A then
+    B on Search, A then Menu on Pair, Enter then Escape on Search."""
+    if source.snapshot.state != bt.ON:
+        return
+
+    def attempt(name, press_it, close, sent):
+        window.open_bluetooth()
+        check(window._focus_by_name(name), f"{name} cannot be selected")
+        press_it()
+        close()
+        check(window.sheet is None, "the sheet did not close")
+        after = len(source.calls)
+        settle(400)
+        late = [call for call in source.calls[after:] if call[:len(sent)] == sent]
+        check(not late and not source.snapshot.scanning and source.snapshot.activity is None,
+              f"{late or sent} reached Bluetooth after the sheet had closed")
+
+    if source.snapshot.scanning:
+        source.scan(False)
+    attempt(sheet.SEARCH, lambda: window.handle_action(core.ACTIVATE), lambda: window.handle_action(core.BACK),
+            ("scan", True))
+    nearby = source.add_device("Late Speaker", "speaker")
+    window.open_bluetooth()
+    press(window, sheet.SEARCH)                                     # the nearby list shows once Search was pressed
+    attempt(f"{sheet.PAIR}{nearby}", lambda: window.handle_action(core.ACTIVATE),
+            lambda: window.handle_action(core.MENU), ("pair", nearby))
+    attempt(sheet.SEARCH, lambda: window.get_focus().activate(),
+            lambda: window._on_key(None, Gdk.KEY_Escape, 0, Gdk.ModifierType(0)), ("scan", True))
 
 
 def check_exits(window, source):

@@ -893,8 +893,15 @@ class HomeWindow(Gtk.ApplicationWindow):
 
     def _leave_bluetooth(self):
         """Every way the Bluetooth sheet goes away ends here: B, Close, Escape and Menu, another sheet taking its
-        place, the window being built again and the window being hidden. Its search and its pairing end with it."""
-        self._bt_content, self._bt_buttons, self._bt_focus = None, {}, None
+        place, the window being built again and the window being hidden. Its search and its pairing end with it.
+
+        Its widgets go as well. GTK clicks a button a moment after A or Enter and calls that off only when the
+        button is unrealized, so a hidden sheet could still act; and nothing typed on the pad stays in a label.
+        """
+        content, self._bt_content, self._bt_buttons, self._bt_focus = self._bt_content, None, {}, None
+        holder = content.get_ancestor(Gtk.ScrolledWindow.__gtype__) if content is not None else None
+        if holder is not None and holder.get_parent() is not None:
+            holder.get_parent().remove(holder)
         self._bluetooth.leave()
 
     def _render_bluetooth(self, focus=None, opening=False):
@@ -979,6 +986,8 @@ class HomeWindow(Gtk.ApplicationWindow):
 
     def _on_bt_clicked(self, button):
         name = button.get_name()
+        if self.sheet != "bluetooth" or self._bt_buttons.get(name) is not button:
+            return                      # a click that GTK delivers after the sheet changed or went away
         if name == CLOSE:
             self.close_sheet()
         else:
