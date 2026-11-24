@@ -226,7 +226,7 @@ def play(word, window, source):
 
 FIRST_FOCUS = {"bt": sheet.SEARCH, "btoff": sheet.POWER, "bterror": sheet.RETRY, "btforget": f"{sheet.FORGET_NO}3",
                "btconfirm": sheet.NO, "btcode": sheet.CANCEL, "btpin": sheet.PAD_DONE, "btpasskey": sheet.PAD_DONE,
-               "btpairing": sheet.CANCEL, "btfail": f"{sheet.CONNECT}2", "btpaired": sheet.SEARCH}
+               "btpairing": sheet.CLOSE, "btfail": f"{sheet.CONNECT}2", "btpaired": sheet.SEARCH}
 
 
 def scroll_to_end(window):
@@ -305,12 +305,19 @@ def check_behaviour(word, language, window, source):
         check(window.sheet == "bluetooth" and window.selected_name() == f"{sheet.FORGET}3",
               "B did not take the question back and return to Forget")
         check(("forget", 3) not in source.calls, "a device was forgotten without being confirmed")
-    elif word in ("btconfirm", "btcode", "btpairing"):
+    elif word in ("btconfirm", "btcode"):
         cancels = source.calls.count(("cancel",))
         window.sheet = None                                         # as a change of language does
         window.build()
         check(source.calls.count(("cancel",)) > cancels, "building the window again during a pairing did not abandon it")
         source.finish_cancel()                                      # BlueZ answers the cancel
+        settle()
+    elif word == "btpairing":
+        window.sheet = None                                         # paired already: it connects as Connect does
+        window.build()
+        check(("cancel",) not in source.calls and source.snapshot.activity is not None,
+              "building the window again cut short a pairing that was connecting")
+        source.finish()
         settle()
     elif word == "btpin":
         cancels = source.calls.count(("cancel",))

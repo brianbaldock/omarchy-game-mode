@@ -62,6 +62,14 @@ def pairing(snapshot: bt.Snapshot) -> bool:
     return snapshot.prompt is not None or (activity is not None and activity.kind == bt.PAIRING)
 
 
+def abandonable(snapshot: bt.Snapshot) -> bool:
+    """The pairing can still be given up: it asks something, or the device is not paired yet. Once it is, the
+    pairing trusts and connects it as Connect does, and a Connect is never cut short when the sheet goes."""
+    activity = snapshot.activity
+    return snapshot.prompt is not None or (activity is not None and activity.kind == bt.PAIRING
+                                           and activity.stage in ("", bt.STAGE_PAIR))
+
+
 class DigitEntry:
     """The digits typed on the pad for one PIN or passkey prompt: a string, so leading zeros stay."""
 
@@ -339,9 +347,9 @@ class BluetoothSheet:
         self.forgetting = 0
         self._power_target = None
         self.entry.clear()
-        busy_pairing = pairing(self.source.snapshot)
+        give_up = abandonable(self.source.snapshot)
         self.source.scan(False)
-        if busy_pairing:
+        if give_up:
             self.source.cancel()
         return True
 
@@ -414,7 +422,7 @@ class BluetoothSheet:
         """B, or Escape: close a question first and give up a pairing next. (False, None) lets the sheet close."""
         if self.forgetting:
             return True, self.press(f"{FORGET_NO}{self.forgetting}")
-        if pairing(self.source.snapshot):
+        if abandonable(self.source.snapshot):
             self.press(CANCEL)
             return True, None
         return False, None
@@ -558,6 +566,8 @@ class BluetoothSheet:
         else:
             name = called(prompt.device, prompt.name) if prompt is not None else t("bluetooth.unnamed")
             words = "bluetooth.pairingWith"
+        if not abandonable(snapshot):
+            return [Question("pairing", text=t(words, name=name))]     # paired: it connects as Connect does
         return [Question("pairing", (cancel,), first=CANCEL, text=t(words, name=name))]
 
     def _pad_controls(self, t) -> tuple[Control, ...]:

@@ -229,6 +229,18 @@ class LifecycleTest(unittest.TestCase):
                 self.assertEqual(source.calls[-2:], [("scan", False), ("cancel",)])
                 self.assertIsNone(source.snapshot.activity)
 
+    def test_leaving_lets_a_pairing_that_has_paired_go_on_trusting_and_connecting(self):
+        for stage in (bt.STAGE_TRUST, bt.STAGE_CONNECT):
+            with self.subTest(stage=stage):
+                source = world()
+                visit = opened(source)
+                visit.press(f"{sheet.PAIR}{source.add_device('Speaker', 'speaker')}")
+                source.stage(stage)
+                self.assertEqual(visit.back(), (False, None))         # B closes the sheet instead
+                visit.leave()
+                self.assertNotIn(("cancel",), source.calls)
+                self.assertEqual(source.snapshot.activity.stage, stage)
+
     def test_leaving_lets_a_connection_go_on(self):
         source = world()
         visit = opened(source)
@@ -551,6 +563,15 @@ class BlocksTest(unittest.TestCase):
         self.assertFalse(controls(blocks)[sheet.POWER])
         source.stage(bt.STAGE_TRUST)
         self.assertEqual(self.blocks(source, visit)[2].text, "Connecting to Speaker…")
+
+    def test_a_pairing_that_has_paired_offers_no_cancel(self):
+        source = world()
+        visit = opened(source)
+        visit.press(f"{sheet.PAIR}{source.add_device('Speaker', 'speaker')}")
+        self.assertIn(sheet.CANCEL, controls(self.blocks(source, visit)))
+        source.stage(bt.STAGE_CONNECT)
+        blocks = self.blocks(source, visit)
+        self.assertEqual((blocks[2].text, set(controls(blocks))), ("Connecting to Speaker…", {sheet.POWER, sheet.CLOSE}))
 
     def test_a_number_to_compare_starts_on_no_and_promises_nothing_about_who_the_device_is(self):
         source = world()
