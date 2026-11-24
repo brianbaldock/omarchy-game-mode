@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import locale
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # Added to the time left in the minute, so a timer lands just after the next minute begins and never just before it.
 SLACK_MS = 30
@@ -45,14 +45,23 @@ class ClockStyle:
 
     @classmethod
     def from_formats(cls, time_format="", twelve_hour_format="", am="", pm="") -> "ClockStyle":
-        """Read the style off a locale's formats (``T_FMT``, ``T_FMT_AMPM``) and am/pm markers."""
+        """Read the style off a locale's formats (``T_FMT``, ``T_FMT_AMPM``) and am/pm markers.
+
+        The marker's place is the one of the locale's 12-hour time even when its usual time is a 24-hour one, since
+        the hours can be asked to count to 12 (see ``counting``).
+        """
         twelve = uses_twelve_hour(time_format)
-        if "r" in conversions(time_format):
-            time_format = twelve_hour_format or DEFAULT_TWELVE_HOUR_FORMAT
-        order = conversions(time_format)
+        layout = time_format
+        if not twelve or "r" in conversions(time_format):
+            layout = twelve_hour_format or DEFAULT_TWELVE_HOUR_FORMAT
+        order = conversions(layout)
         marker, hour = _first(order, _MARKER), _first(order, _HOUR_12)
         return cls(twelve_hour=twelve, am=(am or "").strip() or "AM", pm=(pm or "").strip() or "PM",
-                   marker_first=twelve and marker is not None and hour is not None and marker < hour)
+                   marker_first=marker is not None and hour is not None and marker < hour)
+
+    def counting(self, twelve_hour: bool | None) -> "ClockStyle":
+        """This style with the hours counted to 12 (True) or to 24 (False); unchanged when None."""
+        return self if twelve_hour is None else replace(self, twelve_hour=twelve_hour)
 
 
 def system_style() -> ClockStyle:

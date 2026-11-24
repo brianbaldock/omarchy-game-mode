@@ -127,6 +127,16 @@ class DocsTest(unittest.TestCase):
         self.assertNotIn("nothing is polled", section)
         self.assertIn("hold no timer, no subscription and no call", " ".join(CONTRIBUTING.split()))
 
+    def test_the_clock_text_says_where_its_hours_come_from(self):
+        section = README[README.index("## Clock and battery"):README.index("## Controls")]
+        for fact in ("counts hours the way the Omarchy bar does", "Game Mode has no setting for it",
+                     "`~/.config/omarchy/shell.json`", "`$OMARCHY_PATH/config/omarchy/shell.json`",
+                     "`/usr/share/omarchy`", "`formatAlt` is not looked at", "the system's locale decides",
+                     "nothing watches them"):
+            self.assertIn(fact, section)
+        self.assertNotIn("the way the system's locale does", section)
+        self.assertIn("reading the bar's `shell.json`", CONTRIBUTING)
+
     @needs_site
     def test_website_says_the_clock_ticks_only_while_home_is_shown(self):
         self.assertNotIn("Nothing polls in the background", SITE)

@@ -4,6 +4,9 @@ The window starts this when it is mapped and stops it when it is unmapped, and b
 source of wake-ups these two chips have: one timer that fires when the minute changes, and the battery's UPower
 watch and subscription. A hidden Gaming Home holds none of them. The window repaints its labels through the two
 callbacks and never from a full ``refresh()``.
+
+Each start also reads Omarchy's ``shell.json`` once, to count the clock's hours the way the bar does. Nothing
+watches those files: a change in the bar's setting shows the next time Gaming Home is shown.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ import datetime
 
 from gi.repository import GLib
 
-from . import clock
+from . import barclock, clock
 from .battery import SYSFS_ROOT, Battery, read_sysfs
 from .upower import STATE_ABSENT, STATE_FAILED, STATE_READY, UPowerClient
 
@@ -96,12 +99,17 @@ class HeaderStatus:
     ``on_clock(text, date)`` and ``on_battery(battery)`` repaint the two chips; ``battery`` is None to hide it.
     Everything that can wake the process exists only between ``start()`` and ``stop()``. The remaining
     arguments replace the system in tests: the wall clock, the locale's conventions, the timers, the battery.
+
+    The clock counts its hours as the Omarchy bar does when the bar's files say how (``bar_hours`` returns True
+    for 12, False for 24, None when they do not) and as the locale does otherwise. ``style`` pins the whole style
+    and then nothing is read. ``bar_hours`` is called once per ``start()``, never at construction.
     """
 
     def __init__(self, on_clock, on_battery, make_battery=BatteryMonitor, now=local_now, style=None,
-                 schedule=_timeout_add, cancel=GLib.source_remove):
+                 schedule=_timeout_add, cancel=GLib.source_remove, bar_hours=barclock.bar_twelve_hour):
         self._on_clock, self._on_battery = on_clock, on_battery
         self._now = now
+        self._pinned, self._bar_hours = style, bar_hours
         self._style = style or clock.system_style()
         self.monitor = make_battery(self._battery_changed)
         self._ticker = clock.MinuteTicker(self._tick, now, schedule, cancel)
@@ -117,6 +125,8 @@ class HeaderStatus:
 
     def start(self):
         """The window is shown: look at the battery and the clock now, and again whenever they change."""
+        if self._pinned is None:
+            self._style = clock.system_style().counting(self._bar_hours())
         self.monitor.start()
         self._ticker.start()
 

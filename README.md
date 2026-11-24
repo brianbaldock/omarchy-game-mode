@@ -53,12 +53,23 @@ hidden behind it. Both are for looking at: neither can be selected or clicked, a
 is part of controller navigation. They are drawn in Gaming Home only, not over a running
 game.
 
-- **Clock.** Hour and minute, no seconds. It counts hours the way the system's locale does
-  and there is no setting for it: `en_US` has a 12-hour clock (`9:41 PM`), `de_DE` a
-  24-hour one (`21:41`). The tooltip gives the weekday and the date as the system locale
-  writes them (`Monday, 11/23/2026` in `en_US`, `Montag, 23.11.2026` in `de_DE`). Those
-  words and their order come from the system locale, not from the language chosen in
-  Settings.
+- **Clock.** Hour and minute, no seconds. It counts hours the way the Omarchy bar does,
+  and Game Mode has no setting for it. The bar's clock is an entry of Omarchy's
+  `shell.json` (`{"id": "omarchy.clock", "format": "dddd HH:mm", ...}`, wherever the file
+  has it), and its `format` decides: `HH:mm` and `H:mm` count to 24, `h:mm AP` and
+  `hh:mm ap` to 12. Text in single quotes is not read as a format, and the bar's
+  `formatAlt` is not looked at.
+- **Which file.** Game Mode reads the user's `~/.config/omarchy/shell.json` first (under
+  `$XDG_CONFIG_HOME` when that is set), then Omarchy's packaged default,
+  `$OMARCHY_PATH/config/omarchy/shell.json` (`/usr/share/omarchy` when `OMARCHY_PATH` is
+  not set). A file that is missing, cannot be read, is not what it should be or has no
+  clock format with an hour in it is passed over, and when neither file says, the system's
+  locale decides: `en_US` has a 12-hour clock (`9:41 PM`), `de_DE` a 24-hour one
+  (`21:41`). The files are only read, each time Gaming Home is shown, and nothing watches
+  them: a change of the bar's format shows the next time Gaming Home is shown.
+- **Date.** The clock's tooltip gives the weekday and the date as the system locale writes
+  them (`Monday, 11/23/2026` in `en_US`, `Montag, 23.11.2026` in `de_DE`). Those words and
+  their order come from the system locale, not from the language chosen in Settings.
 - **Battery.** An icon filled to the charge, and the percentage (`78%`). A bolt and a
   green icon mean it is charging, a green icon alone that it is full. While the battery is
   in use the chip turns amber at 20 % or less and red at 10 % or less. The tooltip names
@@ -87,20 +98,26 @@ game.
 
 How far this has been checked:
 
-- **Automated tests:** the 12-hour and 24-hour decision from locale formats, noon and
-  midnight, and the minute-boundary delay (including a change of offset); UPower's state
-  codes, the percentage, the 20 % and 10 % edges, no battery, a UPS (the battery is then
-  read from sysfs) and garbled properties; sysfs layouts like the ROG Xbox Ally's, with a
-  controller, USB ports and an empty bay ignored, several batteries and unreadable files;
-  the UPower client against a fake on a private bus, including that it sends nothing but
-  reads, that watching for UPower never starts it (on a bus where it could be started)
-  and that nothing is subscribed or asked while it is stopped; the timer's life across
-  showing, hiding, rebuilding the widgets and a late timer after a suspend. Every string
-  exists in the seven languages.
+- **Automated tests:** how the bar's Qt clock formats count hours (with and without AM/PM,
+  quoted text, `formatAlt` ignored), the clock entry wherever it sits in `shell.json`,
+  files that are missing, unreadable, garbled, too large or not files at all, and the
+  order of the user's file, Omarchy's default and the locale; the 12-hour and 24-hour
+  decision from locale formats, noon and midnight, and the minute-boundary delay
+  (including a change of offset); UPower's state codes, the percentage, the 20 % and
+  10 % edges, no battery, a UPS (the battery is then read from sysfs) and garbled
+  properties; sysfs layouts like the ROG Xbox Ally's, with a controller, USB ports and an
+  empty bay ignored, several batteries and unreadable files; the UPower client against a
+  fake on a private bus, including that it sends nothing but reads, that watching for
+  UPower never starts it (on a bus where it could be started) and that nothing is
+  subscribed or asked while it is stopped; the timer's life across showing, hiding,
+  rebuilding the widgets and a late timer after a suspend. Every string exists in the
+  seven languages.
 - **Checked on an ASUS ROG Xbox Ally (RC73YA), read-only; nothing was pressed or
   unplugged:** UPower 1.91.5 reported its display device and Game Mode's client read it.
   The sysfs entries are an `ACAD` adapter, `BAT1` and two USB ports, and only `BAT1` is
-  taken for a battery. The header was rendered with GTK Broadway in English and Arabic, in
+  taken for a battery. Omarchy's packaged default `shell.json` there has the bar's clock
+  at `dddd HH:mm`, and with it the header showed `21:41` although the locale of the
+  device counts to 12. The header was rendered with GTK Broadway in English and Arabic, in
   each of the states discharging, charging, low, critical, full and no battery. In a real
   window the timer, the UPower watch and its subscription existed while it was shown and
   were gone once it was hidden, and an update that changed nothing visible drew no frame.
@@ -108,10 +125,12 @@ How far this has been checked:
   showed the real battery, sysfs was read again on the minute tick and not while hidden.
 - **Not tested on hardware:** plugging in or unplugging the charger, a battery that really
   runs down to 20 % and 10 %, UPower's reports during a charge, suspend and resume or a
-  change of time zone while Gaming Home is shown, a 24-hour or non-English system locale
-  on the device (only `en_US` is installed there), a machine that really has no UPower
-  (its absence was only simulated), and how Hyprland treats a Gaming Home that stays
-  mapped behind another window.
+  change of time zone while Gaming Home is shown, a bar clock set to a 12-hour format in
+  the user's own `shell.json` (only the packaged default was read on the device, the
+  user's file only in tests), a non-English system locale on the device (only `en_US` is
+  installed there), a machine with a UPS next to the battery, a machine that really has
+  no UPower (its absence was only simulated), and how Hyprland treats a Gaming Home that
+  stays mapped behind another window.
 
 ## Controls
 

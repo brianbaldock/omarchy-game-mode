@@ -67,8 +67,23 @@ class StyleTest(unittest.TestCase):
         # %r stands for the 12-hour format the locale names separately; without a name it is the POSIX one
         self.assertTrue(ClockStyle.from_formats("%r", "%p %I:%M:%S").marker_first)
         self.assertFalse(ClockStyle.from_formats("%r", "").marker_first)
-        self.assertFalse(ClockStyle.from_formats(**DE_DE).marker_first)         # 24 hours: no marker at all
+        # A locale that counts to 24 has a 12-hour layout too, for the day the hours are asked to count to 12.
+        self.assertFalse(ClockStyle.from_formats(**DE_DE).marker_first)         # it has none: the POSIX one
+        self.assertTrue(ClockStyle.from_formats(**JA_JP).marker_first)          # its 12-hour layout leads with it
+        self.assertFalse(ClockStyle.from_formats(**EN_GB).marker_first)
 
+    def test_the_hours_can_be_asked_to_count_otherwise_than_the_locale_does(self):
+        german, american = ClockStyle.from_formats(**DE_DE), ClockStyle.from_formats(**EN_US)
+        self.assertIs(german.counting(None), german)                            # no answer: the locale decides
+        self.assertIs(american.counting(None), american)
+        self.assertEqual(format_time(at(21, 41), german), "21:41")
+        self.assertEqual(format_time(at(21, 41), german.counting(True)), "9:41 PM")    # AM and PM as the fallback
+        self.assertEqual(format_time(at(21, 41), american), "9:41 PM")
+        self.assertEqual(format_time(at(21, 41), american.counting(False)), "21:41")
+        self.assertEqual(format_time(at(0, 5), american.counting(False)), "00:05")
+        self.assertEqual(format_time(at(21, 41), ClockStyle.from_formats(**JA_JP).counting(True)), "午後 9:41")
+        self.assertEqual(format_time(at(21, 41), ClockStyle.from_formats(**KO_KR).counting(False)), "21:41")
+        self.assertEqual((american.counting(False).am, american.counting(False).pm), ("AM", "PM"))
     def test_markers_that_the_locale_leaves_empty_fall_back_to_am_and_pm(self):
         style = ClockStyle.from_formats(time_format="%r", am="", pm="  ")
         self.assertEqual((style.am, style.pm), ("AM", "PM"))

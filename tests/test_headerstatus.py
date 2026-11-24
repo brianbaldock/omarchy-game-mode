@@ -7,6 +7,9 @@ plus one test that uses GLib's own timers to prove that a stopped timer is reall
 
 import ast
 import importlib
+import inspect
+import json
+import os
 import shutil
 import unittest
 from datetime import datetime
@@ -19,8 +22,9 @@ from gi.repository import GLib
 from fakes.clockwork import Timers, Wall, posix_time
 from fakes.fake_upower import StubBus, StubClient
 from fakes.loop import pump
+from fakes.omarchy import shell
 from fakes.rc73ya import rc73ya, rc73ya_tree
-from gaminghome import headerstatus
+from gaminghome import barclock, headerstatus
 from gaminghome.battery import CHARGING, DISCHARGING, Battery
 from gaminghome.clock import SLACK_MS, ClockStyle
 from gaminghome.headerstatus import BatteryMonitor, HeaderStatus
@@ -29,6 +33,14 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRATCH = Path(__file__).resolve().parent / "scratch" / "headerstatus"
 EVENING = datetime(2026, 11, 23, 21, 41, 7, 250_000)
 NOTHING_HELD = {"timers": 0, "watches": 0, "subscriptions": 0, "calls": 0}
+
+
+def setUpModule():
+    # Whatever reads Omarchy's files by accident finds these empty directories, never the developer's own files.
+    empty = {"XDG_CONFIG_HOME": str(SCRATCH / "no-config"), "OMARCHY_PATH": str(SCRATCH / "no-omarchy")}
+    patched = mock.patch.dict(os.environ, empty)
+    patched.start()
+    unittest.addModuleCleanup(patched.stop)
 
 
 class ScriptedClient:
@@ -270,6 +282,129 @@ class HeaderStatusTest(unittest.TestCase):
                                    schedule=self.timers.schedule, cancel=self.timers.cancel)
         self.status.start()
         self.assertEqual(self.clocks[-1][0], "21:41")
+
+
+class BarHoursTest(unittest.TestCase):
+    """The clock counts its hours as the Omarchy bar does when the bar's files say, and as the locale does if not."""
+
+    def setUp(self):
+        self.enterContext(posix_time())
+        shutil.rmtree(SCRATCH / "bar", ignore_errors=True)
+        (SCRATCH / "bar").mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, SCRATCH / "bar", True)
+        self.wall, self.timers, self.clocks, self.monitor = Wall(EVENING), Timers(), [], None
+        self.locale = ClockStyle(twelve_hour=True)
+        self.enterContext(mock.patch.object(headerstatus.clock, "system_style", side_effect=lambda: self.locale))
+
+    def status(self, bar_hours, **options):
+        status = HeaderStatus(lambda text, _date: self.clocks.append(text), lambda _battery: None,
+                              make_battery=FakeMonitor, now=self.wall, schedule=self.timers.schedule,
+                              cancel=self.timers.cancel, bar_hours=bar_hours, **options)
+        self.addCleanup(status.stop)
+        return status
+
+    def test_the_bar_is_read_at_each_start_and_at_no_other_time(self):
+        reads = []
+        status = self.status(lambda: reads.append(1))
+        self.assertEqual(reads, [])                                   # building the window reads nothing
+        status.repaint()
+        status.refresh()
+        self.assertEqual(reads, [])
+        status.start()
+        self.assertEqual(len(reads), 1)
+        for minute in (42, 43, 44):
+            self.wall.moment = datetime(2026, 11, 23, 21, minute, 0, 20_000)
+            self.timers.fire()
+        status.repaint()
+        status.refresh()
+        status.stop()
+        self.assertEqual(len(reads), 1)                               # ticks, rebuilds, activation and hiding: none
+        status.start()
+        self.assertEqual(len(reads), 2)
+
+    def test_the_bar_decides_over_the_locale_in_both_directions(self):
+        self.locale = ClockStyle(twelve_hour=True)
+        self.status(lambda: False).start()
+        self.assertEqual(self.clocks[-1], "21:41")
+        self.locale = ClockStyle(twelve_hour=False)
+        self.status(lambda: True).start()
+        self.assertEqual(self.clocks[-1], "9:41 PM")
+
+    def test_without_an_answer_from_the_bar_the_locale_decides(self):
+        for twelve, text in ((True, "9:41 PM"), (False, "21:41")):
+            self.locale = ClockStyle(twelve_hour=twelve)
+            self.status(lambda: None).start()
+            self.assertEqual(self.clocks[-1], text)
+
+    def test_the_locales_markers_and_their_place_are_kept_when_the_bar_asks_for_12_hours(self):
+        self.locale = ClockStyle.from_formats(time_format="%H時%M分%S秒", twelve_hour_format="%p%I時%M分%S秒",
+                                              am="午前", pm="午後")
+        self.status(lambda: True).start()
+        self.assertEqual(self.clocks[-1], "午後 9:41")
+
+    def test_a_change_in_the_bar_shows_the_next_time_the_window_is_shown_and_not_before(self):
+        answer = [True]
+        status = self.status(lambda: answer[0])
+        status.start()
+        self.assertEqual(self.clocks[-1], "9:41 PM")
+        answer[0] = False                                             # the user changes the bar's setting
+        status.repaint()
+        status.refresh()
+        self.wall.moment = datetime(2026, 11, 23, 21, 42, 0, 20_000)
+        self.timers.fire()
+        self.assertEqual(self.clocks[-3:], ["9:41 PM", "9:41 PM", "9:42 PM"])      # still the old way while shown
+        status.stop()
+        status.start()
+        self.assertEqual(self.clocks[-1], "21:42")
+
+    def test_a_pinned_style_is_not_checked_against_the_bar(self):
+        def refuse():
+            raise AssertionError("the bar was read")
+
+        status = self.status(refuse, style=ClockStyle(twelve_hour=True))
+        status.start()
+        status.stop()
+        status.start()
+        self.assertEqual(self.clocks, ["9:41 PM", "9:41 PM"])
+
+    def test_reading_the_bar_arms_nothing_of_its_own(self):
+        status = self.status(lambda: False)
+        status.start()
+        self.assertEqual((len(self.timers.pending), len(self.timers.delays)), (1, 1))
+        status.stop()
+        self.assertEqual(self.timers.pending, {})
+        status.start()
+        self.assertEqual((len(self.timers.pending), len(self.timers.delays)), (1, 2))
+
+    def test_the_default_reader_is_the_one_that_follows_the_files_of_omarchys_shell(self):
+        parameters = inspect.signature(HeaderStatus).parameters
+        self.assertIs(parameters["bar_hours"].default, barclock.bar_twelve_hour)
+
+    def test_the_users_file_beats_the_default_and_the_default_beats_the_locale(self):
+        user, default = SCRATCH / "bar" / "user.json", SCRATCH / "bar" / "default.json"
+        status = self.status(lambda: barclock.bar_twelve_hour([user, default]))
+        self.locale = ClockStyle(twelve_hour=False)
+        default.write_text(json.dumps(shell("dddd HH:mm")), encoding="utf-8")
+        user.write_text(json.dumps(shell("h:mm AP")), encoding="utf-8")
+        status.start()
+        self.assertEqual(self.clocks[-1], "9:41 PM")                  # the user's 12 hours over the default's 24
+        user.unlink()
+        status.stop()
+        status.start()
+        self.assertEqual(self.clocks[-1], "21:41")                    # the default's 24 hours
+        default.write_text(json.dumps(shell("hh:mm ap")), encoding="utf-8")
+        status.stop()
+        status.start()
+        self.assertEqual(self.clocks[-1], "9:41 PM")
+        default.unlink()
+        self.locale = ClockStyle(twelve_hour=True)
+        status.stop()
+        status.start()
+        self.assertEqual(self.clocks[-1], "9:41 PM")                  # no file says: the locale's 12 hours
+        self.locale = ClockStyle(twelve_hour=False)
+        status.stop()
+        status.start()
+        self.assertEqual(self.clocks[-1], "21:41")                    # and its 24
 
 
 class WiredTest(unittest.TestCase):
