@@ -678,6 +678,7 @@ class BlueZ:
         if self._op is not None:
             self._end(UNAVAILABLE, unregister=False)    # nobody to unregister with
         if self._cancellable is not None:
+            # The epoch check in _on_reply drops these answers as well: cancelling only stops waiting for them.
             self._cancellable.cancel()
             self._cancellable = Gio.Cancellable()
         for subscription in self._subscriptions:
