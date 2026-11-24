@@ -93,6 +93,8 @@ class Runtime:
             return
         self._stopped = True
         self._cancel_timeout()
+        if self.window is not None:
+            self.window.stop_status()
         self.interpreter.set_nav_enabled(False)
         self.interpreter.reset()
         self.mapper.stop()
@@ -119,6 +121,11 @@ class Runtime:
         Gtk.StyleContext.remove_provider_for_display(Gdk.Display.get_default(), self.css)
         from .ui import load_css
         self.css = load_css(Gdk.Display.get_default(), settings_mod.theme_colors())
+
+    def header_status(self, on_clock, on_battery):
+        """The clock and battery of the Home header. The window starts it when it is mapped and stops it when it is not."""
+        from .headerstatus import HeaderStatus
+        return HeaderStatus(on_clock, on_battery)
 
     def _probe_installed(self) -> set[str]:
         return {a.id for a in self.catalog.apps if a.supported_on(self.arch) and self.availability.installed(a)}

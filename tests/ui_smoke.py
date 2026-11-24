@@ -2,12 +2,16 @@
 
 Usage (headless, touches no live desktop state):
   gtk4-broadwayd :7 &
-  GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 python3 tests/ui_smoke.py OUTDIR [lang] [WxH] [inputplumber]
+  GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 python3 tests/ui_smoke.py OUTDIR [lang] [WxH] [word ...]
 
-The optional last word renders a handheld where InputPlumber owns the
-controller: Game Mode reads its virtual gamepad and Settings says so.
+The words after the size choose what the fakes show. ``inputplumber`` renders a handheld where InputPlumber
+owns the controller: Game Mode reads its virtual gamepad and Settings says so. ``charging``, ``low``,
+``critical``, ``full`` and ``nobattery`` pick the battery (78 % and in use when none is named). The clock
+always reads 9:41 PM on a 12-hour clock, whatever the machine's locale; the battery and the clock are fixed
+fakes, so nothing reads UPower, sysfs or the time.
 """
 
+import datetime
 import os
 import sys
 from pathlib import Path
@@ -21,9 +25,21 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from gaminghome import application, core, settings as settings_mod  # noqa: E402
+from gaminghome.battery import CHARGING, DISCHARGING, FULL, Battery  # noqa: E402
 from gaminghome.catalog import Availability, load_catalog, machine_arch  # noqa: E402
+from gaminghome.clock import ClockStyle  # noqa: E402
+from gaminghome.headerstatus import HeaderStatus  # noqa: E402
 from gaminghome.i18n import Translator  # noqa: E402
 from gaminghome.inputplumber import Composite, InputPlumberClient  # noqa: E402
+
+BATTERIES = {
+    "": Battery(78, DISCHARGING, 28173),
+    "charging": Battery(64, CHARGING, 3900),
+    "low": Battery(15, DISCHARGING, 4380),
+    "critical": Battery(7, DISCHARGING, 1500),
+    "full": Battery(100, FULL),
+    "nobattery": None,
+}
 
 
 class Stub:
@@ -59,9 +75,27 @@ def demo_inputplumber():
     return client
 
 
+class FakeBattery:
+    """Stands in for the battery monitor: one fixed battery, reported when it starts, nothing read from the machine."""
+
+    def __init__(self, on_change, battery):
+        self.on_change, self.battery, self.running = on_change, battery, False
+
+    def start(self):
+        self.running = True
+        self.on_change()
+
+    def stop(self):
+        self.running = False
+
+    def poll(self):
+        pass
+
+
 class FakeRuntime(application.Runtime):
-    def __init__(self, app, language, inputplumber=False):
+    def __init__(self, app, language, inputplumber=False, battery=""):
         self.app = app
+        self.battery = BATTERIES[battery]
         self.settings = settings_mod.Settings(Path(os.devnull))
         self.settings.save = lambda: None
         self.catalog = load_catalog(application.DATA_DIR / "catalog.json")
@@ -85,14 +119,21 @@ class FakeRuntime(application.Runtime):
     def autostart_enabled(self):
         return False
 
+    def header_status(self, on_clock, on_battery):
+        return HeaderStatus(on_clock, on_battery, now=lambda: datetime.datetime(2026, 11, 23, 21, 41, 7),
+                            style=ClockStyle(twelve_hour=True),
+                            make_battery=lambda on_change: FakeBattery(on_change, self.battery))
+
 
 def main():
     out = Path(sys.argv[1])
     out.mkdir(parents=True, exist_ok=True)
     language = sys.argv[2] if len(sys.argv) > 2 else "en"
     width, height = (int(v) for v in (sys.argv[3] if len(sys.argv) > 3 else "1280x720").split("x"))
-    inputplumber = len(sys.argv) > 4 and sys.argv[4] == "inputplumber"
-    suffix = "-inputplumber" if inputplumber else ""
+    words = sys.argv[4:]
+    inputplumber = "inputplumber" in words
+    battery = next((word for word in words if word in BATTERIES), "")
+    suffix = "".join(f"-{word}" for word in words)
     app = Gtk.Application(application_id="io.github.brianbaldock.OmarchyGameModeSmoke")
 
     def shoot(window, name):
@@ -114,7 +155,7 @@ def main():
         Gtk.IconTheme.get_for_display(display).add_search_path(str(application.DATA_DIR / "icons"))
         from gaminghome.ui import HomeWindow, load_css
         load_css(display, settings_mod.theme_colors())
-        runtime = FakeRuntime(app, language, inputplumber)
+        runtime = FakeRuntime(app, language, inputplumber, battery)
         runtime._apply_direction()
         window = HomeWindow(app, runtime)
         runtime.window = window
