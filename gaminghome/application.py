@@ -129,6 +129,11 @@ class Runtime:
         from .headerstatus import HeaderStatus
         return HeaderStatus(on_clock, on_battery)
 
+    def bluetooth(self, on_change):
+        """The Bluetooth of the Home header and its sheet. The window starts it when it is mapped and stops it when it is not."""
+        from .bluez import BlueZ
+        return BlueZ(on_change)
+
     def power(self, on_change):
         """The power profile of the Home header. The window starts it when it is mapped and stops it when it is not."""
         from .powerprofiles import PowerProfiles
