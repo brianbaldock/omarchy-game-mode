@@ -731,6 +731,24 @@ class BlueZ:
         if len(adapters) > MAX_ADAPTERS:
             del adapters[max(adapters)]
 
+    def _make_room(self, properties: GLib.Variant) -> bool:
+        """Crowded: stop tracking the oldest unpaired device, so that one seen now can be tracked. Nameless devices
+        go first, since the window never lists them; a remembered or bonded device and the device of the operation
+        under way are kept, and a nameless newcomer does not push out a device with a name. False: no room."""
+        target = self._op.path if self._op is not None else None
+        candidates = [record for record in self._devices.values()
+                      if not record.paired and not record.bonded and record.path != target]
+        anonymous = [record for record in candidates if not record.view.name]
+        named = bluetooth.display_name(prop(properties, "Alias", "s") or "", prop(properties, "Name", "s") or "")
+        pool = anonymous or (candidates if named else [])
+        if not pool:
+            return False
+        victim = min(pool, key=lambda record: record.id)
+        del self._devices[victim.path]
+        self._paths.pop(victim.id, None)
+        self._overflow += 1                     # still there, no longer tracked
+        return True
+
     def _track(self, path: str) -> _Device:
         self._ids += 1
         record = _Device(self._ids, path)
@@ -786,7 +804,7 @@ class BlueZ:
         if record is None:
             if device is None:
                 return                          # another interface of a device that is not tracked
-            if len(self._devices) >= MAX_TRACKED:
+            if len(self._devices) >= MAX_TRACKED and not self._make_room(device):
                 self._overflow += 1
                 self._changed()
                 return

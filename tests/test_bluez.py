@@ -508,6 +508,48 @@ class ReadingTest(BusCase):
         self.assertEqual([device.name for device in bt.remembered(snapshot.devices)], ["Device 1990", "Device 1999"])
         self.assertEqual(snapshot.devices[2].name, "Device 0")                  # then the rest in the order read
 
+    def crowd(self, *devices) -> tuple[FakeBlueZ, bluez.BlueZ, list[str]]:
+        """A fake with these (name, paired) devices, read by a client that tracks four at most."""
+        patch = mock.patch.object(bluez, "MAX_TRACKED", 4)
+        patch.start()
+        self.addCleanup(patch.stop)
+        fake = self.fake()
+        paths = [fake.add_device(f"AA:BB:CC:DD:EE:{number:02X}", name=name, icon=None, paired=paired, signal=False)
+                 for number, (name, paired) in enumerate(devices, start=16)]
+        return fake, self.ready(), paths
+
+    def tracked(self, client) -> set[str]:
+        return {record.path for record in client._devices.values()}
+
+    def test_in_a_crowd_a_new_device_takes_the_place_of_the_oldest_nameless_one(self):
+        fake, client, paths = self.crowd(("Named", False), (None, False), (None, False), ("Kept", True))
+        self.assertEqual((self.tracked(client), client.snapshot.truncated), (set(paths), False))
+        newcomer = fake.add_device(PAD, name="Pad")
+        self.until(lambda: newcomer in self.tracked(client))
+        self.assertEqual(self.tracked(client), {paths[0], paths[2], paths[3], newcomer})   # not the oldest: named
+        self.assertIn("Pad", [device.name for device in bt.nearby(client.snapshot.devices)])
+        self.assertTrue(client.snapshot.truncated)                     # the one let go is still there
+        fake.remove_device(paths[1])                                   # and once it is gone, nothing is left out
+        self.until(lambda: not client.snapshot.truncated)
+
+    def test_in_a_crowd_remembered_devices_and_the_device_being_paired_stay(self):
+        fake, client, paths = self.crowd(("Remembered", True), ("Target", False), ("Old", False), ("Newer", False))
+        fake.hold = lambda call: call[3] == "RegisterAgent"            # the pairing stays where it is
+        client.pair(self.find(client, "Target").id)
+        self.until(lambda: fake.held)
+        newcomer = fake.add_device(PAD, name="Pad")
+        self.until(lambda: newcomer in self.tracked(client))
+        self.assertEqual(self.tracked(client), {paths[0], paths[1], paths[3], newcomer})
+        self.assertEqual(client.snapshot.activity.kind, bt.PAIRING)
+
+    def test_in_a_crowd_a_nameless_newcomer_does_not_push_out_a_named_device(self):
+        fake, client, paths = self.crowd(("One", False), ("Two", False), ("Three", False), ("Four", False))
+        nameless = fake.add_device(PAD, name=None, icon=None)
+        self.until(lambda: client.snapshot.truncated)
+        self.assertEqual(self.tracked(client), set(paths))
+        fake.remove_device(nameless)                                   # never tracked, and gone: nothing left out
+        self.until(lambda: not client.snapshot.truncated)
+
     def test_changes_nobody_shows_do_not_even_arm_a_timer(self):
         fake = self.fake()
         path = fake.add_device(PAD, name="Pad", signal=False)
