@@ -1263,8 +1263,9 @@ class BlueZ:
             # agent's answer and taking a CancelPairing that comes after as one without a request.
             self._cancel_pairing(op)
         if op.kind == PAIRING:
-            if op.agent is not None:
-                op.agent.withdraw()
+            # The agent ends here: what waits is answered Canceled, and anything BlueZ asks from now on, such as a
+            # pairing the device starts itself while this agent is the default one, finds nobody to answer it.
+            self._close_agent(op, unregister=True)
             self._prompt = None
         # BlueZ answers the call in flight soon after this; it is waited for at most this long.
         self._arm("op", CALL_TIMEOUT_MS, self._on_operation_timeout)

@@ -1210,6 +1210,23 @@ class PairingTest(PairingCase):
         self.assertEqual((self.sent(fake, client, "CancelPairing"), fake.unpaired), ([], []))
         self.assert_agent_gone(fake, client)
 
+    def test_after_a_cancel_the_agent_answers_nothing_more(self):
+        fake, client, device, path = self.pairing([BOND, WAIT])
+        client.pair(device)
+        self.until(lambda: client._devices[path].bonded)
+        name = self.name_of(client)
+        client.cancel()
+        self.until(lambda: name not in fake.agents)                            # unregistered at once
+        late = fake.ask("RequestConfirmation", 123456)                         # the device starts again
+        self.until(lambda: late.done)
+        self.assertEqual(late.error, "org.freedesktop.DBus.Error.UnknownMethod")
+        self.assertIsNone(client.snapshot.prompt)
+        self.assertEqual(client.snapshot.activity.kind, bt.PAIRING)            # Pair() is still to answer
+        fake.resume()
+        self.until(lambda: client.snapshot.activity is None)
+        self.assertEqual(client.snapshot.failure.code, bt.CANCELED)
+        self.assert_agent_gone(fake, client)
+
     def test_cancelling_after_the_bond_waits_for_bluez_at_most_a_while(self):
         fake, client, device, path = self.pairing([BOND, WAIT])
         client.pair(device)
