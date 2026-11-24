@@ -365,7 +365,7 @@ class ControlsTest(unittest.TestCase):
         visit = opened(source)
         visit.press(f"{sheet.PAIR}{source.add_device('Speaker', 'speaker')}")
         number = source.show_prompt(bt.CONFIRM, code="042917")
-        visit.press(sheet.NO)
+        visit.press(f"{sheet.NO}{number}")
         self.assertEqual(source.calls[-1], ("answer", number, False))
 
     def test_the_pad_answers_with_the_digits_as_a_string_and_forgets_them(self):
@@ -416,14 +416,15 @@ class ControlsTest(unittest.TestCase):
         self.assertEqual(visit.key("erase"), sheet.PAD_ERASE)       # Done is disabled again
         self.assertEqual(visit.entry.digits, "")
 
-    def test_an_answer_to_a_prompt_that_is_no_longer_asked_is_not_sent(self):
+    def test_yes_and_no_answer_the_prompt_shown_and_not_one_that_replaced_it(self):
         source = world()
         visit = opened(source)
         visit.press(f"{sheet.PAIR}{source.add_device('Speaker', 'speaker')}")
-        source.show_prompt(bt.CONFIRM, code="111111")
-        source.answer(source.snapshot.prompt.id, True)              # answered elsewhere meanwhile
-        visit.press(sheet.YES)
-        self.assertEqual(sum(call[0] == "answer" for call in source.calls), 1)
+        shown = source.show_prompt(bt.CONFIRM, code="111111")
+        replacing = source.show_prompt(bt.CONFIRM, code="222222")     # the device asks again as A is pressed
+        visit.press(f"{sheet.YES}{shown}")
+        self.assertEqual(source.calls[-1], ("answer", shown, True))
+        self.assertEqual(source.snapshot.prompt.id, replacing)          # still asked, not answered for the user
 
 
 class GivingUpTest(unittest.TestCase):
@@ -643,10 +644,10 @@ class BlocksTest(unittest.TestCase):
         source = world()
         visit = opened(source)
         visit.press(f"{sheet.PAIR}{source.add_device('Speaker', 'speaker')}")
-        source.show_prompt(bt.CONFIRM, code="042917")
+        number = source.show_prompt(bt.CONFIRM, code="042917")
         panel = self.blocks(source, visit)[2]
         self.assertEqual((panel.first, panel.code, [c.name for c in panel.controls]),
-                         (sheet.NO, "042917", [sheet.YES, sheet.NO]))
+                         (f"{sheet.NO}{number}", "042917", [f"{sheet.YES}{number}", f"{sheet.NO}{number}"]))
         self.assertEqual(panel.text, "Does this number match the one shown on Speaker?")
         for language in ("en", "de", "es", "fr", "pt-BR", "ja", "ar"):
             words = Translator(LOCALES, language)("bluetooth.confirm", name="X").casefold()

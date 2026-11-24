@@ -241,8 +241,8 @@ def check_shown(word, window, source):
     check(window.sheet == "bluetooth", f"the Bluetooth sheet is not open: {window.sheet!r}")
     focus = window.selected_name()
     check(focus in window._bt_buttons, f"the focus is outside the sheet: {focus!r}")
-    if word in FIRST_FOCUS:
-        check(focus == FIRST_FOCUS[word], f"the focus is on {focus}, not on {FIRST_FOCUS[word]}")
+    if word in FIRST_FOCUS:                                         # a name, or the start of one that ends in an id
+        check(focus.startswith(FIRST_FOCUS[word]), f"the focus is on {focus}, not on {FIRST_FOCUS[word]}")
     if word in ("btpin", "btpasskey"):
         check(window._bluetooth.entry.digits == "042", "the pad and the keyboard did not type 0, 4 and 2")
     if word == "btmany":

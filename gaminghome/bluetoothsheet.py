@@ -16,9 +16,10 @@ from dataclasses import dataclass, field
 
 from . import bluetooth as bt
 
-# The names of the controls. A device's controls end with its id, never with a position in a list.
-POWER, SEARCH, RETRY, DISMISS, CLOSE = "bt:power", "bt:search", "bt:retry", "bt:dismiss", "bt:close"
-CANCEL, YES, NO = "bt:cancel", "bt:yes", "bt:no"
+# The names of the controls. A device's controls end with its id, never with a position in a list, and the answers to
+# a number to compare end with the id of the prompt they answer.
+POWER, SEARCH, RETRY, DISMISS, CLOSE, CANCEL = "bt:power", "bt:search", "bt:retry", "bt:dismiss", "bt:close", "bt:cancel"
+YES, NO = "bt:yes:", "bt:no:"
 CONNECT, FORGET, FORGET_YES, FORGET_NO, PAIR = (
     "bt:connect:", "bt:forget:", "bt:forget-yes:", "bt:forget-no:", "bt:pair:")
 PAD = "bt:pad:"
@@ -41,8 +42,8 @@ def device_icon(kind: str) -> str:
     return KIND_ICONS.get(kind, "bluetooth")
 
 
-def device_id(name: str, prefix: str) -> int | None:
-    """The device a control of this name acts on, or None when the name is not one of that kind."""
+def id_in(name: str, prefix: str) -> int | None:
+    """The id that a control of this name carries (a device's or a prompt's), or None when it is not of that kind."""
     if not name.startswith(prefix):
         return None
     try:
@@ -390,7 +391,6 @@ class BluetoothSheet:
             return None
         snapshot = self.source.snapshot
         idle = snapshot.activity is None
-        prompt = snapshot.prompt
         if name == POWER:
             if snapshot.usable and idle:
                 self._power_target = snapshot.state != bt.ON
@@ -405,29 +405,28 @@ class BluetoothSheet:
             self.source.retry()
         elif name == DISMISS:
             self.source.dismiss()
-        elif name in (YES, NO):
-            if prompt is not None and prompt.kind == bt.CONFIRM:
-                self.source.answer(prompt.id, name == YES)
+        elif (number := id_in(name, YES)) is not None or (number := id_in(name, NO)) is not None:
+            self.source.answer(number, name.startswith(YES))    # the prompt shown; the source ignores one replaced
         elif name == CANCEL:
             if abandonable(snapshot) and not self.cancelling:
                 self._give_up()
         elif name.startswith(PAD):
             return self._pad(name[len(PAD):])
-        elif (device := device_id(name, CONNECT)) is not None:
+        elif (device := id_in(name, CONNECT)) is not None:
             if idle:
                 known = next((d for d in snapshot.devices if d.id == device), None)
                 (self.source.disconnect if known is not None and known.connected else self.source.connect)(device)
-        elif (device := device_id(name, FORGET)) is not None:
+        elif (device := id_in(name, FORGET)) is not None:
             if idle:
                 self.forgetting = device
-        elif (device := device_id(name, FORGET_YES)) is not None:
+        elif (device := id_in(name, FORGET_YES)) is not None:
             self.forgetting = 0
             if idle:
                 self.source.forget(device)
-        elif (device := device_id(name, FORGET_NO)) is not None:
+        elif (device := id_in(name, FORGET_NO)) is not None:
             self.forgetting = 0
             return f"{FORGET}{device}"
-        elif (device := device_id(name, PAIR)) is not None:
+        elif (device := id_in(name, PAIR)) is not None:
             if idle:
                 self._cancelled = None
                 self.source.pair(device)
@@ -569,9 +568,10 @@ class BluetoothSheet:
         if prompt is not None:
             name = called(prompt.device, prompt.name)
             if prompt.kind == bt.CONFIRM:
-                return [Question(f"prompt:{prompt.id}", (Control(YES, t("bluetooth.matches"), style="primary"),
-                                                         Control(NO, t("bluetooth.no"))),
-                                 first=NO, text=t("bluetooth.confirm", name=name), code=prompt.code)]
+                return [Question(f"prompt:{prompt.id}", (Control(f"{YES}{prompt.id}", t("bluetooth.matches"),
+                                                                 style="primary"),
+                                                         Control(f"{NO}{prompt.id}", t("bluetooth.no"))),
+                                 first=f"{NO}{prompt.id}", text=t("bluetooth.confirm", name=name), code=prompt.code)]
             if prompt.kind == bt.CODE:
                 return [Question(f"prompt:{prompt.id}", (cancel,), first=CANCEL,
                                  text=t("bluetooth.typeCode", name=name, code=prompt.code), code=prompt.code,
