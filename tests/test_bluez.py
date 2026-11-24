@@ -17,8 +17,8 @@ from unittest import mock
 
 from gi.repository import Gio, GLib
 
-from fakes.fake_bluez import (ADAPTER, BATTERY, CANCELED, DEVICE, FAIL, PROPERTIES, REJECTED, WAIT, Changes, Clock,
-                              FakeBlueZ, StandInAgent, address_path, blob, call_agent)
+from fakes.fake_bluez import (ADAPTER, BATTERY, BOND, CANCELED, DEVICE, FAIL, PROPERTIES, REJECTED, WAIT, Changes,
+                              Clock, FakeBlueZ, StandInAgent, address_path, blob, call_agent)
 from fakes.fake_inputplumber import PrivateBus
 from fakes.fake_upower import activatable_bus_config
 from fakes.loop import pump
@@ -1111,10 +1111,11 @@ class PairingTest(PairingCase):
         self.assertTrue(self.find(client, "Pad").trusted)
         self.assert_agent_gone(fake, client)
 
-    def test_cancelling_a_pairing_cancels_it_once(self):
-        fake, client, device, _path = self.pairing([("RequestConfirmation", 77)])
+    def test_cancelling_before_the_bond_cancels_the_pairing_once(self):
+        fake, client, device, path = self.pairing([("RequestConfirmation", 77)])
         client.pair(device)
         self.until(lambda: client.snapshot.prompt is not None)
+        self.assertFalse(client._devices[path].bonded)
         client.cancel()
         client.cancel()
         self.assertIsNone(client.snapshot.prompt)
@@ -1123,6 +1124,7 @@ class PairingTest(PairingCase):
         self.assertEqual(fake.asked[0][1].error, CANCELED)
         self.assertEqual(client.snapshot.failure, bt.Failure(bt.CANCELED, bt.PAIRING, bt.STAGE_PAIR, device, "Pad"))
         self.assertEqual(self.sent(fake, client, "Set") + self.sent(fake, client, "Connect"), [])
+        self.assertEqual((fake.cancelled, fake.unpaired), ([path], []))   # BlueZ cancelled its own request
         self.assert_agent_gone(fake, client)
 
     def test_the_same_error_without_the_users_cancel_is_a_failed_authentication(self):
@@ -1132,26 +1134,69 @@ class PairingTest(PairingCase):
         self.assertEqual(client.snapshot.failure.code, bt.AUTH_FAILED)
         self.assert_agent_gone(fake, client)
 
-    def test_a_pairing_that_succeeds_after_the_cancel_stays_paired_and_nothing_more_is_done(self):
-        fake, client, device, _path = self.pairing()
-        fake.hold = lambda call: call[3] == "Pair"
+    def test_cancelling_after_the_bond_keeps_it_and_waits_for_bluez(self):
+        fake, client, device, path = self.pairing()
+        fake.defer = lambda call: call[3] == "Pair"
         client.pair(device)
-        self.until(lambda: fake.held)
+        self.until(lambda: fake.deferred and client._devices[path].bonded)    # BlueZ looks up services: Pair() waits
+        self.assertFalse(self.find(client, "Pad").paired)                     # Paired comes just before the answer
         client.cancel()
-        self.until(lambda: self.sent(fake, client, "CancelPairing"))
-        fake.hold = None
-        fake.answer_held()                                                     # Pair() answers: paired after all
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual(self.sent(fake, client, "CancelPairing"), [])        # it would remove the new keys
+        self.assertEqual(client.snapshot.activity, bt.Activity(bt.PAIRING, device, "Pad", bt.STAGE_PAIR))
+        fake.answer_deferred()
         self.until(lambda: client.snapshot.activity is None)
         self.assertEqual(client.snapshot.failure,
                          bt.Failure(bt.CANCELED, bt.PAIRING, bt.STAGE_PAIR, device, "Pad", paired=True))
         self.assertEqual(self.sent(fake, client, "Set") + self.sent(fake, client, "Connect"), [])
+        self.assertTrue(self.find(client, "Pad").paired)
+        self.assertEqual(fake.unpaired, [])
+        self.assert_agent_gone(fake, client)
+
+    def test_cancelling_after_the_bond_ends_when_bluez_says_paired(self):
+        fake, client, device, path = self.pairing([BOND, WAIT])
+        client.pair(device)
+        self.until(lambda: client._devices[path].bonded)
+        client.cancel()
+        fake.set(path, DEVICE, Paired=True)                                    # announced before the answer
+        self.until(lambda: client.snapshot.activity is None)
+        self.assertEqual(client.snapshot.failure,
+                         bt.Failure(bt.CANCELED, bt.PAIRING, bt.STAGE_PAIR, device, "Pad", paired=True))
+        fake.resume()                                                          # the answer, after the end: ignored
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual((self.sent(fake, client, "CancelPairing"), fake.unpaired), ([], []))
+        self.assert_agent_gone(fake, client)
+
+    def test_cancelling_after_the_bond_waits_for_bluez_at_most_a_while(self):
+        fake, client, device, path = self.pairing([BOND, WAIT])
+        client.pair(device)
+        self.until(lambda: client._devices[path].bonded)
+        client.cancel()
+        self.assertTrue(self.clock.armed(bluez.CALL_TIMEOUT_MS))
+        self.clock.fire_after(bluez.CALL_TIMEOUT_MS)
+        self.assertEqual(client.snapshot.failure,
+                         bt.Failure(bt.CANCELED, bt.PAIRING, bt.STAGE_PAIR, device, "Pad", paired=True))
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual((self.sent(fake, client, "CancelPairing"), fake.unpaired), ([], []))
+        self.assert_agent_gone(fake, client)
+
+    def test_a_pairing_that_times_out_after_the_bond_keeps_it(self):
+        fake, client, device, path = self.pairing([BOND, WAIT])
+        client.pair(device)
+        self.until(lambda: client._devices[path].bonded)
+        self.clock.fire_after(bluez.PAIR_TIMEOUT_MS)
+        self.assertEqual(client.snapshot.failure,
+                         bt.Failure(bt.TIMEOUT, bt.PAIRING, bt.STAGE_PAIR, device, "Pad", paired=True))
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual((self.sent(fake, client, "CancelPairing"), fake.unpaired), ([], []))
+        fake.resume()                                                          # BlueZ finishes: still paired
         self.until(lambda: self.find(client, "Pad").paired)
-        self.assertFalse(self.find(client, "Pad").trusted)
+        self.assertEqual(client.snapshot.failure.code, bt.TIMEOUT)
         self.assert_agent_gone(fake, client)
 
     def test_cancelling_while_the_agent_registers_sends_no_pair(self):
         fake, client, device, _path = self.pairing()
-        fake.hold = lambda call: call[3] == "RegisterAgent"                    # a slow bluetoothd: BlueZ answers at once
+        fake.hold = lambda call: call[3] == "RegisterAgent"         # a slow bluetoothd: BlueZ answers at once
         client.pair(device)
         self.until(lambda: fake.held)
         client.cancel()
@@ -1182,6 +1227,7 @@ class PairingTest(PairingCase):
         self.assertEqual(client.snapshot.failure, bt.Failure(bt.TIMEOUT, bt.PAIRING, bt.STAGE_PAIR, device, "Pad"))
         self.until(lambda: not fake.pairings)
         self.assertEqual(self.sent(fake, client, "CancelPairing"), ["CancelPairing"])
+        self.assertEqual(fake.unpaired, [])             # before the bond: the pairing request was cancelled
         self.assert_agent_gone(fake, client)
 
     def test_a_trust_or_connect_step_that_takes_too_long(self):

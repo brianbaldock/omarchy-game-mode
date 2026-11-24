@@ -10,10 +10,10 @@ It answers ``org.freedesktop.DBus.Properties`` itself, so *every* method call th
 path, interface, member, arguments, and the destination and flags it was sent with). A test can fail a call
 (``failures``), and it can make the fake late in two ways:
 
-* ``defer``: the call is handled at once and only its answer waits for ``answer_deferred``, which is what BlueZ does with its
-  slow methods. ``Pair`` makes the bond and announces ``Bonded``, and then only the answer (and ``Paired``) wait: the
-  service discovery BlueZ runs after a bond. ``Connect``'s answer waits, and a ``Disconnect`` meanwhile answers it
-  ``br-connection-canceled``. ``StartDiscovery`` counts the client as searching with its start pending, and
+* ``defer``: the call is handled at once and only its answer waits for ``answer_deferred``, which is what BlueZ does
+  with its slow methods. ``Pair`` makes the bond and announces ``Bonded``, and then only the answer (and ``Paired``)
+  wait: the service discovery BlueZ runs after a bond. ``Connect``'s answer waits, and a ``Disconnect`` meanwhile
+  answers it ``br-connection-canceled``. ``StartDiscovery`` counts the client as searching with its start pending, and
   ``StopDiscovery`` keeps it searching until answered, so a stop or a start from that client meanwhile is refused
   ``InProgress``. A write of ``Powered`` waits, and another one meanwhile gets ``Busy``.
 * ``hold``: the call is not handled at all until ``answer_held``, and that client's later calls queue behind it: a
@@ -38,7 +38,8 @@ refuse the pairing to the device, which comes back from ``Pair()`` as ``Authenti
 
 ``CancelPairing`` while the pairing request exists ends ``Pair()`` with ``AuthenticationCanceled``. Without one (after
 the bond, or with no pairing at all) BlueZ 5.87 removes the device's keys from the kernel and answers
-``DoesNotExist``; the fake records that in ``unpaired`` and drops the link. BlueZ is not told of its own unpairing,
+``DoesNotExist``; the fake records removed keys in ``unpaired`` and drops the link. Cancels that found a pairing
+request are in ``cancelled``. BlueZ is not told of its own unpairing,
 so ``Paired`` and ``Bonded`` stay as they were. A device removed during a pairing gets ``Pair()`` answered first:
 ``AuthenticationCanceled`` while the link is up, ``ConnectionAttemptFailed`` otherwise, and no answer at all once
 the bond is made. Tests need ``dbus-daemon`` and PyGObject; ``PrivateBus.start`` skips them when either is missing.
@@ -211,6 +212,7 @@ class FakeBlueZ:
         self.powering: set = set()          # adapter paths with a write of Powered unanswered
         self.connecting: dict = {}          # device path -> invocation of a Connect that waits
         self.profiles: set = set()          # devices whose profiles are connected, not just their link
+        self.cancelled: list[str] = []      # devices whose pairing request CancelPairing ended
         self.unpaired: list[str] = []       # devices whose keys BlueZ removed on CancelPairing
         self.link_on_pair = True            # Pair() brings the link up first, as BlueZ does
         self._call = None                   # the call being handled, for ``_later``
@@ -642,11 +644,13 @@ class FakeBlueZ:
         if pairing is not None and not pairing.bonded:
             if pairing.waiting is not None and not pairing.waiting.done:
                 self.ask("Cancel", pairing=pairing)
+            self.cancelled.append(path)
             self._fail_pair(pairing, ERROR + "AuthenticationCanceled", "Authentication Canceled")
             invocation.return_value(None)
             return
         # BlueZ 5.87 cancel_pairing() without a pairing request: btd_adapter_remove_bonding(), then DoesNotExist.
-        self.unpaired.append(path)
+        if path in self.objects and self.value(path, DEVICE, "Bonded"):
+            self.unpaired.append(path)          # the keys are gone; BlueZ still says Paired and Bonded
         self.profiles.discard(path)
         if path in self.objects and self.value(path, DEVICE, "Connected"):
             self.set(path, DEVICE, Connected=False, ServicesResolved=False)

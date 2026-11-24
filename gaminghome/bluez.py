@@ -23,9 +23,15 @@ addressed to the unique name that owns ``org.bluez`` at that moment (never to th
   change of signal strength becomes a message, and makes BlueZ list devices that cannot be connected to.
 * ``pair(device)``: ``AgentManager1.RegisterAgent`` for the agent of ``bluezagent.py`` (capability
   ``KeyboardDisplay``), ``Device1.Pair`` (``PAIR_TIMEOUT_MS``: one agent request alone may take a minute), then
-  ``Properties.Set`` of the device's ``Trusted`` to true and ``Device1.Connect``. ``Device1.CancelPairing`` when the
-  user cancels or the pairing times out, and ``AgentManager1.UnregisterAgent`` as soon as the pairing step is over,
-  however it ended.
+  ``Properties.Set`` of the device's ``Trusted`` to true and ``Device1.Connect``. ``AgentManager1.UnregisterAgent`` as
+  soon as the pairing step is over, however it ended. ``Device1.CancelPairing`` when the user cancels or the pairing
+  times out, but only before the bond is made. BlueZ announces ``Bonded`` when it stores the keys and then looks up
+  the device's services before it answers ``Pair()``; its pairing request is over by then, and BlueZ 5.87 answers a
+  ``CancelPairing`` without one by removing the new keys. So once the device is bonded the client sends nothing,
+  waits for ``Pair()`` (at most ``CALL_TIMEOUT_MS`` after a cancel) and reports ``CANCELED`` or ``TIMEOUT`` with
+  ``paired=True``: the bond stays and nothing more is done to the device. One race remains: a cancel in the few
+  milliseconds between BlueZ storing the keys and this client hearing ``Bonded`` still sends ``CancelPairing``; BlueZ
+  then removes the keys but keeps showing the device as paired, and it has to be forgotten and paired again.
 * ``connect(device)``: ``Device1.Connect`` (``CONNECT_TIMEOUT_MS``), and ``Device1.Disconnect`` to abandon it when it
   times out or the user cancels. It never changes trust.
 * ``disconnect(device)``: ``Device1.Disconnect``.
@@ -385,8 +391,9 @@ class _Adapter:
 # Device1 properties the model uses: (name, D-Bus type, attribute, value when missing or of another type).
 _DEVICE_FIELDS = (("Alias", "s", "alias", ""), ("Name", "s", "name", ""), ("Icon", "s", "icon", ""),
                   ("Class", "u", "device_class", None), ("Appearance", "q", "appearance", None),
-                  ("Paired", "b", "paired", False), ("Trusted", "b", "trusted", False),
-                  ("Connected", "b", "connected", False), ("Connectable", "b", "connectable", None))
+                  ("Paired", "b", "paired", False), ("Bonded", "b", "bonded", False),
+                  ("Trusted", "b", "trusted", False), ("Connected", "b", "connected", False),
+                  ("Connectable", "b", "connectable", None))
 
 
 @dataclass(eq=False)
@@ -399,6 +406,7 @@ class _Device:
     device_class: int | None = None
     appearance: int | None = None
     paired: bool = False
+    bonded: bool = False                    # its keys are stored: BlueZ says so before Paired, see ``cancel``
     trusted: bool = False
     connected: bool = False
     connectable: bool | None = None         # not a Device1 property in BlueZ 5.87; kept for a BlueZ that has one
@@ -809,6 +817,10 @@ class BlueZ:
             self._changed()
         elif interface == BATTERY and record.apply_battery(changed, False, invalidated):
             self._changed()
+        op = self._op
+        if (interface == DEVICE and op is not None and op.kind == PAIRING and op.cancelled
+                and op.stage == STAGE_PAIR and op.path == path and record.paired):
+            self._end(CANCELED, paired=True)    # cancelled after the bond: paired, and nothing more is done
 
     def _untrack(self, record: _Device):
         """A device went away. A device that comes back is a new one, with a new id."""
@@ -986,7 +998,7 @@ class BlueZ:
         if code is not None:
             record = self._devices.get(op.path) if op.path else None
             if paired is None:
-                paired = record is not None and (record.paired or (op.kind == PAIRING and op.paired))
+                paired = record is not None and (record.paired or record.bonded or (op.kind == PAIRING and op.paired))
             self._failure = Failure(code, op.kind, op.stage if op.kind == PAIRING else "", op.device, op.name,
                                     bool(paired))
         self._changed(urgent=True)
@@ -1089,10 +1101,19 @@ class BlueZ:
             self._power_timeout(op)
             return
         if op.kind == PAIRING and op.stage == STAGE_PAIR and op.pair_sent:
+            if self._bonded(op):
+                self._end(CANCELED if op.cancelled else TIMEOUT, paired=True)
+                return
             self._cancel_pairing(op)
         elif op.kind == CONNECTING or (op.kind == PAIRING and op.stage == STAGE_CONNECT):
             self._abandon_connect(op)
         self._end(CANCELED if op.cancelled else TIMEOUT)
+
+    def _bonded(self, op: _Operation) -> bool:
+        """The device of a pairing has its bond already. BlueZ's pairing request is over then, and BlueZ 5.87
+        answers a CancelPairing without one by removing the device's keys: never send it after this."""
+        record = self._devices.get(op.path)
+        return record is not None and (record.bonded or record.paired)
 
     # ---- pairing -----------------------------------------------------------------------------------------------
     @_guarded
@@ -1151,7 +1172,7 @@ class BlueZ:
         self._close_agent(op, unregister=True)  # the pairing step is over
         self._prompt = None
         if op.cancelled:
-            # Paired although the user cancelled: it stays paired, and nothing more is done to it.
+            # The bond was made before the cancel took effect: it is kept, and nothing more is done to the device.
             self._end(CANCELED, paired=True)
             return
         op.stage = STAGE_TRUST
@@ -1205,19 +1226,19 @@ class BlueZ:
         if op is None or op.cancelled or op.kind not in (PAIRING, CONNECTING):
             return
         op.cancelled = True
+        if op.kind == PAIRING and op.stage == STAGE_PAIR and not op.pair_sent:
+            self._end(CANCELED)                 # nothing reached the device yet
+            return
+        if op.kind == CONNECTING or op.stage == STAGE_CONNECT:
+            self._abandon_connect(op)
+        elif op.stage == STAGE_PAIR and not self._bonded(op):
+            # Before the agent answers: BlueZ then cancels its own pairing request, instead of failing it on the
+            # agent's answer and taking a CancelPairing that comes after as one without a request.
+            self._cancel_pairing(op)
         if op.kind == PAIRING:
             if op.agent is not None:
                 op.agent.withdraw()
             self._prompt = None
-            if op.stage == STAGE_PAIR and not op.pair_sent:
-                self._end(CANCELED)             # nothing reached the device yet
-                return
-            if op.stage == STAGE_PAIR:
-                self._cancel_pairing(op)
-            elif op.stage == STAGE_CONNECT:
-                self._abandon_connect(op)
-        else:
-            self._abandon_connect(op)
         # BlueZ answers the call in flight soon after this; it is waited for at most this long.
         self._arm("op", CALL_TIMEOUT_MS, self._on_operation_timeout)
         self._changed(urgent=True)
