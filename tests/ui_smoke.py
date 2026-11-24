@@ -890,7 +890,16 @@ def main():
 
         GLib.timeout_add(1500, run)
 
-    app.connect("activate", activate)
+    def start(app):
+        """A window that cannot be shown (no display, a broken step before the first picture) fails the run too."""
+        try:
+            activate(app)
+        except Exception:
+            import traceback
+            failures.append(traceback.format_exc())
+            app.quit()
+
+    app.connect("activate", start)
     app.run([])
     if failures:
         print(failures[0], file=sys.stderr)
