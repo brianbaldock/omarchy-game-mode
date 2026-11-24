@@ -114,6 +114,25 @@ class DocsTest(unittest.TestCase):
         self.assertIn("Game Mode never acts on the Xbox Guide button", SITE)
         self.assertIn("It never acts on the Guide button", SITE)
 
+    def test_idle_claims_name_the_clock_that_ticks_while_home_is_shown(self):
+        # The clock is a timer that fires once a minute while Gaming Home is shown, so "no idle redraws" would be false.
+        self.assertNotIn("idle redraws", README)
+        section = README[README.index("## Clock and battery"):README.index("## Controls")]
+        section = " ".join(section.split())                    # the README wraps its lines
+        for fact in ("Only while Gaming Home is shown", "hold no timer, no bus subscription and no call in flight",
+                     "never starts it", "not over a running game", "**Not tested on hardware:**",
+                     "with no timer of its own", "UPower is asked again on the minute tick",
+                     "battery the kernel marks as a device's own (scope `Device`)"):
+            self.assertIn(fact, section)
+        self.assertNotIn("nothing is polled", section)
+        self.assertIn("hold no timer, no subscription and no call", " ".join(CONTRIBUTING.split()))
+
+    @needs_site
+    def test_website_says_the_clock_ticks_only_while_home_is_shown(self):
+        self.assertNotIn("Nothing polls in the background", SITE)
+        self.assertIn("Nothing polls while Gaming Home is hidden", SITE)
+        self.assertIn("while Gaming Home is shown one timer ticks the clock once a minute", SITE)
+
 
 if __name__ == "__main__":
     unittest.main()

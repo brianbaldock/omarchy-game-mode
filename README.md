@@ -36,10 +36,79 @@ This is an independent preview, not an official Omarchy component.
   العربية (right-to-left layout). By default it follows `~/.config/omarchy/language`,
   then `LANG`, and you can pick a language in Settings. Missing strings fall back to
   English.
+- **Clock and battery**: the header shows the time and, on a machine with a battery, its
+  charge, so you can see both while the desktop bar is covered by Gaming Home. See
+  [Clock and battery](#clock-and-battery).
 - **Theme**: uses your current Omarchy theme colors when they can be read, with a dark
-  fallback. There are no background images or idle redraws, and the launcher itself makes
-  no network requests. Only the `doctor` command, when you run it, sends the diagnostic
+  fallback. There are no background images. Nothing redraws by itself while Gaming Home is
+  hidden. While it is shown and at rest, only the clock (once a minute) and the battery
+  (when its level or state changes) change by themselves. The launcher itself makes no
+  network requests. Only the `doctor` command, when you run it, sends the diagnostic
   probes listed under [Doctor](#doctor).
+
+## Clock and battery
+
+The header of Gaming Home shows the time and the battery, because the desktop bar is
+hidden behind it. Both are for looking at: neither can be selected or clicked, and neither
+is part of controller navigation. They are drawn in Gaming Home only, not over a running
+game.
+
+- **Clock.** Hour and minute, no seconds. It counts hours the way the system's locale does
+  and there is no setting for it: `en_US` has a 12-hour clock (`9:41 PM`), `de_DE` a
+  24-hour one (`21:41`). The tooltip gives the date as weekday, month and day. The names
+  come from the system locale, not from the language chosen in Settings, and the day comes
+  before the month where the locale's short date writes it so.
+- **Battery.** An icon filled to the charge, and the percentage (`78%`). A bolt and a
+  green icon mean it is charging, a green icon alone that it is full. While the battery is
+  in use the chip turns amber at 20 % or less and red at 10 % or less. The tooltip names
+  the state and, when it is known, the time left, for example "Charging · 1 h 05 min until
+  full" or "On battery · 7 h 49 min left".
+- **No battery, no chip.** A desktop, a virtual machine or a machine whose battery cannot
+  be read shows no battery at all, and no message either.
+- **Where it comes from.** UPower's display device, over the system bus: the one object
+  that adds up the batteries powering the machine. Game Mode only watches for UPower's bus
+  name and reads from it, and never starts it. Without UPower on the bus, it reads
+  `/sys/class/power_supply` instead, looking at entries of type `Battery` whose scope is
+  not `Device`. A battery the kernel marks as a device's own (scope `Device`), such as a
+  controller's, a mouse's or a headset's, is left out. sysfs has no time estimate to
+  offer for the tooltip.
+- **When it runs.** Only while Gaming Home is shown. One timer fires when the minute
+  changes. It is set again from the wall clock each time, so a suspend, a change of time
+  zone or a clock adjustment corrects itself within a minute. With UPower, the battery is
+  read when Gaming Home is shown and again when UPower announces a change, with no timer
+  of its own. If UPower is on the bus but does not answer, the battery comes from sysfs
+  and UPower is asked again on the minute tick. Without UPower, sysfs is read when Gaming
+  Home is shown and then on that tick, because sysfs cannot say when it changes. While
+  Gaming Home is hidden, the clock and the battery hold no timer, no bus subscription and
+  no call in flight.
+
+How far this has been checked:
+
+- **Automated tests:** the 12-hour and 24-hour decision from locale formats, noon and
+  midnight, and the minute-boundary delay (including a change of offset); UPower's state
+  codes, the percentage, the 20 % and 10 % edges, no battery, a UPS and garbled
+  properties; sysfs layouts like the ROG Xbox Ally's, with a controller, USB ports and an
+  empty bay ignored, several batteries and unreadable files; the UPower client against a
+  fake on a private bus, including that it sends nothing but reads, that watching for
+  UPower never starts it (on a bus where it could be started) and that nothing is
+  subscribed or asked while it is stopped; the timer's life across showing, hiding,
+  rebuilding the widgets and a late timer after a suspend. Every string exists in the
+  seven languages.
+- **Checked on an ASUS ROG Xbox Ally (RC73YA), read-only; nothing was pressed or
+  unplugged:** UPower 1.91.5 reported its display device and Game Mode's client read it.
+  The sysfs entries are an `ACAD` adapter, `BAT1` and two USB ports, and only `BAT1` is
+  taken for a battery. The header was rendered with GTK Broadway in English and Arabic, in
+  each of the states discharging, charging, low, critical, full and no battery. In a real
+  window the timer, the UPower watch and its subscription existed while it was shown and
+  were gone once it was hidden, and an update that changed nothing visible drew no frame.
+  With UPower's name made absent on the real bus, sysfs was the only source: the chip
+  showed the real battery, sysfs was read again on the minute tick and not while hidden.
+- **Not tested on hardware:** plugging in or unplugging the charger, a battery that really
+  runs down to 20 % and 10 %, UPower's reports during a charge, suspend and resume or a
+  change of time zone while Gaming Home is shown, a 24-hour or non-English system locale
+  on the device (only `en_US` is installed there), a machine that really has no UPower
+  (its absence was only simulated), and how Hyprland treats a Gaming Home that stays
+  mapped behind another window.
 
 ## Controls
 
@@ -741,6 +810,11 @@ Built on, but not bundling:
   `tests/fixtures/inputplumber` were captured from a running InputPlumber 0.82.0
   (GPL-3.0) with `busctl introspect`, and their documentation comments were removed.
   They are used only by tests; none of its code, profiles or schemas are included.
+- The D-Bus interface of [UPower](https://upower.freedesktop.org), read-only, only while
+  Gaming Home is shown and only when UPower is already running; `/sys/class/power_supply`
+  is the fallback. UPower (GPL-2.0-or-later) was read to learn what its display device
+  reports. Nothing of it is copied: the fake UPower in `tests/fakes` was written by hand
+  from the names and types of a few properties of its public D-Bus interface.
 
 Translations come from `data/locales` and were drafted for this project.
 

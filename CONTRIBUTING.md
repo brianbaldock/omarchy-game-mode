@@ -48,6 +48,8 @@ For isolated preferences, create a temporary directory with `mktemp -d` and laun
 
 InputPlumber compatibility is read-only: Game Mode reads its D-Bus state and uses the virtual gamepad it announces, and never changes it. This is tested against a fake service (those tests start a private `dbus-daemon`, never touch your session or system bus, and are skipped when `dbus-daemon` is not installed) and was checked on one device, an ASUS ROG Xbox Ally with InputPlumber 0.82.0, without physical button presses. HHD compatibility is not established: its virtual controllers are still ignored, so a stack that hides or owns the physical device may leave native navigation unavailable. Report the input stack as part of your setup; do not disable its protections or change permissions to make a test pass. Changes that would write to InputPlumber (profiles, target devices, events) are input ownership changes: discuss them first.
 
+The clock and battery in the Gaming Home header follow the same rules. UPower is only read, and only while Gaming Home is shown: its name is watched without starting it, `/sys/class/power_supply` is the fallback, and the tests use a fake UPower on a private bus (skipped without `dbus-daemon`). While the window is hidden they must hold no timer, no subscription and no call, so add no polling there.
+
 ## Report hardware results
 
 Use the hardware-validation issue form. Include device/controller model, Omarchy and
