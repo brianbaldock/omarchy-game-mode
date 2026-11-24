@@ -28,6 +28,12 @@ jobs:
           sudo apt-get install --no-install-recommends python3-gi gir1.2-gtk-4.0 desktop-file-utils
       - name: Run tests
         run: make test PYTHON=python3
+      - name: Verify the source archive passes its own tests
+        run: |
+          make dist
+          mkdir "$RUNNER_TEMP/archive"
+          tar -xzf omarchy-game-mode-*.tar.gz -C "$RUNNER_TEMP/archive"
+          make -C "$RUNNER_TEMP/archive"/omarchy-game-mode-* test PYTHON=python3
       - name: Verify install staging
         run: |
           make install PREFIX=/usr DESTDIR="$RUNNER_TEMP/game-mode"
