@@ -303,7 +303,7 @@ class BluetoothSheet:
         self.forgetting = 0          # the device whose Forget asks for confirmation
         self.entry = DigitEntry()
         self._search_seen = False    # a search was seen running during this visit, so "nothing found" can be said
-        self._power_target = None    # what the power switch was last asked for, while that runs
+        self._power_target = None    # what the power switch was last asked for, until that has run, sheet or not
         self._cancelled = None       # the device of the pairing given up, until the source says it has ended
 
     @property
@@ -358,7 +358,6 @@ class BluetoothSheet:
         self.visiting = False
         self.searched = self._search_seen = False
         self.forgetting = 0
-        self._power_target = None
         self.entry.clear()
         give_up = abandonable(self.source.snapshot) and not self.cancelling
         self.source.scan(False)

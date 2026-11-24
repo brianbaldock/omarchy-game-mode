@@ -688,6 +688,15 @@ class BlocksTest(unittest.TestCase):
         visit.sync()
         self.assertEqual(next(b for b in self.blocks(source, visit) if b.key == "power").status, "On")
 
+    def test_switching_on_still_says_so_when_the_sheet_is_opened_again_meanwhile(self):
+        source = world(bt.OFF)
+        visit = opened(source)
+        visit.press(sheet.POWER)
+        visit.leave()
+        source.set_state(bt.ON)                                     # the adapter is on, the command still runs
+        visit.enter()
+        self.assertEqual(next(b for b in self.blocks(source, visit) if b.key == "power").status, "Turning on…")
+
     def test_a_failure_is_a_line_with_dismiss_above_the_rest(self):
         source = world()
         visit = opened(source)
