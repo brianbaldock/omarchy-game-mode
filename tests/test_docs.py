@@ -60,15 +60,23 @@ class DocsTest(unittest.TestCase):
         # Of the two maps, only HHD's has an entry for the Xbox button.
         self.assertNotIn("R3 as `BTN_TR2` and the Xbox button as `BTN_SELECT`", README)
         self.assertIn("Only HHD's map also lists the Xbox button", README)
-        self.assertIn("no guided physical test on an RC73YA has confirmed", README)
+        self.assertIn("A guided press test on an RC73YA has since confirmed the", README)
+        self.assertNotIn("no guided physical test on an RC73YA has confirmed", README)
 
-    def test_ally_layout_section_names_what_ships_and_says_what_is_unconfirmed(self):
+    def test_ally_layout_section_says_what_the_press_test_confirmed_and_what_is_pending(self):
         self.assertIn(f"`{quirks.DISABLE_ENV}=1`", README)
         shipped = re.findall(r"/usr/share/omarchy-game-mode/(contrib/\S+\.hwdb)", README)
         self.assertTrue(shipped)
         for relative in shipped:
             self.assertTrue((ROOT / relative).is_file(), relative)
-        self.assertIn("not yet confirmed by a physical press test", README)
+        self.assertIn("confirmed by a guided press test on one ROG Xbox Ally (RC73YA, Linux 7.2)", README)
+        self.assertNotIn("not yet confirmed by a physical press test", README)
+        # What the press test did not cover stays listed as pending.
+        pending = README[README.index("- **Pending physical validation:**"):]
+        pending = pending[:pending.index("## Controller modes")]
+        for item in ("presses of the three buttons of unknown meaning", "how Steam, SDL games and browsers",
+                     "anything on the Xbox Ally X"):
+            self.assertIn(item, pending)
 
     def test_hwdb_entry_is_applied_with_a_reboot_and_applying_it_live_carries_its_warning(self):
         # Applied to a running pad, it can leave a button held meanwhile down under its old code.

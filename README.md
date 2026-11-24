@@ -92,10 +92,11 @@ button then arrives under the code of another one, and none as the right stick c
 | Three buttons of unknown meaning | `BTN_START`, `BTN_MODE`, `BTN_THUMBL` | none |
 
 The last column holds the codes the kernel's Xbox controller driver reports, which Game
-Mode expects. The table is derived from two independent projects plus one observation,
-not yet confirmed by a physical press test: Handheld Daemon's Ally X button map and
-InputPlumber's former Ally X fallback map, both for this USB id, and the Xbox button seen
-as `BTN_SELECT` on an RC73YA (see [Limitations](#limitations)).
+Mode expects. The table was derived from two independent projects, Handheld Daemon's Ally
+X button map and InputPlumber's former Ally X fallback map, both for this USB id, and was
+then confirmed by a guided press test on one ROG Xbox Ally (RC73YA, Linux 7.2): each of
+the eleven buttons from A to Xbox sent the code in the middle column (see
+[Limitations](#limitations) for what that test did not cover).
 
 **How Game Mode compensates.** When Game Mode reads this pad itself, without
 InputPlumber, it translates every button through the table before acting on it, for its
@@ -168,12 +169,22 @@ How far this has been checked:
   sysfs, and does not match InputPlumber's virtual gamepad. The hwdb entry compiles with
   `systemd-hwdb` in a scratch root, where this machine's lookup key for the gamepad
   interface returns its 12 entries and the keys of the other N-KEY interfaces return
-  none; it was not installed. No button was pressed.
-- **Pending physical validation:** whether each physical button delivers the code in the
-  table, and with it Game Mode's navigation on the raw pad and the hwdb entry; how Steam,
-  SDL games and browsers handle the pad with the entry applied; applying it without a
-  reboot; anything on the Xbox Ally X. The guided `doctor buttons` test, once available,
-  is how to confirm the table on a real unit.
+  none.
+- **Verified by a guided press test on that unit (Linux 7.2):** with the pad untouched,
+  A, B, X, Y, LB, RB, View, Menu, L3, R3 and the Xbox button each sent the code in the
+  table (`BTN_SOUTH`, `BTN_EAST`, `BTN_C`, `BTN_NORTH`, `BTN_WEST`, `BTN_Z`, `BTN_TL`,
+  `BTN_TR`, `BTN_TL2`, `BTN_TR2`, `BTN_SELECT`), and the triggers and sticks arrived on
+  the usual axes (`ABS_Z`, `ABS_RZ`, `ABS_X`, `ABS_Y`, `ABS_RX`, `ABS_RY`). With the entry
+  installed and applied to the running pad, with no button held, the kernel then reported
+  the standard layout: `BTN_THUMBR` and the eleven standard buttons, and the three
+  buttons of unknown meaning on `BTN_TRIGGER_HAPPY1` to `3`.
+- **Pending physical validation:** a press test with the entry applied; presses of the
+  three buttons of unknown meaning (none sent anything on the gamepad node in the press
+  test); how Steam, SDL games and browsers handle the pad with the entry applied;
+  whether applying the entry to a running pad is safe on other units (it was applied
+  once, with no button held); anything on the Xbox Ally X. The small Armoury Crate and
+  Library buttons are not on this node: the press test saw the Armoury Crate button only
+  as a keyboard key on another interface of the same device, which only root can read.
 
 ## Controller modes
 
@@ -388,11 +399,10 @@ them gone. Game Mode never edits AntiMicroX profiles or any other app's configur
     but with the kernel's generic codes: X as `BTN_C`, Y as `BTN_NORTH`, LB as
     `BTN_WEST`, RB as `BTN_Z`, View as `BTN_TL`, Menu as `BTN_TR`, L3 as `BTN_TL2` and
     R3 as `BTN_TR2`. Only HHD's map also lists the Xbox button, as `BTN_SELECT`, which
-    fits the reading above. The table would explain scrambled SDL and Steam mappings
-    for this pad, but no guided physical test on an RC73YA has confirmed it: which
-    code each physical press delivers, and with it the View + Menu chord, is
-    unverified there. Game Mode's translation of the raw pad and the optional udev
-    entry rest on that table; see
+    fits the reading above. A guided press test on an RC73YA has since confirmed the
+    table: each of the eleven buttons from A to Xbox sent the code listed. What no test
+    has covered there is the View + Menu chord in Game Mode on that pad. Game Mode's
+    translation of the raw pad and the optional udev entry rest on that table; see
     [ASUS ROG Xbox Ally controller layout](#asus-rog-xbox-ally-controller-layout).
 - Recognizing InputPlumber's virtual gamepad stays a heuristic, because InputPlumber does
   not say which event node is its own. If another program creates a virtual pad with the

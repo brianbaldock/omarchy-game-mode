@@ -9,10 +9,10 @@
 # instead, to every program that reads the pad, and parks the three unknown
 # buttons on BTN_TRIGGER_HAPPY1..3 so they cannot pass for a standard button.
 #
-# The order is derived from two independent projects plus one observation, not
-# yet confirmed by a physical press test: Handheld Daemon's Ally X button map
-# and InputPlumber's former Ally X fallback map (both for USB id 0b05:1b4c),
-# and the Xbox button seen as BTN_SELECT on an RC73YA.
+# The order was derived from two independent projects, Handheld Daemon's Ally X
+# button map and InputPlumber's former Ally X fallback map (both for USB id
+# 0b05:1b4c), and then confirmed by a guided press test on one RC73YA: each of
+# the eleven buttons from A to Xbox sent the code this entry replaces.
 #
 # Scancode = HID usage (page 0x09, button N). The match is limited to the
 # gamepad interface (input5, EV bitmap 1b) on these two boards. Omarchy Game

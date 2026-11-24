@@ -45,12 +45,11 @@ DISABLE_ENV = "GAMEMODE_NO_BUTTON_QUIRKS"
 # map to None: they are dropped, because an unknown button must never be
 # taken for a standard one.
 #
-# The table is derived from two independent projects plus one observation,
-# and not yet confirmed by a physical press test: Handheld Daemon's Ally X
-# button map and the fallback capability map InputPlumber once shipped for
-# the Ally X, both for this USB id, agree on X, Y, LB, RB, View, Menu, L3 and
-# R3. The Xbox button is in HHD's map only, and was seen once as BTN_SELECT
-# on an RC73YA.
+# The table was derived from two independent projects: Handheld Daemon's Ally X
+# button map and the fallback capability map InputPlumber once shipped for the
+# Ally X, both for this USB id, agree on X, Y, LB, RB, View, Menu, L3 and R3,
+# and only HHD's has the Xbox button. A guided press test on one ROG Xbox Ally
+# (RC73YA, Linux 7.2) then confirmed all eleven codes, A to Xbox.
 XINPUT_ORDER_HID: Mapping[int, int | None] = MappingProxyType({
     BTN_SOUTH: BTN_SOUTH,     # A
     BTN_EAST: BTN_EAST,       # B
@@ -95,8 +94,8 @@ class Quirk:
 XINPUT_ORDER_QUIRK = Quirk(
     "xinput-order-hid", XINPUT_ORDER_HID,
     "buttons arrive in XInput order under generic HID codes; Game Mode translates them for its own menus only. "
-    "The table is derived from two independent projects plus one observation, "
-    "not yet confirmed by a physical press test")
+    "The table was derived from two independent projects and confirmed by a guided press test on one "
+    "ROG Xbox Ally (RC73YA)")
 
 
 def might_need_quirk(identity, env: Mapping[str, str] = os.environ) -> bool:
