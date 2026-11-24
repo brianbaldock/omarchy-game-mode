@@ -78,6 +78,12 @@ class DocsTest(unittest.TestCase):
                      "anything on the Xbox Ally X"):
             self.assertIn(item, pending)
 
+    def test_ally_layout_section_names_the_small_buttons_as_measured(self):
+        section = README[README.index("### ASUS ROG Xbox Ally controller layout"):README.index("## Controller modes")]
+        for fact in ("`KEY_F16`", "`KEY_F15`", "`KEY_F22`", 'o.bind("code:200"', "second press test"):
+            self.assertIn(fact, section)
+        self.assertNotIn("a press test with the entry applied;", section)
+
     def test_hwdb_entry_is_applied_with_a_reboot_and_applying_it_live_carries_its_warning(self):
         # Applied to a running pad, it can leave a button held meanwhile down under its old code.
         raw = (ROOT / "README.md").read_text(encoding="utf-8")

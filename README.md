@@ -152,6 +152,22 @@ sudo systemd-hwdb update
 
 Remove the entry as well once your kernel has ASUS's Ally HID driver.
 
+**The small buttons.** The Armoury Crate (small, top left) and Library (small, top
+right) buttons are not part of the gamepad. A press test on one RC73YA saw the Armoury
+Crate button as `KEY_F16`, a back paddle as `KEY_F15` and the Library button as
+`KEY_F22`, on two keyboard interfaces of the same USB device. Only root can read those
+nodes, so Game Mode does not see them, but your compositor has them open and can bind
+them. On Omarchy with Hyprland, bind by key code, which is the evdev code plus 8
+(`KEY_F22` is 192, so 200), in `~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("code:200", "Gaming Home (Library button)", "omarchy-game-mode show")
+```
+
+That opens Gaming Home over whatever has the focus, a game included. Omarchy already
+binds `XF86TouchpadOn`, the name the US layout gives that key; the Ally has no touchpad,
+so its handler finds nothing to enable and does nothing.
+
 How far this has been checked:
 
 - **Verified by automated tests:** the fingerprint, and that another vendor, product or
@@ -177,14 +193,18 @@ How far this has been checked:
   the usual axes (`ABS_Z`, `ABS_RZ`, `ABS_X`, `ABS_Y`, `ABS_RX`, `ABS_RY`). With the entry
   installed and applied to the running pad, with no button held, the kernel then reported
   the standard layout: `BTN_THUMBR` and the eleven standard buttons, and the three
-  buttons of unknown meaning on `BTN_TRIGGER_HAPPY1` to `3`.
-- **Pending physical validation:** a press test with the entry applied; presses of the
-  three buttons of unknown meaning (none sent anything on the gamepad node in the press
-  test); how Steam, SDL games and browsers handle the pad with the entry applied;
-  whether applying the entry to a running pad is safe on other units (it was applied
-  once, with no button held); anything on the Xbox Ally X. The small Armoury Crate and
-  Library buttons are not on this node: the press test saw the Armoury Crate button only
-  as a keyboard key on another interface of the same device, which only root can read.
+  buttons of unknown meaning on `BTN_TRIGGER_HAPPY1` to `3`. A second press test, with
+  the entry in place, sent A, B, X, Y, LB, RB, View, Menu, L3, R3 and the Xbox button as
+  `BTN_SOUTH`, `BTN_EAST`, `BTN_NORTH`, `BTN_WEST`, `BTN_TL`, `BTN_TR`, `BTN_SELECT`,
+  `BTN_START`, `BTN_THUMBL`, `BTN_THUMBR` and `BTN_MODE`, and the triggers and sticks on
+  the same axes as before.
+- **Pending physical validation:** presses of the three buttons of unknown meaning (none
+  sent anything on the gamepad node in the press tests); how Steam, SDL games and
+  browsers handle the pad with the entry applied; that the entry is applied again at
+  the next boot; whether applying the entry to a running pad is safe on other units (it
+  was applied once, with no button held); a physical press of the Library button
+  against the binding shown under "The small buttons" (it was tested with a virtual key
+  only); anything on the Xbox Ally X.
 
 ## Controller modes
 
