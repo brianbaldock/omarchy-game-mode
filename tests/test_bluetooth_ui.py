@@ -1,6 +1,7 @@
 """The Bluetooth button and sheet without a display: what they show, what their controls do, and that every way out
-of the sheet ends its search and its pairing. The window's own methods run on stand-ins, as in test_headerstatus,
-because the real window needs a display; the source is always the scripted FakeBluetooth."""
+of the sheet ends its search and gives up a pairing that has not paired the device yet. The window's own methods run
+on stand-ins, as in test_headerstatus, because the real window needs a display; the source is always the scripted
+FakeBluetooth."""
 
 import ast
 import importlib
@@ -941,16 +942,26 @@ class WindowTest(unittest.TestCase):
         self.assertEqual(("cancel",) in source.calls, cancelled)
         self.assertIsNone(source.snapshot.prompt)
 
-    def test_b_and_close_and_escape_leave_through_close_sheet(self):
+    def test_b_escape_and_close_each_leave_through_close_sheet(self):
         from gaminghome.core import BACK
-        source = self.pairing_world()
-        window = self.stand_in(source)
-        window.handle_action(BACK)                                    # first B gives up the pairing
-        self.assertEqual((window.sheet, source.calls[-1]), ("bluetooth", ("cancel",)))
-        window.handle_action(BACK)                                    # then closes
-        self.assertIsNone(window.sheet)
-        self.assertFalse(window._bluetooth.visiting)
-        self.assert_left(source)
+        gdk = importlib.import_module("gaminghome.ui").Gdk
+        close = mock.Mock()
+        close.get_name.return_value = sheet.CLOSE
+        ways = {"B": lambda window: window.handle_action(BACK),
+                "Escape": lambda window: self.window._on_key(window, None, gdk.KEY_Escape, 0, gdk.ModifierType(0)),
+                "Close": lambda window: self.window._on_bt_clicked(window, close)}
+        for way, press in ways.items():
+            with self.subTest(way):
+                source = self.pairing_world()
+                window = self.stand_in(source)
+                window._bt_buttons = {sheet.CLOSE: close}
+                press(window)
+                if way != "Close":                                    # the first B or Escape gives the pairing up
+                    self.assertEqual((window.sheet, source.calls[-1]), ("bluetooth", ("cancel",)))
+                    press(window)                                     # and the next one closes the sheet
+                self.assertIsNone(window.sheet)
+                self.assertFalse(window._bluetooth.visiting)
+                self.assert_left(source)
 
     def test_closing_the_sheet_leaves_it(self):
         source = self.pairing_world()

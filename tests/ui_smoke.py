@@ -24,8 +24,11 @@ these states, and checks what the sheet does, so a wrong behaviour stops the run
   btpairing  a pairing that is connecting   btfail     a connection that failed
   btpaired   a device paired that did not connect
 
-Every ``bt`` word also checks that each way out of the sheet ends its search, and its pairing when there is one:
-Menu and B close it, Settings replacing it, the window being built again and the window being hidden.
+Every ``bt`` word also checks that each way out of the sheet ends its search (Menu and B closing it, Settings taking
+its place, the window being built again and the window being hidden), and that a click GTK delivers after the sheet
+has closed does nothing (A then B on Search, A then Menu on Pair, Enter then Escape on Search). Giving up a pairing
+is checked once for each way: B in ``btcode``, the window built again in ``btconfirm``, hidden in ``btpin`` and Menu
+in ``btpasskey``; ``btpairing`` checks that a device paired already goes on connecting when the window is built again.
 """
 
 import datetime
@@ -206,7 +209,8 @@ def play(word, window, source):
         settle()
         press(window, f"{sheet.PAIR}{speaker}")
         if word == "btconfirm":
-            source.show_prompt(bt.CONFIRM, code="042917")
+            window._focus_by_name(sheet.POWER)                       # the focus is still on the switch when the number
+            source.show_prompt(bt.CONFIRM, code="042917")              # comes, and goes to No all the same
         elif word == "btcode":
             source.show_prompt(bt.CODE, code="314159")
             source.type_digits(2)
