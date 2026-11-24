@@ -1215,17 +1215,70 @@ class RememberTest(BusCase):
         self.assertEqual((source.snapshot.note, source.helping, self.timers.delays), (CHANGED_ELSEWHERE, False, []))
         self.assertFalse((script.parent / "record").exists() and any((script.parent / "record").iterdir()))
 
-    def test_another_programs_change_ends_the_command_so_it_cannot_switch_back(self):
-        script = stand_in(self.home / "hang", "hang")
-        fake = self.fake(active=BALANCED)
+    def setting(self, name) -> Path:
+        """A gated stand-in that, once let through, sets its profile on the fake daemon like Omarchy's script."""
+        return stand_in(self.home / name, gate=True, bus=self.bus.address)
+
+    def chosen(self, script) -> PowerProfiles:
+        """Performance chosen from balanced and answered, with Omarchy's command waiting at its gate."""
         source = self.with_helper(script)
         source.set_profile(PERFORMANCE)
-        child = self.child_of(script)
-        fake.external(SAVER)
-        self.assertTrue(pump(lambda: gone(child) and not source.helping, 3))
-        self.assertEqual((source.snapshot.note, source.snapshot.active, self.timers.pending),
-                         (CHANGED_ELSEWHERE, SAVER, {}))
+        self.assertTrue(pump(lambda: (script.parent / "record" / "waiting").exists()))
+        return source
 
+    def test_another_programs_change_ends_the_command_before_it_can_set_its_profile_again(self):
+        script = self.setting("shown")
+        fake = self.fake(active=BALANCED)
+        source = self.chosen(script)
+        fake.external(SAVER)                                           # the charger goes in: Omarchy switches
+        self.assertTrue(pump(lambda: source.snapshot.active == SAVER))
+        self.open_gate(script)
+        self.assertTrue(pump(lambda: not source.helping))
+        self.assertFalse((script.parent / "record" / "done").exists())
+        self.assertEqual((fake.active, source.snapshot.note, self.timers.pending), (SAVER, CHANGED_ELSEWHERE, {}))
+
+    def test_a_change_made_while_hidden_ends_the_command_at_the_next_reading(self):
+        script = self.setting("shown-again")
+        fake = self.fake(active=BALANCED)
+        source = self.chosen(script)
+        source.stop()
+        fake.external(SAVER)
+        source.start()
+        self.assertTrue(pump(lambda: source.snapshot.note == CHANGED_ELSEWHERE))
+        self.open_gate(script)
+        self.assertTrue(pump(lambda: not source.helping))
+        self.assertFalse((script.parent / "record" / "done").exists())
+        self.assertEqual((fake.active, source.snapshot.active), (SAVER, SAVER))
+
+    def test_a_change_that_lands_while_the_next_visit_reads_the_service_ends_the_command(self):
+        script = self.setting("next-visit")
+        fake = self.fake(active=BALANCED)
+        source = self.chosen(script)
+        source.stop()
+        fake.hold = lambda call: call.member == "GetAll"
+        source.start()
+        self.assertTrue(pump(lambda: fake.held))
+        fake.external(SAVER)                                           # announced while the reading is on its way
+        fake.hold = None
+        fake.answer_held()
+        self.assertTrue(pump(lambda: source.snapshot.note == CHANGED_ELSEWHERE))
+        self.open_gate(script)
+        self.assertTrue(pump(lambda: not source.helping))
+        self.assertEqual((fake.active, source.snapshot.active), (SAVER, SAVER))
+
+    def test_while_hidden_nothing_reads_the_service_so_the_command_can_undo_a_change(self):
+        """The gap the documentation names: while the window is hidden nothing watches the service, so a change by
+        another program in the moments Omarchy's command still runs is undone by it."""
+        script = self.setting("hidden")
+        fake = self.fake(active=BALANCED)
+        source = self.chosen(script)
+        source.stop()
+        told = len(self.seen)
+        fake.external(SAVER)
+        self.open_gate(script)
+        self.assertTrue(pump(lambda: not source.helping))
+        self.assertTrue((script.parent / "record" / "done").exists())
+        self.assertEqual((fake.active, len(self.seen)), (PERFORMANCE, told))
 
     def test_a_command_left_running_by_the_last_visit_ends_when_another_program_changes_the_profile(self):
         script = stand_in(self.home / "hang", "hang")
@@ -1238,7 +1291,8 @@ class RememberTest(BusCase):
         self.assertTrue(pump(lambda: fake.count("GetAll") == 2))       # answered before the change below is sent
         fake.external(SAVER)
         self.assertTrue(pump(lambda: gone(child) and not source.helping, 3))
-        self.assertEqual((source.snapshot.note, source.snapshot.active, self.timers.pending), ("", SAVER, {}))
+        self.assertEqual((source.snapshot.note, source.snapshot.active, self.timers.pending),
+                         (CHANGED_ELSEWHERE, SAVER, {}))
 
 
 class WatchTest(unittest.TestCase):

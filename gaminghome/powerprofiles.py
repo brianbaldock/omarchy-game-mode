@@ -36,9 +36,13 @@ Files and the one process
   ``/usr/local/bin:/usr/bin:/bin`` as ``PATH`` (never the inherited one: a version manager's shims there would give
   ``powerprofilesctl`` another Python), only ``HOME``, ``LANG``, ``XDG_RUNTIME_DIR``, ``XDG_STATE_HOME`` and
   ``DBUS_SYSTEM_BUS_ADDRESS`` besides, and a process group of its own that is killed as a whole when
-  ``HELPER_LIMIT_MS`` runs out. Its exit status is a note at most. It is left to finish after ``stop()`` and then
-  reports nothing; a newer choice, or another program changing the profile, ends it first, because it would set the
-  old profile again and Gaming Home never does that.
+  ``HELPER_LIMIT_MS`` runs out. Its exit status is a note at most. The script always sets its profile itself
+  (``powerprofilesctl set``) before it records it, so a run must not outlive its choice: a newer choice ends it, and
+  so does any reading that shows another profile active, ``GetAll`` (the one at ``start()`` too) or
+  ``PropertiesChanged``; the note is then ``CHANGED_ELSEWHERE`` and the choice is not recorded. After ``stop()`` it is
+  left to finish and reports nothing. That leaves one gap: while the window is hidden nothing reads the service, so
+  a change by another program in the few hundred milliseconds the command still runs after the window was hidden
+  can be undone by it. The script also decides between AC and battery when it runs, not when the user chose.
 
 Nothing is polled. The only timer is that command's limit. A started source that is left alone holds the name watch
 and the subscription and nothing else (``idle``). A hold is never taken here: that belongs to the resident core.
@@ -244,6 +248,7 @@ class _Run:
         self.kill = lambda: None    # ends its whole process group
         self.limit = None           # the token of its time limit while that is pending
         self.timed_out = False
+        self.ended = False          # ended because another profile is active now
 
 
 def _timeout_add(milliseconds, callback):
@@ -453,6 +458,8 @@ class PowerProfiles:
                 fields = None
         self._live = fields is not None
         changes = _service(ERROR) if fields is None else {**_service(READY), **fields}
+        if fields is not None and self._end_outdated_runs(fields["active"]):
+            changes["note"] = CHANGED_ELSEWHERE
         failure = self._snapshot.failure
         if fields and failure is not None and failure.code == TIMEOUT and fields["active"] == failure.profile:
             changes["failure"] = None
@@ -486,10 +493,8 @@ class PowerProfiles:
         failure = self._snapshot.failure
         if failure is not None and failure.code == TIMEOUT and active == failure.profile:
             changes["failure"] = None
-        if not self._snapshot.pending:
-            self._end_helper()                        # a run still going would set the old one again
-            if self._armed:
-                changes["note"] = CHANGED_ELSEWHERE
+        if not self._snapshot.pending and (self._end_outdated_runs(active) or self._armed):
+            changes["note"] = CHANGED_ELSEWHERE
 
     # ---- operations --------------------------------------------------------
     @_guarded
@@ -568,6 +573,19 @@ class PowerProfiles:
             run.limit = self._helper = None
             self._runs.discard(run)
             self._update(note=NOT_REMEMBERED)
+
+    def _end_outdated_runs(self, active: str) -> bool:
+        """End every run of Omarchy's command for a profile that is not the active one any more, from this visit or
+        an earlier one: the command always sets its profile again, which would undo another program's change.
+        Whether one was ended."""
+        ended = False
+        for run in list(self._runs):
+            if run.profile != active and not run.ended:
+                run.ended = ended = True
+                run.kill()
+                if run is self._helper:
+                    self._helper = None
+        return ended
 
     def _end_helper(self):
         """Every run still going ends with its whole group and reports nothing: a newer choice, or another
