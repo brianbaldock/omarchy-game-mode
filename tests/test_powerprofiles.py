@@ -41,11 +41,15 @@ def scratch(test, name) -> Path:
     return directory
 
 
-def stand_in(directory: Path, mode="ok", gate=False) -> Path:
+def stand_in(directory: Path, mode="ok", gate=False, bus=None) -> Path:
     """A stand-in for Omarchy's omarchy-powerprofiles-set in ``directory``. It writes down in ``record/`` how it was
     started (argv, its environment as it was handed over, stdin, where its standard streams go, its process group and
     which python3 its PATH finds), then succeeds (``ok``), fails (``fail``) or hangs with a child of its own
-    (``hang``). With ``gate`` it first waits until the test writes to ``gate``."""
+    (``hang``). With ``gate`` it first waits until the test writes to ``gate``. With ``bus``, the address of a
+    private test bus and never another, it then sets the profile it was given there, as the real script always does
+    with ``powerprofilesctl set``. It writes ``done`` when it got that far."""
+    if bus is not None and "omarchy-game-mode-test-" not in bus:
+        raise ValueError("the stand-in only ever talks to a private test bus")
     record = directory / "record"
     record.mkdir(parents=True)
     lines = ["#!/bin/sh", f'cd "{record}" || exit 3', 'printf "%s\\n" "$0" "$@" > argv',
@@ -53,7 +57,11 @@ def stand_in(directory: Path, mode="ok", gate=False) -> Path:
              "readlink /proc/$$/fd/0 /proc/$$/fd/1 /proc/$$/fd/2 > fds", "command -v python3 > python3"]
     if gate:
         os.mkfifo(directory / "gate")
-        lines += [": > waiting", f'read line < "{directory}/gate"', ": > done"]
+        lines += [": > waiting", f'read line < "{directory}/gate"']
+    if bus is not None:
+        lines.append(f'gdbus call --address "{bus}" --dest {BUS_NAME} --object-path {OBJECT_PATH} --method '
+                     f'{PROPERTIES_IFACE}.Set {INTERFACE} ActiveProfile "<\'$2\'>" > /dev/null || exit 4')
+    lines.append(": > done")
     lines += {"ok": ["exit 0"], "fail": ["exit 1"], "hang": ["sleep 30 &", "echo $! > child", "sleep 30"]}[mode]
     script = directory / "omarchy-powerprofiles-set"
     script.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -764,6 +772,34 @@ class SetTest(BusCase):
         self.assertEqual(source.snapshot.failure, Failure(UNAVAILABLE, SAVER))
         self.assertEqual(self.sets(fake, source), [])
 
+    def test_a_timeout_goes_when_a_fresh_reading_shows_the_profile(self):
+        fake = self.fake(active=BALANCED)
+        fake.hold = lambda call: call.member == "Set"
+        source = self.ready()
+        with mock.patch.object(powerprofiles, "SET_TIMEOUT_MS", 100):
+            source.set_profile(PERFORMANCE)
+            self.assertTrue(pump(lambda: source.snapshot.failure is not None, 3))
+        self.deliver(source, parameters=GLib.Variant("(s)", (INTERFACE,)))     # something it cannot use: an error
+        self.assertEqual(source.snapshot.state, ERROR)
+        fake.hold = None
+        fake.answer_held()                                             # applied, and announced to a source in error
+        source.retry()
+        self.assertTrue(pump(lambda: source.snapshot.state == READY))
+        self.assertEqual((source.snapshot.active, source.snapshot.failure), (PERFORMANCE, None))
+
+    def test_the_kernels_files_are_read_again_when_the_answer_comes(self):
+        fake = self.fake(active=BALANCED)
+        fake.late = lambda call: call.member == "Set"
+        self.kernel("balanced", "1")
+        source = self.ready()
+        source.set_profile(SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.active == SAVER))
+        self.assertEqual(source.snapshot.evidence, Evidence("balanced", "on"))  # read with the announcement
+        self.kernel("quiet", "0")
+        fake.answer_held()
+        self.assertTrue(pump(lambda: not source.snapshot.pending))
+        self.assertEqual(source.snapshot.evidence, Evidence("quiet", "off"))
+
     def test_a_request_before_this_visits_own_reading_is_unavailable(self):
         fake = self.fake(active=BALANCED)
         source = self.ready()
@@ -1146,6 +1182,38 @@ class RememberTest(BusCase):
         self.assertTrue(pump(lambda: gone(child) and source.idle, 3))
         self.assertEqual(self.record(second)["argv"][1:], ["autodetect", SAVER])
         self.assertEqual((source.snapshot.active, source.snapshot.note, self.timers.pending), (SAVER, "", {}))
+
+    def test_a_new_choice_ends_the_last_command_before_the_new_profile_is_asked_for(self):
+        first, second = stand_in(self.home / "first", gate=True, bus=self.bus.address), stand_in(self.home / "second")
+        scripts = iter((first, second))
+        fake = self.fake(active=BALANCED)
+        source = self.ready(self.source(find_helper=lambda: str(next(scripts))))
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: (first.parent / "record" / "waiting").exists()))
+        leader = self.record(first)["pid"]
+        fake.late = lambda call: call.member == "Set" and call.sender == source._connection.get_unique_name()
+        source.set_profile(SAVER)
+        self.assertTrue(pump(lambda: fake.held))                       # applied; its answer is still on its way
+        self.assertTrue(pump(lambda: gone(leader), 1), "the last choice's command still runs")
+        self.open_gate(first)
+        fake.answer_held()
+        self.assertTrue(pump(lambda: source.idle))
+        self.assertEqual((fake.active, source.snapshot.active, source.snapshot.note), (SAVER, SAVER, ""))
+        self.assertFalse((first.parent / "record" / "done").exists())
+
+    def test_omarchy_is_not_told_when_another_program_changed_the_profile_before_the_answer(self):
+        script = stand_in(self.home / "never")
+        fake = self.fake(active=BALANCED)
+        fake.late = lambda call: call.member == "Set"
+        source = self.with_helper(script)
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: fake.held))
+        fake.external(SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.active == SAVER))
+        fake.answer_held()
+        self.assertTrue(pump(lambda: not source.snapshot.pending))
+        self.assertEqual((source.snapshot.note, source.helping, self.timers.delays), (CHANGED_ELSEWHERE, False, []))
+        self.assertFalse((script.parent / "record").exists() and any((script.parent / "record").iterdir()))
 
     def test_another_programs_change_ends_the_command_so_it_cannot_switch_back(self):
         script = stand_in(self.home / "hang", "hang")
