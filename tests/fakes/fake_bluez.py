@@ -3,24 +3,45 @@
 ``FakeBlueZ`` owns ``org.bluez`` and serves what Gaming Home uses of BlueZ: the ObjectManager at ``/``,
 ``AgentManager1`` at ``/org/bluez``, adapters (``Adapter1``), devices (``Device1``), a device's own ``Battery1`` and
 battery objects below a device. The interface descriptions were written by hand from the names and types in BlueZ's
-documented D-Bus API; no code or XML of BlueZ is copied.
+documented D-Bus API; no code or XML of BlueZ is copied. Where it matters, the fake follows what BlueZ 5.87 does
+(``src/device.c``, ``src/adapter.c``, ``src/agent.c``), not only what its documentation says.
 
 It answers ``org.freedesktop.DBus.Properties`` itself, so *every* method call that reaches it is recorded (sender,
-path, interface, member, arguments, and the destination and flags it was sent with) and can be held back (``hold``)
-or failed (``failures``), as with ``FakeUPower``. Like BlueZ:
+path, interface, member, arguments, and the destination and flags it was sent with). A test can fail a call
+(``failures``), and it can make the fake late in two ways:
+
+* ``defer``: the call is handled at once and only its answer waits for ``answer_deferred``, which is what BlueZ does with its
+  slow methods. ``Pair`` makes the bond and announces ``Bonded``, and then only the answer (and ``Paired``) wait: the
+  service discovery BlueZ runs after a bond. ``Connect``'s answer waits, and a ``Disconnect`` meanwhile answers it
+  ``br-connection-canceled``. ``StartDiscovery`` counts the client as searching with its start pending, and
+  ``StopDiscovery`` keeps it searching until answered, so a stop or a start from that client meanwhile is refused
+  ``InProgress``. A write of ``Powered`` waits, and another one meanwhile gets ``Busy``.
+* ``hold``: the call is not handled at all until ``answer_held``, and that client's later calls queue behind it: a
+  stuck or very slow bluetoothd, which BlueZ itself is not.
+
+Like BlueZ:
 
 * agents queue: the first one registered is the default, and a program's own agent answers the pairings that program
   starts (``RequestDefaultAgent`` would move one to the front);
-* one client's calls are handled in order (a call held back holds back that client's later calls too);
-* each client has its own discovery session per adapter; a stop is refused while that client's start is unanswered;
+* each client has its own discovery session per adapter;
 * a client whose connection goes loses its discovery sessions, its agent and its pairing (``NameOwnerChanged``);
-* writing ``Powered`` is answered before the change is announced, and refused while rfkill blocks the adapter.
+* ``Connect`` on a device whose profiles are all connected, and ``Disconnect`` on a disconnected one, succeed;
+* writing ``Powered`` is answered before the change is announced, and refused ``Blocked`` while rfkill blocks the
+  adapter.
 
-``Pair()`` runs the device's script (``scripts[path]``): calls to the pairing agent, one after another, each sent
-when the one before was answered. A step is ``(member, *arguments)`` without the device, ``WAIT`` (go on when the test
-calls ``resume``) or ``(FAIL, error name)``. The pairing succeeds when the script is done; an agent that answers
-``Rejected`` or ``Canceled`` ends it the way BlueZ does. Tests need ``dbus-daemon`` and PyGObject;
-``PrivateBus.start`` skips them when either is missing.
+``Pair()`` brings the link up (``Connected``) unless ``link_on_pair`` is off, then runs the device's script
+(``scripts[path]``): calls to the pairing agent, each sent when the one before was answered. A step is
+``(member, *arguments)`` without the device, ``WAIT`` (go on when the test calls ``resume``), ``BOND`` (the bond is
+made here: ``Bonded``, and the pairing request is over) or ``(FAIL, error name)``. At the end come ``Bonded``, then
+``Paired``, then the answer: BlueZ sends pending property signals before any reply. An agent that refuses makes BlueZ
+refuse the pairing to the device, which comes back from ``Pair()`` as ``AuthenticationFailed``.
+
+``CancelPairing`` while the pairing request exists ends ``Pair()`` with ``AuthenticationCanceled``. Without one (after
+the bond, or with no pairing at all) BlueZ 5.87 removes the device's keys from the kernel and answers
+``DoesNotExist``; the fake records that in ``unpaired`` and drops the link. BlueZ is not told of its own unpairing,
+so ``Paired`` and ``Bonded`` stay as they were. A device removed during a pairing gets ``Pair()`` answered first:
+``AuthenticationCanceled`` while the link is up, ``ConnectionAttemptFailed`` otherwise, and no answer at all once
+the bond is made. Tests need ``dbus-daemon`` and PyGObject; ``PrivateBus.start`` skips them when either is missing.
 """
 
 from __future__ import annotations
@@ -41,7 +62,7 @@ AGENT_MANAGER = "org.bluez.AgentManager1"
 AGENT = "org.bluez.Agent1"
 ERROR = "org.bluez.Error."
 REJECTED, CANCELED = ERROR + "Rejected", ERROR + "Canceled"
-WAIT, FAIL = "wait", "fail"
+WAIT, FAIL, BOND = "wait", "fail", "bond"
 CAPABILITIES = ("DisplayOnly", "DisplayYesNo", "KeyboardOnly", "NoInputNoOutput", "KeyboardDisplay", "")
 
 # D-Bus types of the properties the fake knows.
@@ -161,8 +182,10 @@ class Pairing:
     invocation: object
     agent: tuple                     # (unique name, object path) of the agent BlueZ asks
     steps: list
+    deferred: bool = False           # the answer waits for ``answer_deferred`` once the bond is made
     waiting: AgentCall | None = None
     paused: bool = False
+    bonded: bool = False             # the bond is made: BlueZ's pairing request is over
 
 
 class FakeBlueZ:
@@ -173,8 +196,10 @@ class FakeBlueZ:
         self.unique_name = self.connection.get_unique_name()
         self.calls: list[tuple] = []        # (sender, path, interface, member, arguments)
         self.sent: list[tuple] = []         # (destination, flags) of each recorded call
-        self.hold = None                    # predicate(call) -> True keeps the call back
+        self.hold = None                    # predicate(call) -> True: the call is not handled until answer_held
         self.held: list = []
+        self.defer = None                   # predicate(call) -> True: handled now, answered by answer_deferred
+        self.deferred: list = []            # (member, function that answers)
         self.failures: dict = {}            # member or (path, member) -> (error name, message)
         self.objects: dict[str, dict[str, dict]] = {}
         self.registrations: dict[str, list[int]] = {}
@@ -182,6 +207,13 @@ class FakeBlueZ:
         self.queue: list[str] = []          # senders whose agents may be the default, the default first
         self.sessions: dict[str, set] = {}  # adapter path -> senders searching
         self.starting: set = set()          # (adapter path, sender) whose start is unanswered
+        self.stopping: set = set()          # (adapter path, sender) whose stop is unanswered
+        self.powering: set = set()          # adapter paths with a write of Powered unanswered
+        self.connecting: dict = {}          # device path -> invocation of a Connect that waits
+        self.profiles: set = set()          # devices whose profiles are connected, not just their link
+        self.unpaired: list[str] = []       # devices whose keys BlueZ removed on CancelPairing
+        self.link_on_pair = True            # Pair() brings the link up first, as BlueZ does
+        self._call = None                   # the call being handled, for ``_later``
         self.gone: set = set()              # unique names that left the bus
         self.scripts: dict[str, list] = {}  # device path -> what Pair() asks the agent
         self.pairings: dict[str, Pairing] = {}
@@ -269,6 +301,8 @@ class FakeBlueZ:
             interfaces[BATTERY] = {"Percentage": variant("Percentage", battery), "Source": variant("Source", "HFP")}
         if script is not None:
             self.scripts[path] = list(script)
+        if connected:
+            self.profiles.add(path)
         self._export(path, interfaces, signal)
         return path
 
@@ -276,7 +310,9 @@ class FakeBlueZ:
         for child in [other for other in self.objects if other.startswith(path + "/")]:
             self._unexport(child)
         pairing = self.pairings.get(path)
-        if pairing is not None:     # BlueZ answers the pairing first and announces the removal afterwards
+        if pairing is not None and pairing.bonded:
+            del self.pairings[path]             # BlueZ drops the waiting Pair() without an answer
+        elif pairing is not None:   # BlueZ answers the pairing first and announces the removal afterwards
             if self.value(path, DEVICE, "Connected"):
                 self._fail_pair(pairing, ERROR + "AuthenticationCanceled", "Authentication Canceled")
             else:
@@ -347,6 +383,7 @@ class FakeBlueZ:
         if name in self.queue:
             self.queue.remove(name)
         self.starting = {(path, sender) for path, sender in self.starting if sender != name}
+        self.stopping = {(path, sender) for path, sender in self.stopping if sender != name}
         for path, senders in self.sessions.items():
             if name in senders:
                 senders.discard(name)
@@ -367,9 +404,7 @@ class FakeBlueZ:
         message = invocation.get_message()
         self.calls.append(call)
         self.sent.append((message.get_destination(), message.get_flags()))
-        if (interface, member) == (ADAPTER, "StartDiscovery"):
-            self.starting.add((path, sender))
-        # Like BlueZ, one client's calls are handled in the order they came: behind a held call, its later ones wait.
+        # A stuck bluetoothd still handles one client's calls in order: behind a held call, its later ones wait.
         if (self.hold is not None and self.hold(call)) or any(who == sender for who, _answer in self.held):
             self.held.append((sender, lambda: self._answer(call, invocation)))
             return
@@ -380,10 +415,24 @@ class FakeBlueZ:
         for _sender, answer in held:
             answer()
 
+    def _later(self, call, answer) -> bool:
+        """Keep ``answer`` for ``answer_deferred`` when the test defers this call; False: answer now."""
+        if self.defer is None or not self.defer(call):
+            return False
+        self.deferred.append((call[3], answer))
+        return True
+
+    def answer_deferred(self, member=None):
+        """Send the answers kept back by ``defer`` (of ``member`` only, when given), in the order they came."""
+        kept, self.deferred = self.deferred, []
+        for name, answer in kept:
+            if member is None or name == member:
+                answer()
+            else:
+                self.deferred.append((name, answer))
+
     def _answer(self, call, invocation):
         sender, path, interface, member, arguments = call
-        if (interface, member) == (ADAPTER, "StartDiscovery"):
-            self.starting.discard((path, sender))
         failure = self.failures.get((path, member)) or self.failures.get(member)
         if failure is not None:
             invocation.return_dbus_error(*failure)
@@ -397,6 +446,7 @@ class FakeBlueZ:
         if handler is None:
             invocation.return_dbus_error("org.freedesktop.DBus.Error.AccessDenied", "the fake refuses this call")
             return
+        self._call = call
         handler(sender, path, arguments, invocation)
 
     @staticmethod
@@ -434,15 +484,28 @@ class FakeBlueZ:
             invocation.return_dbus_error("org.freedesktop.DBus.Error.InvalidArgs", "No such property")
             return
         if (interface, name) == (ADAPTER, "Powered"):
-            if value and self.value(path, ADAPTER, "PowerState") == "off-blocked":
-                self._error(invocation, "Failed", "Blocked through rfkill")
+            if path in self.powering:
+                self._error(invocation, "Busy")
                 return
-            invocation.return_value(None)        # BlueZ answers first and announces the change afterwards
-            if self.powered_follows:
-                self.set(path, ADAPTER, Powered=bool(value), PowerState="on" if value else "off")
-                if not value:
-                    self.sessions[path] = set()
-                    self._discovering(path)
+            if value and self.value(path, ADAPTER, "PowerState") == "off-blocked":
+                self._error(invocation, "Blocked", "Blocked through rfkill")
+                return
+            if bool(value) == self._powered(path):
+                invocation.return_value(None)    # nothing to change: answered, and nothing announced
+                return
+
+            def done():
+                self.powering.discard(path)
+                invocation.return_value(None)    # BlueZ answers first and announces the change afterwards
+                if self.powered_follows and path in self.objects:
+                    self.set(path, ADAPTER, Powered=bool(value), PowerState="on" if value else "off")
+                    if not value:
+                        self.sessions[path] = set()
+                        self._discovering(path)
+
+            self.powering.add(path)
+            if not self._later(self._call, done):
+                done()
             return
         self.set(path, interface, **{name: GLib.Variant(properties[name].get_type_string(), value)})
         invocation.return_value(None)
@@ -480,25 +543,39 @@ class FakeBlueZ:
     def _StartDiscovery(self, sender, path, _arguments, invocation):
         if not self._powered(path):
             self._error(invocation, "NotReady")
-        elif sender in self.sessions[path]:
+        elif sender in self.sessions[path]:      # searching, starting or still stopping: BlueZ says busy
             self._error(invocation, "InProgress", "Operation already in progress")
         else:
-            if sender not in self.gone:          # a client that left has no session to keep
-                self.sessions[path].add(sender)
-                self._discovering(path)
-            invocation.return_value(None)
+            self.sessions[path].add(sender)
+            self.starting.add((path, sender))
+
+            def done():
+                self.starting.discard((path, sender))
+                if sender in self.sessions.get(path, ()):
+                    self._discovering(path)
+                invocation.return_value(None)
+
+            if not self._later(self._call, done):
+                done()
 
     def _StopDiscovery(self, sender, path, _arguments, invocation):
         if not self._powered(path):
             self._error(invocation, "NotReady")
-        elif (path, sender) in self.starting:
-            self._error(invocation, "InProgress", "Operation already in progress")
         elif sender not in self.sessions[path]:
             self._error(invocation, "Failed", "No discovery started")
+        elif (path, sender) in self.starting or (path, sender) in self.stopping:
+            self._error(invocation, "InProgress", "Operation already in progress")
         else:
-            self.sessions[path].discard(sender)
-            self._discovering(path)
-            invocation.return_value(None)
+            self.stopping.add((path, sender))
+
+            def done():
+                self.stopping.discard((path, sender))
+                self.sessions.get(path, set()).discard(sender)
+                self._discovering(path)
+                invocation.return_value(None)
+
+            if not self._later(self._call, done):
+                done()
 
     def _RemoveDevice(self, _sender, path, arguments, invocation):
         device = arguments[0]
@@ -511,18 +588,34 @@ class FakeBlueZ:
             invocation.return_value(None)
 
     def _Connect(self, _sender, path, _arguments, invocation):
-        if self.value(path, DEVICE, "Connected"):
-            self._error(invocation, "AlreadyConnected")
-        else:
-            self.set(path, DEVICE, Connected=True, ServicesResolved=True)
-            invocation.return_value(None)
+        if path in self.profiles:
+            invocation.return_value(None)        # all connected already: BlueZ 5.87 answers success
+            return
+
+        def done():
+            if self.connecting.get(path) is not invocation:
+                return                           # a Disconnect answered it meanwhile
+            del self.connecting[path]
+            if path in self.objects:
+                self.profiles.add(path)
+                if not self.value(path, DEVICE, "Connected"):
+                    self.set(path, DEVICE, Connected=True, ServicesResolved=True)
+                invocation.return_value(None)
+            else:
+                invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownObject", "no such object")
+
+        self.connecting[path] = invocation
+        if not self._later(self._call, done):
+            done()
 
     def _Disconnect(self, _sender, path, _arguments, invocation):
-        if not self.value(path, DEVICE, "Connected"):
-            self._error(invocation, "NotConnected")
-        else:
+        waiting = self.connecting.pop(path, None)
+        if waiting is not None:                  # a Connect that waits is answered first
+            waiting.return_dbus_error(ERROR + "Failed", "br-connection-canceled")
+        self.profiles.discard(path)
+        if self.value(path, DEVICE, "Connected"):
             self.set(path, DEVICE, Connected=False, ServicesResolved=False)
-            invocation.return_value(None)
+        invocation.return_value(None)            # not connected: BlueZ 5.87 answers success too
 
     # ---- pairing -----------------------------------------------------------
     def _Pair(self, sender, path, _arguments, invocation):
@@ -537,19 +630,27 @@ class FakeBlueZ:
             if agent is None:
                 self._error(invocation, "AuthenticationFailed")
                 return
-            pairing = Pairing(path, sender, invocation, agent, list(self.scripts.get(path, [])))
+            deferred = self.defer is not None and self.defer(self._call)
+            pairing = Pairing(path, sender, invocation, agent, list(self.scripts.get(path, [])), deferred)
             self.pairings[path] = pairing
+            if self.link_on_pair and not self.value(path, DEVICE, "Connected"):
+                self.set(path, DEVICE, Connected=True)
             self._next(pairing)
 
     def _CancelPairing(self, _sender, path, _arguments, invocation):
         pairing = self.pairings.get(path)
-        if pairing is None:
-            self._error(invocation, "DoesNotExist", "Does Not Exist")
+        if pairing is not None and not pairing.bonded:
+            if pairing.waiting is not None and not pairing.waiting.done:
+                self.ask("Cancel", pairing=pairing)
+            self._fail_pair(pairing, ERROR + "AuthenticationCanceled", "Authentication Canceled")
+            invocation.return_value(None)
             return
-        if pairing.waiting is not None and not pairing.waiting.done:
-            self.ask("Cancel", pairing=pairing)
-        self._fail_pair(pairing, ERROR + "AuthenticationCanceled", "Authentication Canceled")
-        invocation.return_value(None)
+        # BlueZ 5.87 cancel_pairing() without a pairing request: btd_adapter_remove_bonding(), then DoesNotExist.
+        self.unpaired.append(path)
+        self.profiles.discard(path)
+        if path in self.objects and self.value(path, DEVICE, "Connected"):
+            self.set(path, DEVICE, Connected=False, ServicesResolved=False)
+        self._error(invocation, "DoesNotExist", "Does Not Exist")
 
     def ask(self, member, *arguments, pairing: Pairing | None = None, then=None) -> AgentCall:
         """Ask the agent of a pairing (the only one running, by default) as BlueZ would. Before ``Cancel`` and
@@ -566,11 +667,18 @@ class FakeBlueZ:
         if self.pairings.get(pairing.device) is not pairing or pairing.paused:
             return
         if not pairing.steps:
-            self.finish_pair(pairing.device)
+            self._bond(pairing)
+            if pairing.deferred:
+                self.deferred.append(("Pair", lambda: self._complete(pairing)))
+            else:
+                self._complete(pairing)
             return
         step = pairing.steps.pop(0)
         if step == WAIT:
             pairing.paused = True
+        elif step == BOND:
+            self._bond(pairing)
+            self._next(pairing)
         elif step[0] == FAIL:
             self._fail_pair(pairing, step[1], "scripted")
         elif step[0] in ("Release", "Cancel", "DisplayPasskey"):     # BlueZ wants no answer to these
@@ -582,11 +690,7 @@ class FakeBlueZ:
     def _answered(self, pairing: Pairing, record: AgentCall):
         if self.pairings.get(pairing.device) is not pairing or pairing.waiting is not record:
             return
-        if record.error == REJECTED:
-            self._fail_pair(pairing, ERROR + "AuthenticationRejected", "Authentication Rejected")
-        elif record.error == CANCELED:
-            self._fail_pair(pairing, ERROR + "AuthenticationCanceled", "Authentication Canceled")
-        elif record.error:
+        if record.error:                         # BlueZ refuses the pairing to the device, which then fails
             self._fail_pair(pairing, ERROR + "AuthenticationFailed", "Authentication Failed")
         else:
             self._next(pairing)
@@ -604,8 +708,21 @@ class FakeBlueZ:
         if error is not None:
             self._fail_pair(pairing, error, "scripted")
             return
-        del self.pairings[device]
-        self.set(device, DEVICE, Paired=True, Bonded=True)
+        self._bond(pairing)
+        self._complete(pairing)
+
+    def _bond(self, pairing: Pairing):
+        """The keys are made and stored: BlueZ announces Bonded at once, and its pairing request is over."""
+        if not pairing.bonded:
+            pairing.bonded = True
+            self.set(pairing.device, DEVICE, Bonded=True)
+
+    def _complete(self, pairing: Pairing):
+        """Service discovery is over: Paired is announced, then Pair() is answered."""
+        if self.pairings.get(pairing.device) is not pairing:
+            return
+        del self.pairings[pairing.device]
+        self.set(pairing.device, DEVICE, Paired=True)
         pairing.invocation.return_value(None)
 
     def _fail_pair(self, pairing: Pairing, error: str, message: str):

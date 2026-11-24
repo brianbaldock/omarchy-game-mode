@@ -401,7 +401,7 @@ class _Device:
     paired: bool = False
     trusted: bool = False
     connected: bool = False
-    connectable: bool | None = None
+    connectable: bool | None = None         # not a Device1 property in BlueZ 5.87; kept for a BlueZ that has one
     battery: int | None = None
     view: bluetooth.Device | None = None    # what the snapshot lists
 
@@ -1432,7 +1432,7 @@ class BlueZ:
             if record.paired:
                 remembered.append(record)
             elif record.connectable is False:
-                continue                        # BlueZ says it cannot be connected to
+                continue                        # a newer BlueZ says it cannot be connected to (5.87 never does)
             elif record.view.name:
                 named.append(record)
             else:
