@@ -7,8 +7,10 @@ real daemon or changes the machine's profile.
 """
 
 import ast
+import contextlib
 import os
 import shutil
+import signal
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,8 +24,9 @@ from fakes.fake_ppd import BUS_NAME, INTERFACE, OBJECT_PATH, PROPERTIES_IFACE, T
 from fakes.fake_upower import activatable_bus_config
 from fakes.loop import pump
 from gaminghome import power, powerprofiles
-from gaminghome.power import (ABSENT, BALANCED, CHANGED_ELSEWHERE, DENIED, ERROR, FAILED, PERFORMANCE, PROFILES, READY,
-                              SAVER, TIMEOUT, UNAVAILABLE, UNKNOWN, UNSUPPORTED, Evidence, Failure, Hold)
+from gaminghome.power import (ABSENT, BALANCED, CHANGED_ELSEWHERE, DENIED, ERROR, FAILED, NOT_REMEMBERED, PERFORMANCE,
+                              PROFILES, READY, SAVER, TIMEOUT, UNAVAILABLE, UNKNOWN, UNSUPPORTED, Evidence, Failure,
+                              Hold)
 from gaminghome.powerprofiles import PowerProfiles, Unusable, read_properties
 
 SCRATCH = Path(__file__).resolve().parent / "scratch" / "powerprofiles"
@@ -36,6 +39,35 @@ def scratch(test, name) -> Path:
     directory.mkdir(parents=True)
     test.addCleanup(shutil.rmtree, SCRATCH, True)
     return directory
+
+
+def stand_in(directory: Path, mode="ok", gate=False) -> Path:
+    """A stand-in for Omarchy's omarchy-powerprofiles-set in ``directory``. It writes down in ``record/`` how it was
+    started (argv, its environment as it was handed over, stdin, where its standard streams go, its process group and
+    which python3 its PATH finds), then succeeds (``ok``), fails (``fail``) or hangs with a child of its own
+    (``hang``). With ``gate`` it first waits until the test writes to ``gate``."""
+    record = directory / "record"
+    record.mkdir(parents=True)
+    lines = ["#!/bin/sh", f'cd "{record}" || exit 3', 'printf "%s\\n" "$0" "$@" > argv',
+             "cat /proc/$$/environ > environ", "cat > stdin", "cat /proc/$$/stat > stat",
+             "readlink /proc/$$/fd/0 /proc/$$/fd/1 /proc/$$/fd/2 > fds", "command -v python3 > python3"]
+    if gate:
+        os.mkfifo(directory / "gate")
+        lines += [": > waiting", f'read line < "{directory}/gate"']
+    lines += {"ok": ["exit 0"], "fail": ["exit 1"], "hang": ["sleep 30 &", "echo $! > child", "sleep 30"]}[mode]
+    script = directory / "omarchy-powerprofiles-set"
+    script.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+def gone(pid: int) -> bool:
+    """The process has ended: it is not there any more, or only as a zombie its new parent has not reaped yet."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+            return handle.read().rsplit(")", 1)[1].split()[0] in ("Z", "X")
+    except OSError:
+        return True
 
 
 def set_call(profile, value_type="s", interface=INTERFACE, name="ActiveProfile"):
@@ -928,6 +960,195 @@ class ChangedElsewhereTest(BusCase):
         fake.external(SAVER)
         self.assertTrue(pump(lambda: source.snapshot.active == SAVER))
         self.assertEqual(source.snapshot.note, "")
+
+
+class RememberTest(BusCase):
+    """Omarchy's command, played by a stand-in that the source finds through the injected lookup."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = scratch(self, "helper")
+        self.addCleanup(self.end_stand_ins)
+
+    def end_stand_ins(self):
+        """A failed test must not leave a stand-in behind: end every group one recorded, and let GLib reap it."""
+        for stat in self.home.glob("*/record/stat"):
+            with contextlib.suppress(OSError, ValueError, IndexError):
+                os.killpg(int(stat.read_text().rsplit(")", 1)[1].split()[2]), signal.SIGKILL)
+        pump(lambda: not any(source.helping for source in self.sources), 3)
+
+    def with_helper(self, script) -> PowerProfiles:
+        return self.ready(self.source(find_helper=lambda: str(script)))
+
+    def record(self, script) -> dict:
+        record = script.parent / "record"
+        stat = (record / "stat").read_text()
+        return {"argv": (record / "argv").read_text().splitlines(),
+                "environ": dict(entry.split("=", 1) for entry in (record / "environ").read_text().split("\0") if entry),
+                "stdin": (record / "stdin").read_text(), "fds": (record / "fds").read_text().splitlines(),
+                "pid": int(stat.split()[0]), "group": int(stat.rsplit(")", 1)[1].split()[2]),
+                "python3": (record / "python3").read_text().strip()}
+
+    def child_of(self, script) -> int:
+        """The process the hanging stand-in started, once it has."""
+        child = script.parent / "record" / "child"
+        self.assertTrue(pump(lambda: child.exists() and child.read_text().strip()), "the stand-in did not start")
+        return int(child.read_text())
+
+    def open_gate(self, script):
+        """Let a gated stand-in go on. The pipe stays open until the test ends, so the line waits for its reader."""
+        descriptor = os.open(script.parent / "gate", os.O_RDWR | os.O_NONBLOCK)
+        self.addCleanup(os.close, descriptor)
+        os.write(descriptor, b"go\n")
+
+    def test_after_a_change_omarchys_command_keeps_it_and_gets_only_what_it_needs(self):
+        script = stand_in(self.home / "ok")
+        shims = self.home / "shims"
+        shims.mkdir()
+        (shims / "python3").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (shims / "python3").chmod(0o755)
+        self.fake(active=BALANCED)
+        source = self.with_helper(script)
+        environment = {"PATH": f"{shims}:{os.environ.get('PATH', '/usr/bin')}", "HOME": "/home/user",
+                       "LANG": "C.UTF-8", "XDG_RUNTIME_DIR": "/run/user/1000",
+                       "XDG_STATE_HOME": "/home/user/.local/state",
+                       "DBUS_SYSTEM_BUS_ADDRESS": "unix:path=/run/dbus/system_bus_socket",
+                       "GAMING_HOME_TEST_LEAK": "1"}
+        with mock.patch.dict(os.environ, environment):
+            source.set_profile(PERFORMANCE)
+            self.assertTrue(pump(lambda: not source.snapshot.pending))
+        self.assertTrue(pump(lambda: source.idle))
+        self.assertEqual((source.snapshot.active, source.snapshot.note, source.snapshot.failure),
+                         (PERFORMANCE, "", None))
+        seen = self.record(script)
+        self.assertEqual(seen["argv"], [str(script), "autodetect", PERFORMANCE])
+        self.assertEqual(seen["environ"], {"PATH": f"{script.parent}:/usr/local/bin:/usr/bin:/bin",
+                                           **{name: environment[name] for name in powerprofiles.HELPER_ENVIRONMENT}})
+        self.assertFalse(seen["python3"].startswith(str(shims)), seen["python3"])
+        self.assertEqual((seen["stdin"], seen["fds"]), ("", ["/dev/null"] * 3))
+        self.assertEqual(seen["group"], seen["pid"])                   # a process group of its own
+        self.assertNotEqual(seen["group"], os.getpgrp())
+        self.assertEqual((self.timers.delays, self.timers.pending, len(self.timers.cancelled)),
+                         ([powerprofiles.HELPER_LIMIT_MS], {}, 1))
+
+    def test_choosing_the_active_profile_still_tells_omarchy_and_asks_the_service_nothing(self):
+        script = stand_in(self.home / "ok")
+        fake = self.fake(active=BALANCED)
+        source = self.with_helper(script)
+        source.set_profile(BALANCED)
+        self.assertTrue(source.helping)
+        self.assertTrue(pump(lambda: source.idle))
+        self.assertEqual(self.record(script)["argv"], [str(script), "autodetect", BALANCED])
+        self.assertEqual(([call.member for call in self.sent(fake, source)], source.snapshot.note), (["GetAll"], ""))
+
+    def test_a_command_that_fails_is_a_note_and_the_profile_stays_set(self):
+        script = stand_in(self.home / "fail", "fail")
+        fake = self.fake(active=BALANCED)
+        source = self.with_helper(script)
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: source.snapshot.note == NOT_REMEMBERED and source.idle))
+        self.assertEqual((source.snapshot.active, source.snapshot.failure, fake.active),
+                         (PERFORMANCE, None, PERFORMANCE))
+
+    def test_a_command_that_hangs_is_killed_with_everything_it_started_when_its_limit_runs_out(self):
+        script = stand_in(self.home / "hang", "hang")
+        self.fake(active=BALANCED)
+        source = self.with_helper(script)
+        source.set_profile(PERFORMANCE)
+        child = self.child_of(script)
+        leader = self.record(script)["pid"]
+        self.assertEqual((source.snapshot.pending, source.helping, self.timers.delays),
+                         ("", True, [powerprofiles.HELPER_LIMIT_MS]))
+        self.timers.fire()
+        self.assertTrue(pump(lambda: not source.helping and gone(child), 3), "the group outlived its limit")
+        self.assertTrue(gone(leader))
+        self.assertEqual((source.snapshot.note, source.idle, self.timers.pending), (NOT_REMEMBERED, True, {}))
+
+    def test_without_omarchys_command_the_step_is_skipped_without_a_note(self):
+        fake = self.fake(active=BALANCED)
+        for lookup in (lambda: None, lambda: "omarchy-powerprofiles-set", lambda: 1 / 0):
+            with self.subTest():
+                source = self.ready(self.source(find_helper=lookup))
+                source.set_profile(SAVER if fake.active != SAVER else BALANCED)
+                self.assertTrue(pump(lambda: source.idle and not source.snapshot.pending))
+                self.assertEqual((source.snapshot.note, source.helping, self.timers.delays), ("", False, []))
+                source.stop()
+
+    def test_a_command_that_cannot_be_started_is_a_note(self):
+        script = self.home / "broken" / "omarchy-powerprofiles-set"
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")         # not executable
+        self.fake(active=BALANCED)
+        source = self.with_helper(script)
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: source.snapshot.note == NOT_REMEMBERED and source.idle))
+        self.assertEqual((source.snapshot.failure, self.timers.pending), (None, {}))
+
+    def test_the_command_runs_on_after_stop_and_reports_nothing(self):
+        script = stand_in(self.home / "gated", "fail", gate=True)
+        self.fake(active=BALANCED)
+        source = self.with_helper(script)
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: (script.parent / "record" / "waiting").exists()))
+        self.assertEqual(source.snapshot.pending, "")                  # the request ended with the reply
+        source.stop()
+        told = len(self.seen)
+        limit, = self.timers.pending                                   # the one thing left: the command's own limit
+        self.assertEqual((self.timers.delays, source.helping, source.owner),
+                         ([powerprofiles.HELPER_LIMIT_MS], True, None))
+        self.open_gate(script)
+        self.assertTrue(pump(lambda: not source.helping))
+        self.assertEqual((len(self.seen), source.snapshot.note, self.timers.pending, self.timers.cancelled),
+                         (told, "", {}, [limit]))
+
+    def test_after_stop_a_command_that_hangs_still_ends_at_its_limit_and_reports_nothing(self):
+        script = stand_in(self.home / "hang", "hang")
+        self.fake(active=BALANCED)
+        source = self.with_helper(script)
+        source.set_profile(PERFORMANCE)
+        child = self.child_of(script)
+        source.stop()
+        told = len(self.seen)
+        self.timers.fire()
+        self.assertTrue(pump(lambda: not source.helping and gone(child), 3))
+        self.assertEqual((len(self.seen), source.snapshot.note, self.timers.pending), (told, "", {}))
+
+    def test_a_new_choice_ends_the_command_still_running_for_the_last_one(self):
+        first, second = stand_in(self.home / "first", "hang"), stand_in(self.home / "second")
+        scripts = iter((first, second))
+        self.fake(active=BALANCED)
+        source = self.ready(self.source(find_helper=lambda: str(next(scripts))))
+        source.set_profile(PERFORMANCE)
+        child = self.child_of(first)
+        source.set_profile(SAVER)
+        self.assertTrue(pump(lambda: gone(child) and source.idle, 3))
+        self.assertEqual(self.record(second)["argv"][1:], ["autodetect", SAVER])
+        self.assertEqual((source.snapshot.active, source.snapshot.note, self.timers.pending), (SAVER, "", {}))
+
+    def test_another_programs_change_ends_the_command_so_it_cannot_switch_back(self):
+        script = stand_in(self.home / "hang", "hang")
+        fake = self.fake(active=BALANCED)
+        source = self.with_helper(script)
+        source.set_profile(PERFORMANCE)
+        child = self.child_of(script)
+        fake.external(SAVER)
+        self.assertTrue(pump(lambda: gone(child) and not source.helping, 3))
+        self.assertEqual((source.snapshot.note, source.snapshot.active, self.timers.pending),
+                         (CHANGED_ELSEWHERE, SAVER, {}))
+
+
+    def test_a_command_left_running_by_the_last_visit_ends_when_another_program_changes_the_profile(self):
+        script = stand_in(self.home / "hang", "hang")
+        fake = self.fake(active=BALANCED)
+        source = self.with_helper(script)
+        source.set_profile(PERFORMANCE)
+        child = self.child_of(script)
+        source.stop()
+        source.start()                                                 # not idle: the command still runs
+        self.assertTrue(pump(lambda: fake.count("GetAll") == 2))       # answered before the change below is sent
+        fake.external(SAVER)
+        self.assertTrue(pump(lambda: gone(child) and not source.helping, 3))
+        self.assertEqual((source.snapshot.note, source.snapshot.active, self.timers.pending), ("", SAVER, {}))
 
 
 class WatchTest(unittest.TestCase):

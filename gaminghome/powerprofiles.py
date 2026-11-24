@@ -7,15 +7,19 @@ asks; this module says how that reaches the machine.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 import os
+import shutil
+import signal
+import subprocess
 
 from gi.repository import Gio, GLib
 
 from . import power
-from .power import (ABSENT, CHANGED_ELSEWHERE, DENIED, ERROR, FAILED, PROFILES, READY, TIMEOUT, UNAVAILABLE, UNKNOWN,
-                    UNSUPPORTED, Evidence, Failure, Hold, Snapshot)
+from .power import (ABSENT, CHANGED_ELSEWHERE, DENIED, ERROR, FAILED, NOT_REMEMBERED, PROFILES, READY, TIMEOUT,
+                    UNAVAILABLE, UNKNOWN, UNSUPPORTED, Evidence, Failure, Hold, Snapshot)
 
 BUS_NAME = "org.freedesktop.UPower.PowerProfiles"
 OBJECT_PATH = "/org/freedesktop/UPower/PowerProfiles"
@@ -25,6 +29,7 @@ ACTIVE_PROFILE = "ActiveProfile"
 
 CALL_TIMEOUT_MS = 5_000         # a reading of the service
 SET_TIMEOUT_MS = 5_000          # a change: PPD answers in milliseconds
+HELPER_LIMIT_MS = 10_000        # Omarchy's command takes well under a second
 
 MAX_REPLY_BYTES = 64 * 1024     # PPD answers GetAll with about a kilobyte
 MAX_PROFILES = 8                # PPD knows three
@@ -162,6 +167,45 @@ def helper_environment(script: str, environ) -> dict[str, str]:
     return environment
 
 
+def _which_helper() -> str | None:
+    return shutil.which(HELPER)
+
+
+def spawn_helper(argv: list[str], environment: dict[str, str], on_exit):
+    """Start ``argv`` with ``environment`` and no shell, in a process group of its own, with stdin closed and its
+    output dropped. ``on_exit(code)`` is called on the main loop once it has ended and been reaped. Returns a function
+    that kills the whole group, and does nothing once the process was reaped (its number may be another's by then)."""
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, env=environment, cwd="/", close_fds=True,
+                               process_group=0)
+
+    def exited(_pid, status):
+        try:
+            code = os.waitstatus_to_exitcode(status)
+        except ValueError:
+            code = -1
+        process.returncode = code                     # GLib reaped it: Popen must not wait for it again
+        on_exit(code)
+
+    GLib.child_watch_add(GLib.PRIORITY_DEFAULT, process.pid, exited)
+
+    def kill():
+        if process.returncode is None:
+            with contextlib.suppress(OSError):
+                os.killpg(process.pid, signal.SIGKILL)
+    return kill
+
+
+class _Run:
+    """One run of Omarchy's command."""
+
+    def __init__(self, profile: str):
+        self.profile = profile
+        self.kill = lambda: None    # ends its whole process group
+        self.limit = None           # the token of its time limit while that is pending
+        self.timed_out = False
+
+
 def _timeout_add(milliseconds, callback):
     def fire():
         callback()
@@ -217,6 +261,8 @@ class PowerProfiles:
         self._reading = False
         self._live = False       # the service was read in this visit, from the current owner
         self._armed = False      # a request of this visit succeeded: another program's change is worth a note
+        self._helper: _Run | None = None    # the run of Omarchy's command whose outcome is still worth a note
+        self._runs: set[_Run] = set()       # every run of it that has not been reaped yet
 
     # ---- what the window reads ---------------------------------------------
     @property
@@ -231,7 +277,12 @@ class PowerProfiles:
     @property
     def idle(self) -> bool:
         """No call in flight, no timer and no process: the source only waits for the service to say something."""
-        return not self._reading and not self._snapshot.pending
+        return not self._reading and not self._snapshot.pending and not self._runs
+
+    @property
+    def helping(self) -> bool:
+        """Omarchy's command is still running: the one thing that may outlive ``stop()``, bounded by its limit."""
+        return bool(self._runs)
 
     # ---- lifecycle ---------------------------------------------------------
     @_guarded
@@ -253,6 +304,7 @@ class PowerProfiles:
         self._visit += 1
         self._forget_owner()
         self._armed = False
+        self._helper = None                           # it runs on to its end or its limit, and reports nothing
         self._update(pending="", failure=None, note="")
         if watch is not None:
             self._unwatch_name(watch)
@@ -394,8 +446,10 @@ class PowerProfiles:
         failure = self._snapshot.failure
         if failure is not None and failure.code == TIMEOUT and active == failure.profile:
             changes["failure"] = None
-        if self._armed and not self._snapshot.pending:
-            changes["note"] = CHANGED_ELSEWHERE
+        if not self._snapshot.pending:
+            self._end_helper()                        # a run still going would set the old one again
+            if self._armed:
+                changes["note"] = CHANGED_ELSEWHERE
 
     # ---- operations --------------------------------------------------------
     @_guarded
@@ -414,12 +468,15 @@ class PowerProfiles:
             # The service would do nothing (and keep another program's hold), so it is not asked.
             self._armed = True
             self._update(failure=None, note="")
-        elif self._call(OBJECT_PATH, PROPERTIES_IFACE, "Set",
-                        GLib.Variant("(ssv)", (INTERFACE, ACTIVE_PROFILE, GLib.Variant("s", profile))), "()",
-                        SET_TIMEOUT_MS, self._on_set, profile):
-            self._update(pending=profile, failure=None, note="")
+            self._remember(profile)
         else:
-            self._update(failure=Failure(FAILED, profile), note="")
+            self._end_helper()                        # its choice no longer stands: it must not set it again
+            if self._call(OBJECT_PATH, PROPERTIES_IFACE, "Set",
+                          GLib.Variant("(ssv)", (INTERFACE, ACTIVE_PROFILE, GLib.Variant("s", profile))), "()",
+                          SET_TIMEOUT_MS, self._on_set, profile):
+                self._update(pending=profile, failure=None, note="")
+            else:
+                self._update(failure=Failure(FAILED, profile), note="")
         self._announce()
 
     @_guarded
@@ -430,18 +487,73 @@ class PowerProfiles:
             return                                    # forgotten: the owner left, or the source was stopped
         snapshot = self._snapshot
         changes = {"pending": "", "evidence": read_evidence(self._root)}
+        remember = False
         if isinstance(reply, GLib.Variant):
             # The reply is the outcome: the service applied the profile, and announced it, before it answered.
             if snapshot.state == READY:
                 self._armed = True
-                if snapshot.active != profile:
+                remember = snapshot.active == profile
+                if not remember:
                     changes["note"] = CHANGED_ELSEWHERE
         else:
             code = failure_code(reply)
             if code != TIMEOUT or snapshot.active != profile:  # a profile announced in time is no time-out
                 changes["failure"] = Failure(code, profile)
         self._update(**changes)
+        if remember:
+            self._remember(profile)
         self._announce()
+
+    # ---- Omarchy's memory of the choice ------------------------------------
+    def _remember(self, profile: str):
+        """Have Omarchy keep ``profile`` for the current power source, with its own command when it is installed.
+        Its outcome is a note at most: the profile is set either way."""
+        self._end_helper()
+        try:
+            script = (self._find_helper or _which_helper)()
+        except Exception:  # noqa: BLE001 - a lookup that fails finds nothing
+            script = None
+        if not isinstance(script, str) or not os.path.isabs(script):
+            return                                    # not installed: nothing to tell and nothing to say
+        run = _Run(profile)
+        self._runs.add(run)
+        self._helper = run
+        run.limit = self._schedule(HELPER_LIMIT_MS, functools.partial(self._helper_limit, run))
+        try:
+            run.kill = (self._run_helper or spawn_helper)([script, "autodetect", profile],
+                                                         helper_environment(script, os.environ),
+                                                         functools.partial(self._helper_exited, run))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            self._cancel(run.limit)
+            run.limit = self._helper = None
+            self._runs.discard(run)
+            self._update(note=NOT_REMEMBERED)
+
+    def _end_helper(self):
+        """Every run still going ends with its whole group and reports nothing: a newer choice, or another
+        program's, stands now."""
+        self._helper = None
+        for run in list(self._runs):
+            run.kill()
+
+    @_guarded
+    def _helper_limit(self, run: _Run):
+        run.limit = None
+        run.timed_out = True
+        run.kill()
+
+    @_guarded
+    def _helper_exited(self, run: _Run, code: int):
+        if run.limit is not None:
+            self._cancel(run.limit)
+            run.limit = None
+        self._runs.discard(run)
+        if run is not self._helper:
+            return                                    # ended for a newer choice, or the window went meanwhile
+        self._helper = None
+        if code != 0 or run.timed_out:
+            self._update(note=NOT_REMEMBERED)
+            self._announce()
 
     @_guarded
     def retry(self):
