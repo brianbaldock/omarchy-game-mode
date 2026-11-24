@@ -1090,6 +1090,17 @@ class WindowTest(unittest.TestCase):
             self.assertEqual(self.window._on_key(window, None, gdk.KEY_Return, 0, gdk.ModifierType(0)), handled)
         self.assertEqual(source.calls[-1], ("answer", number, "04"))
 
+    def test_below_1400_pixels_the_header_shows_the_logo_without_the_name(self):
+        ui = importlib.import_module("gaminghome.ui")
+        self.assertEqual([ui.layout_classes(*size) for size in ((1280, 720), (1280, 800), (1399, 1080), (1400, 900),
+                                                                 (1920, 1080))],
+                         [("gh-compact", "gh-narrow"), ("gh-narrow",), ("gh-narrow",), (), ("gh-wide",)])
+        window = mock.MagicMock()
+        for layout, shown in ((("gh-compact", "gh-narrow"), False), (("gh-wide",), True)):
+            self.window._apply_layout(window, layout)
+            window.brand_title.set_visible.assert_called_with(shown)
+            (window.add_css_class if not shown else window.remove_css_class).assert_any_call("gh-narrow")
+
     def test_a_pad_key_counts_every_press_of_a(self):
         from gaminghome.core import ACTIVATE
         key = mock.Mock()

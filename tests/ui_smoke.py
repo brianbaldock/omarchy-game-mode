@@ -256,7 +256,12 @@ def middle(window, widget):
 
 
 def check_layout(language, window):
-    """Once the sheet is laid out: the pad reads from the left in every language, and Arabic mirrors the rest."""
+    """Once the sheet is laid out: the pad reads from the left in every language, and Arabic mirrors the rest. Below
+    1400 pixels the header shows the logo without the app's name."""
+    settle()
+    narrow = window.get_width() < 1400
+    check(window.brand_title.get_visible() != narrow,
+          f"the app's name is {'shown' if narrow else 'hidden'} in a window {window.get_width()} pixels wide")
     buttons = window._bt_buttons
     if f"{sheet.PAD}1" in buttons:
         keys = [middle(window, buttons[f"{sheet.PAD}{key}"]) for key in ("1", "2", "3", "erase", "0", "done")]

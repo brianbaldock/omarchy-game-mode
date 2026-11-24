@@ -20,6 +20,7 @@ from .core import (ACTIVATE, AUTO, BACK, DESKTOP, DOWN, GAME, LEFT, MENU, NEXT_T
 
 CATEGORY_ICONS = {"native": "controller", "streaming": "cloud", "retro": "retro", "stores": "store"}
 WIDE_WIDTH = 1600
+NARROW_WIDTH = 1400    # below this the header shows the logo without the app's name: the chips and buttons need the room
 WIDE_HEIGHT = 950
 COMPACT_HEIGHT = 800
 BATTERY_FILL_PX = 20   # the fill of a full battery: the width of the glyph's body inside its border and padding
@@ -276,6 +277,17 @@ window.gh-window {
 """)
 
 
+def layout_classes(width: int, height: int) -> tuple[str, ...]:
+    """The window's layout classes for its size: wide or compact by height, and narrow by width."""
+    if width >= WIDE_WIDTH and height >= WIDE_HEIGHT:
+        layout = ("gh-wide",)
+    elif height < COMPACT_HEIGHT:
+        layout = ("gh-compact",)
+    else:
+        layout = ()
+    return layout + ("gh-narrow",) if width < NARROW_WIDTH else layout
+
+
 def icon_name(theme: Gtk.IconTheme, name: str, category: str | None = None) -> str:
     candidate = f"gh-{name}-symbolic"
     if theme.has_icon(candidate):
@@ -408,8 +420,12 @@ class HomeWindow(Gtk.ApplicationWindow):
         logo.set_pixel_size(44)
         brand.append(logo)
         titles = box(valign=Gtk.Align.CENTER)
-        # The title can give way when the header is tight, so the chips and the settings button keep their room.
-        titles.append(label(self.t("app.name"), "gh-brand-title", ellipsize=True))
+        # The title can give way when the header is tight, so the chips and the buttons keep their room; in a
+        # narrow window (the handheld's 1280 pixels) it gives way to the logo alone, and the tooltip names the app.
+        self.brand_title = label(self.t("app.name"), "gh-brand-title", ellipsize=True)
+        self.brand_title.set_visible("gh-narrow" not in (self._layout or ()))
+        brand.set_tooltip_text(self.t("app.name"))
+        titles.append(self.brand_title)
         brand.append(titles)
         header.append(brand)
 
@@ -1634,19 +1650,15 @@ class HomeWindow(Gtk.ApplicationWindow):
     # ---- responsive layout ----------------------------------------------
     def do_size_allocate(self, width, height, baseline):
         Gtk.ApplicationWindow.do_size_allocate(self, width, height, baseline)
-        if width >= WIDE_WIDTH and height >= WIDE_HEIGHT:
-            layout = "gh-wide"
-        elif height < COMPACT_HEIGHT:
-            layout = "gh-compact"
-        else:
-            layout = None
+        layout = layout_classes(width, height)
         if layout != self._layout:
             self._layout = layout
             GLib.idle_add(self._apply_layout, layout)
 
     def _apply_layout(self, layout):
-        for name in ("gh-wide", "gh-compact"):
-            (self.add_css_class if name == layout else self.remove_css_class)(name)
+        for name in ("gh-wide", "gh-compact", "gh-narrow"):
+            (self.add_css_class if name in layout else self.remove_css_class)(name)
+        self.brand_title.set_visible("gh-narrow" not in layout)
         return False
 
 

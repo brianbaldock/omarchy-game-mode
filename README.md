@@ -145,7 +145,10 @@ How far this has been checked:
 The header has a Bluetooth button between the clock and Settings, so that a controller,
 headphones or a keyboard can be connected without leaving Gaming Home. The button is there
 only when the computer has a Bluetooth adapter, or when Bluetooth is there but could not be
-read. Like the rest of Home, it is selected with the D-pad, a click or a tap.
+read. Like the rest of Home, it is selected with the D-pad, a click or a tap. In a window
+narrower than 1400 pixels, such as a handheld's 1280x720 screen, the header shows the
+logo without the app's name (the logo's tooltip has it), so that the clock, the battery
+and the buttons keep their room.
 
 - **Button.** Its icon shows Bluetooth off (struck through and dimmed), on, or connected to
   at least one device (with two dots, in the accent color). The warning color means that
