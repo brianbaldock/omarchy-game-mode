@@ -10,6 +10,8 @@ Include the affected revision, a minimal reproduction, the expected and actual b
 
 ## Trust boundaries
 
-The launcher reads controller events without exclusively grabbing devices or creating virtual input. It does not change firmware, kernel drivers, or performance limits. Platform installation is a deliberate action that opens a trusted Omarchy installer in a visible terminal.
+The launcher reads controller events without exclusively grabbing devices or creating virtual input. It does not change firmware, kernel drivers, or performance limits itself. Platform installation is a deliberate action that opens a trusted Omarchy installer in a visible terminal.
+
+The one setting of the machine it can change is the power profile (power-saver, balanced or performance), and only when the user asks for it in Gaming Home or runs `omarchy-game-mode power set` or `power cycle`. The change is a request to power-profiles-daemon on the system bus, which asks polkit whether the session may make it; a refusal is reported, never worked around. Gaming Home never starts that daemon, never takes or releases a profile hold, never offers or asks for authentication, and never writes sysfs or firmware settings itself. To let Omarchy keep the choice for the current power source, it runs Omarchy's own `omarchy-powerprofiles-set` when that is installed: without a shell, with a minimal environment and a 10 second limit.
 
 GitHub workflows use immutable action pins and minimal token permissions. CodeQL scans Python without executing application build scripts. Fork pull requests must never receive repository secrets or deployment permissions.

@@ -2,7 +2,46 @@
 
 power-profiles-daemon (PPD) owns the profile: it offers power-saver, balanced and performance, applies one through
 the drivers that back it and announces every change, whoever made it. ``power.py`` says what Gaming Home shows and
-asks; this module says how that reaches the machine.
+asks; this module is how that reaches the machine. ``PowerProfiles`` is the window's source, and ``main`` the
+``power`` command, which starts a source of its own and needs no window.
+
+Every call it may make, and when
+--------------------------------
+* ``start()`` watches the name ``org.freedesktop.UPower.PowerProfiles`` on the system bus with ``Gio.bus_watch_name``
+  and no flags: watching never starts PPD, which would stop the power managers it conflicts with. ``stop()`` gives
+  the watch back. PPD's legacy name is never used.
+* When an owner appears while the source is started: one ``org.freedesktop.DBus.Properties.GetAll`` of the
+  ``org.freedesktop.UPower.PowerProfiles`` interface of ``/org/freedesktop/UPower/PowerProfiles``, and a subscription
+  to that owner's ``PropertiesChanged`` of the same object and interface, which says every change from then on.
+  ``retry()`` sends the same ``GetAll`` again, and only after a reading failed.
+* ``set_profile()`` sends one ``org.freedesktop.DBus.Properties.Set`` of ``ActiveProfile`` to one of the three
+  profiles: only when the service was read in this visit, offers that profile and is not in it already, and no
+  other request is on its way.
+
+Nothing else: no ``HoldProfile``, ``ReleaseProfile`` or ``SetActionEnabled``, and no other property. One method,
+``_call``, sends every call. It refuses anything but those two, addresses the unique name of the current owner (never
+the well-known name, which a new owner could take meanwhile), never lets the bus start a service (``NO_AUTO_START``)
+and gives each call Gio's own time limit (``CALL_TIMEOUT_MS``, ``SET_TIMEOUT_MS``). Replies and signals of an owner
+that left, or for a stopped source, are dropped. Nothing the system says is logged, an error's text is never kept and
+neither is the reason another program gave for its hold.
+
+Files and the one process
+-------------------------
+* Two kernel files are read, never written, a few hundred bytes at most: ``firmware/acpi/platform_profile`` and
+  ``devices/system/cpu/cpufreq/policy0/boost`` under ``/sys``. They are read at ``start()``, with each reading of
+  the service, each ``PropertiesChanged`` and each reply to a ``Set``, and they never decide whether a change worked.
+* Omarchy's ``omarchy-powerprofiles-set autodetect PROFILE``, found on ``PATH``, runs after a change succeeded or
+  when the active profile is chosen again, so that Omarchy keeps the choice for the current power source (it
+  switches to what it keeps at every plug and unplug). No shell, stdin closed, output dropped, its own directory and
+  ``/usr/local/bin:/usr/bin:/bin`` as ``PATH`` (never the inherited one: a version manager's shims there would give
+  ``powerprofilesctl`` another Python), only ``HOME``, ``LANG``, ``XDG_RUNTIME_DIR``, ``XDG_STATE_HOME`` and
+  ``DBUS_SYSTEM_BUS_ADDRESS`` besides, and a process group of its own that is killed as a whole when
+  ``HELPER_LIMIT_MS`` runs out. Its exit status is a note at most. It is left to finish after ``stop()`` and then
+  reports nothing; a newer choice, or another program changing the profile, ends it first, because it would set the
+  old profile again and Gaming Home never does that.
+
+Nothing is polled. The only timer is that command's limit. A started source that is left alone holds the name watch
+and the subscription and nothing else (``idle``). A hold is never taken here: that belongs to the resident core.
 """
 
 from __future__ import annotations
