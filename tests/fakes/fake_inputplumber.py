@@ -82,14 +82,14 @@ class PrivateBus:
         self.connections = []
 
     @classmethod
-    def start(cls) -> "PrivateBus":
+    def start(cls, config: Path | None = None) -> "PrivateBus":
         if Gio is None:
             raise unittest.SkipTest("PyGObject is not available")
         daemon = shutil.which("dbus-daemon")
         if daemon is None:
             raise unittest.SkipTest("dbus-daemon is not installed")
         socket_name = f"omarchy-game-mode-test-{os.getpid()}-{secrets.token_hex(6)}"
-        argv = [daemon, f"--config-file={FIXTURES / 'bus.conf'}", f"--address=unix:abstract={socket_name}",
+        argv = [daemon, f"--config-file={config or FIXTURES / 'bus.conf'}", f"--address=unix:abstract={socket_name}",
                 "--nofork", "--print-address=1"]
         try:
             process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
