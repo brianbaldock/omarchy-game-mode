@@ -32,6 +32,10 @@ addressed to the unique name that owns ``org.bluez`` at that moment (never to th
   ``paired=True``: the bond stays and nothing more is done to the device. One race remains: a cancel in the few
   milliseconds between BlueZ storing the keys and this client hearing ``Bonded`` still sends ``CancelPairing``; BlueZ
   then removes the keys but keeps showing the device as paired, and it has to be forgotten and paired again.
+  A device or adapter that goes away during a pairing: BlueZ answers ``Pair()`` before it announces the removal,
+  ``AuthenticationCanceled`` while the link is up (``AUTH_FAILED``) and ``ConnectionAttemptFailed`` while the device
+  is still being reached (``UNREACHABLE``). Once the bond is made it drops that answer instead, and the removal ends
+  the pairing with ``GONE``, as it ends any operation whose call still waits.
 * ``connect(device)``: ``Device1.Connect`` (``CONNECT_TIMEOUT_MS``), and ``Device1.Disconnect`` to abandon it when it
   times out or the user cancels. It never changes trust.
 * ``disconnect(device)``: ``Device1.Disconnect``.
