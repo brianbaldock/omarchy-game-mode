@@ -39,7 +39,9 @@ A device is named by its ``id``, and an id that no longer names a device ends th
   and the failure says so (``Failure.paired``): it is among the ``remembered`` and ``connect`` tries again.
   ``cancel`` ends the attempt with ``Failure(CANCELED)``, once BlueZ has answered, which can take a few seconds: the
   activity stays set until then, so the window shows that it is giving up and lets the user leave. If the device was
-  already paired when the cancel took effect, the failure says so (``Failure.paired``) and the device stays paired.
+  already paired when the cancel took effect, the failure says so (``Failure.paired``) and the device stays paired,
+  and trusted too when the attempt had got as far as trusting it. If the device, the adapter or BlueZ goes away first,
+  the failure is ``GONE`` or ``UNAVAILABLE`` instead.
 * Trust lets a device reconnect by itself. ``pair`` is the one operation that grants it; ``connect`` and
   ``disconnect`` act on a remembered (paired) device and never change its trust.
 * ``connected`` is the state of the link, not a promise that every profile of the device works.
