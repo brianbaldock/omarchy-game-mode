@@ -1,6 +1,6 @@
 # Security policy
 
-Omarchy Game Mode is pre-release software. Security fixes target the current `main` branch; older previews may not receive fixes.
+Omarchy Game Mode is pre-release software. Security fixes land on the current `main` branch and are released as a new version (see the [changelog](CHANGELOG.md)); older versions may not receive fixes.
 
 ## Reporting a vulnerability
 
