@@ -19,7 +19,7 @@ from unittest import mock
 from gi.repository import Gio, GLib
 
 from fakes import fake_ppd
-from fakes.clockwork import Timers
+from fakes.clockwork import Timers, Wall
 from fakes.fake_inputplumber import PrivateBus
 from fakes.fake_ppd import BUS_NAME, INTERFACE, OBJECT_PATH, PROPERTIES_IFACE, TYPES, FakePPD
 from fakes.fake_upower import activatable_bus_config
@@ -1277,6 +1277,74 @@ class RememberTest(BusCase):
         self.assertEqual(self.record(script)["argv"][2], PERFORMANCE)
         self.assertEqual((source.snapshot.active, source.snapshot.note, source.snapshot.failure),
                          (PERFORMANCE, "", None))
+
+    def asked_and_timed_out(self, find_helper, wall):
+        """Performance asked for at ``wall``'s time while the daemon kept every Set, until the request timed out."""
+        fake = self.fake(active=BALANCED)
+        fake.hold = lambda call: call.member == "Set"
+        source = self.ready(self.source(find_helper=find_helper, clock=wall))
+        with mock.patch.object(powerprofiles, "SET_TIMEOUT_MS", 100):
+            source.set_profile(PERFORMANCE)
+            self.assertTrue(pump(lambda: source.snapshot.failure is not None, 3))
+        fake.hold = None
+        return fake, source
+
+    def test_a_late_answer_counts_only_within_a_few_seconds_of_the_request(self):
+        window = powerprofiles.LATE_ANSWER_MS / 1000
+        for late, counts in ((window - 1, True), (window + 1, False)):
+            with self.subTest(late=late):
+                script = stand_in(self.home / f"late-{late:g}")
+                wall = Wall(1000.0)
+                fake, source = self.asked_and_timed_out(lambda: str(script), wall)
+                try:
+                    wall.moment += late
+                    fake.answer_held()                                 # applied at last, or by coincidence
+                    self.assertTrue(pump(lambda: source.snapshot.active == PERFORMANCE and source.idle))
+                    self.assertEqual((self.ran(script), source.snapshot.failure is None), (counts, counts))
+                    fake.external(SAVER)                               # an ordinary switch later on
+                    self.assertTrue(pump(lambda: source.snapshot.active == SAVER))
+                    self.assertEqual(source.snapshot.note, CHANGED_ELSEWHERE if counts else "")
+                finally:
+                    source.stop()
+                    fake.release()                                     # the next one needs the name
+
+    def test_a_request_put_aside_with_dismiss_is_not_taken_up_again(self):
+        script = stand_in(self.home / "dismissed")
+        fake, source = self.asked_and_timed_out(lambda: str(script), Wall(1000.0))
+        source.dismiss()
+        fake.answer_held()
+        self.assertTrue(pump(lambda: source.snapshot.active == PERFORMANCE))
+        self.assertFalse(pump(lambda: source.helping, 0.05))
+        self.assertEqual((self.ran(script), source.snapshot.failure), (False, None))
+        fake.external(SAVER)
+        self.assertTrue(pump(lambda: source.snapshot.active == SAVER))
+        self.assertEqual(source.snapshot.note, "")
+
+    def test_a_new_request_replaces_one_whose_answer_never_came(self):
+        saver, performance = stand_in(self.home / "saver"), stand_in(self.home / "performance")
+        scripts = iter((saver, performance))
+        fake, source = self.asked_and_timed_out(lambda: str(next(scripts)), Wall(1000.0))
+        source.set_profile(SAVER)
+        self.assertTrue(pump(lambda: self.ran(saver) and source.idle))
+        fake.answer_held()                                             # the old request lands after all
+        self.assertTrue(pump(lambda: source.snapshot.active == PERFORMANCE))
+        self.assertEqual((source.snapshot.note, self.ran(performance)), (CHANGED_ELSEWHERE, False))
+
+    def test_a_request_on_its_way_at_stop_found_done_too_late_is_forgotten(self):
+        script = stand_in(self.home / "too-late")
+        wall = Wall(1000.0)
+        fake = self.fake(active=BALANCED)
+        fake.hold = lambda call: call.member == "Set"
+        source = self.ready(self.source(find_helper=lambda: str(script), clock=wall))
+        source.set_profile(PERFORMANCE)
+        self.assertTrue(pump(lambda: fake.held))
+        source.stop()
+        fake.hold = None
+        fake.answer_held()                                             # done while the window is hidden
+        wall.moment += powerprofiles.LATE_ANSWER_MS / 1000 + 1        # and shown again long after
+        self.ready(source)
+        self.assertFalse(pump(lambda: source.helping, 0.05))
+        self.assertEqual((source.snapshot.active, self.ran(script)), (PERFORMANCE, False))
 
     def test_a_request_on_its_way_at_stop_that_did_not_take_is_forgotten(self):
         script = stand_in(self.home / "lost")

@@ -1,5 +1,6 @@
 """Text from other programs is made safe before the window shows it."""
 
+import unicodedata
 import unittest
 
 from gaminghome.textsafe import clean_text
@@ -43,6 +44,13 @@ class CleanTextTest(unittest.TestCase):
         self.assertEqual(clean_text("a" + "\u20dd" * 5, 32), "a\u20dd\u20dd\u20dd")         # enclosing ones too
         self.assertEqual(clean_text("Vie\u0302\u0323t", 32), "Vie\u0302\u0323t")            # written with two
         self.assertEqual(clean_text("e\u0301\u0301\u0301\u200b\u0301 e\u0301", 32), "e\u0301\u0301\u0301 e\u0301")
+
+    def test_joiners_between_combining_marks_do_not_start_a_new_count(self):
+        for joiner in ("\u200d", "\u200c"):
+            with self.subTest(joiner=joiner):
+                text = clean_text("e" + ("\u0301" + joiner) * 24 + "a\u0301", 200)
+                self.assertEqual(sum(unicodedata.category(ch) == "Mn" for ch in text), 4)   # three, and a's own
+                self.assertTrue(text.endswith("a\u0301"))
 
     def test_anything_that_is_not_a_string_gives_nothing(self):
         for value in (None, 7, b"abc", ["a"]):

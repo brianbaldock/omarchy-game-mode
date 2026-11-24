@@ -39,7 +39,7 @@ def clean_text(text: str, limit: int) -> str:
             marks += 1
             if marks > MAX_MARKS:
                 continue
-        else:
+        elif ch not in _JOINERS:                      # a joiner between marks does not begin a new character
             marks = 0
         kept.append(ch)
     return " ".join("".join(kept).split())[:max(limit, 0)].rstrip()
