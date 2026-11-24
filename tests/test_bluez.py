@@ -640,11 +640,12 @@ class LifecycleTest(BusCase):
         name = self.name_of(client)
         client.pair(self.find(client, "Pad").id)
         self.until(lambda: client.snapshot.prompt is not None)
-        prompt = client.snapshot.prompt
+        prompt, agent = client.snapshot.prompt, client._op.agent
         fake.hold = lambda call: True
         fake.set(path, DEVICE, Name="Renamed")
         changes = len(client.changes)
         client.stop()
+        self.assertEqual((agent.active, agent.exported, agent.waiting), (False, False, ""))   # answered Canceled
         self.until(lambda: name in fake.gone)
         self.assertEqual((fake.agents, fake.queue, fake.pairings), ({}, [], {}))
         confirmation = next(record for _agent, record in fake.asked if record.member == "RequestConfirmation")
