@@ -662,6 +662,7 @@ class BlocksTest(unittest.TestCase):
         panel = self.blocks(source, visit)[2]
         self.assertEqual((panel.first, panel.code, [c.name for c in panel.controls]),
                          (f"{sheet.NO}{number}", "042917", [f"{sheet.YES}{number}", f"{sheet.NO}{number}"]))
+        self.assertEqual({c.style for c in panel.controls}, {""}, "a filled Yes would look chosen while No has the focus")
         self.assertEqual(panel.text, "Does this number match the one shown on Speaker?")
         for language in ("en", "de", "es", "fr", "pt-BR", "ja", "ar"):
             words = Translator(LOCALES, language)("bluetooth.confirm", name="X").casefold()

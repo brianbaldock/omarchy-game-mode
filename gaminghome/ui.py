@@ -272,6 +272,8 @@ window.gh-window {
 }
 .gh-pad-key:hover { background-color: alpha(@gh_fg, 0.12); }
 .gh-pad-key.primary { background-color: @gh_accent; color: @gh_bg; }
+.gh-pad-key.selected { background-color: alpha(@gh_accent, 0.18); }
+.gh-pad-key.primary.selected { background-color: mix(@gh_accent, @gh_fg, 0.15); border-color: @gh_fg; }
 .gh-compact .gh-bt-panel { padding: 14px 18px; }
 .gh-compact .gh-bt-digit { font-size: 36px; }
 """)

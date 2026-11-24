@@ -569,9 +569,8 @@ class BluetoothSheet:
         cancel = Control(CANCEL, t("bluetooth.canceling" if cancelling else "bluetooth.cancel"), not cancelling)
         if prompt is not None:
             name = called(prompt.device, prompt.name)
-            if prompt.kind == bt.CONFIRM:
-                return [Question(f"prompt:{prompt.id}", (Control(f"{YES}{prompt.id}", t("bluetooth.matches"),
-                                                                 style="primary"),
+            if prompt.kind == bt.CONFIRM:                       # the answers look alike: only the focus marks one
+                return [Question(f"prompt:{prompt.id}", (Control(f"{YES}{prompt.id}", t("bluetooth.matches")),
                                                          Control(f"{NO}{prompt.id}", t("bluetooth.no"))),
                                  first=f"{NO}{prompt.id}", text=t("bluetooth.confirm", name=name), code=prompt.code)]
             if prompt.kind == bt.CODE:
