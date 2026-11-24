@@ -776,7 +776,8 @@ class ClientBusTest(unittest.TestCase):
         interpreter = core.ControllerInterpreter(lambda _ms, _callback: 0, lambda _token: None, lambda _action: None)
         client = InputPlumberClient(lambda: monitor.rescan(), connection=self.bus.connect(), settle_ms=5, confirm_ms=10)
         monitor = ControllerMonitor(interpreter, lambda: None, dev_dir=str(tree.dev), sysfs_root=str(tree.sys),
-                                    extra_gamepads=allowlist, on_candidate=client.hint, identify=tree.identify)
+                                    extra_gamepads=allowlist, on_candidate=client.hint, identify=tree.identify,
+                                    capabilities=tree.capabilities)
         self.clients.append(client)
         self.addCleanup(monitor.stop)
         return tree, monitor, client

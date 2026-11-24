@@ -15,16 +15,47 @@ from unittest import mock
 
 from gi.repository import Gio
 
-from fakes.fake_input import ELITE, PHYSICAL, STEAM_PAD, UHID, USB, XBOX_360, FakeEvdev, FakeInputTree
+from fakes.fake_input import (ELITE, PHYSICAL, RAW_ALLY_KEYS, STEAM_PAD, UHID, USB, XBOX_360, FakeEvdev, FakeInputTree,
+                              bitmap)
 from fakes.loop import pump
-from gaminghome import core
+from gaminghome import core, quirks
 from gaminghome.input import EVENT, EVIOCGABS, EVIOCGKEY, KEY_BYTES, ControllerMonitor, VirtualGamepads, probe
 
 SCRATCH = Path(__file__).resolve().parent / "scratch" / "input"
+USB_PAD = "devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.0/0003:045E:028E.0009/input"
+USB_AGAIN = "devices/pci0000:00/0000:00:08.1/usb3/3-6/3-6:1.5/0003:0B05:1B4C.000A/input"
+# The ROG Xbox Ally pad without a kernel driver: A B X Y LB RB View Menu L3 R3 Xbox and three unknown buttons
+# arrive as codes 304 to 317. READ is what Game Mode makes of them, CORRECTED what a hwdb entry turns them into.
+RAW = list(range(core.BTN_SOUTH, core.BTN_SOUTH + 14))
+READ = [core.BTN_SOUTH, core.BTN_EAST, quirks.BTN_NORTH, quirks.BTN_WEST, core.BTN_TL, core.BTN_TR, core.BTN_SELECT,
+        core.BTN_START, quirks.BTN_THUMBL, quirks.BTN_THUMBR, core.BTN_MODE]
+CORRECTED_KEYS = bitmap([*READ, 0x2C0, 0x2C1, 0x2C2])
+
+
+class RecordingInterpreter(core.ControllerInterpreter):
+    """The real interpreter, noting which keys and which adopted state the monitor hands it."""
+
+    def __init__(self, *arguments):
+        super().__init__(*arguments)
+        self.keys, self.synced = [], []
+
+    def feed(self, device_id, etype, code, value):
+        if etype == core.EV_KEY:
+            self.keys.append((code, value))
+        super().feed(device_id, etype, code, value)
+
+    def sync_state(self, device_id, pressed, axes):
+        self.synced.append((set(pressed), dict(axes)))
+        super().sync_state(device_id, pressed, axes)
 
 
 class MonitorCase(unittest.TestCase):
     def setUp(self):
+        # The caller's environment must not decide how the fake pads are read.
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop(quirks.DISABLE_ENV, None)
         shutil.rmtree(SCRATCH, ignore_errors=True)
         self.tree = FakeInputTree(SCRATCH)
         self.addCleanup(shutil.rmtree, SCRATCH, True)
@@ -37,13 +68,13 @@ class MonitorCase(unittest.TestCase):
         self.actions, self.changes, self.hints = [], [], []
         self.timers, self.timer = {}, 0
 
-    def monitor(self) -> ControllerMonitor:
-        interpreter = core.ControllerInterpreter(self.schedule, lambda token: self.timers.pop(token, None),
-                                                 self.actions.append)
+    def monitor(self, **reads) -> ControllerMonitor:
+        interpreter = RecordingInterpreter(self.schedule, lambda token: self.timers.pop(token, None),
+                                           self.actions.append)
         interpreter.set_nav_enabled(True)
         monitor = ControllerMonitor(interpreter, lambda: self.changes.append(1), dev_dir=str(self.tree.dev),
                                     sysfs_root=str(self.tree.sys), extra_gamepads=lambda: self.allow,
-                                    on_candidate=self.candidate, identify=self.tree.identify)
+                                    on_candidate=self.candidate, identify=self.tree.identify, **reads)
         self.addCleanup(monitor.stop)
         monitor.start()
         return monitor
@@ -80,6 +111,19 @@ class MonitorCase(unittest.TestCase):
     def names(monitor):
         return [device["name"] for device in monitor.status()["devices"]]
 
+    def writer(self, node) -> int:
+        writer = os.open(node, os.O_WRONLY | os.O_NONBLOCK)
+        self.addCleanup(os.close, writer)
+        return writer
+
+    def send(self, node, events):
+        """Write events into a node (a path or a writer) as the kernel would deliver them.
+
+        Each event is (code, value) for a key, or (type, code, value).
+        """
+        records = (EVENT.pack(0, 0, *(event if len(event) == 3 else (core.EV_KEY, *event))) for event in events)
+        os.write(node if isinstance(node, int) else self.writer(node), b"".join(records))
+
 
 class VirtualGamepadTest(MonitorCase):
     def test_probe_reads_identity_and_tells_uinput_from_other_virtual_devices(self):
@@ -103,7 +147,8 @@ class VirtualGamepadTest(MonitorCase):
         node = self.tree.add(21, ELITE)
         self.allow = VirtualGamepads({ELITE: 1})
         monitor = self.monitor()
-        self.assertEqual(monitor.status()["devices"], [{"path": node, "name": ELITE.name, "virtual": True}])
+        self.assertEqual(monitor.status()["devices"],
+                         [{"path": node, "name": ELITE.name, "quirk": None, "virtual": True}])
         writer = os.open(node, os.O_WRONLY | os.O_NONBLOCK)
         self.addCleanup(os.close, writer)
         press = EVENT.pack(0, 0, core.EV_KEY, core.BTN_SOUTH, 1) + EVENT.pack(0, 0, core.EV_SYN, core.SYN_REPORT, 0)
@@ -340,6 +385,28 @@ class RecoveryTest(MonitorCase):
         self.chord(elite, monitor)
         self.assertEqual(self.actions, [core.BACK])
 
+    def test_ordinary_pad_keeps_its_keys_when_only_an_axis_cannot_be_read(self):
+        pad = self.tree.add(7, XBOX_360, where=USB_PAD)
+        monitor = self.monitor()
+        state = monitor.interpreter.devices[pad]
+        self.press(pad, (core.BTN_SELECT, 1))                       # View, held across the focus change
+        self.assertTrue(pump(lambda: core.BTN_SELECT in state.pressed))
+        for failing, expected in ((EVIOCGABS(core.ABS_HAT0X), [core.HOME]), (EVIOCGKEY(KEY_BYTES), [core.MENU])):
+            del self.actions[:]
+            self.evdev.fail[(pad, failing)] = errno.EINVAL
+            monitor.interpreter.set_nav_enabled(False)
+            monitor.interpreter.set_nav_enabled(True)
+            self.press(pad, (core.BTN_START, 1))
+            self.assertTrue(pump(lambda: core.BTN_START in state.pressed))
+            self.fire_timers()
+            self.press(pad, (core.BTN_START, 0))
+            self.assertTrue(pump(lambda: core.BTN_START not in state.pressed))
+            # An axis that cannot be read is left out: View still holds, so Menu makes the Home hold.
+            # Keys that cannot be read count as nothing held, as before: Menu alone opens Settings.
+            self.assertEqual(self.actions, expected, failing)
+        self.assertIn(({core.BTN_SELECT}, {core.ABS_X: 0, core.ABS_Y: 0, core.ABS_HAT0Y: 0}),
+                      monitor.interpreter.synced)
+
 
 class EvdevReadTest(MonitorCase):
     def test_reading_held_keys_drops_queued_key_events_but_not_axis_events(self):
@@ -370,8 +437,9 @@ class HiddenSourceTest(MonitorCase):
         self.assertEqual(len(monitor.status()["errors"]), 1)  # before the stack announced anything
         self.allow = VirtualGamepads({ELITE: 1}, frozenset({hidden}))
         monitor.rescan()
-        self.assertEqual(monitor.status(), {"devices": [{"path": elite, "name": ELITE.name, "virtual": True}],
-                                            "errors": [], "ambiguous": [], "unreadable": []})
+        self.assertEqual(monitor.status(), {
+            "devices": [{"path": elite, "name": ELITE.name, "quirk": None, "virtual": True}],
+            "errors": [], "ambiguous": [], "unreadable": []})
         self.allow = VirtualGamepads()                         # the stack went away, the node stayed hidden
         monitor.rescan()
         self.assertEqual(len(monitor.status()["errors"]), 1)
@@ -428,6 +496,215 @@ class DuplicateSourceTest(MonitorCase):
         self.assertTrue(pump(lambda: elite not in monitor.devices))
         self.assertEqual(sorted(monitor.devices), [source, other])       # the source counts again at once
         self.assertGreaterEqual(len(self.hints), 1)
+
+
+class ButtonQuirkTest(MonitorCase):
+    """The raw pad read through its quirk; what is held and the codes reported are set on the tree itself."""
+
+    def monitor(self) -> ControllerMonitor:
+        return super().monitor(snapshot=self.tree.snapshot, capabilities=self.tree.capabilities)
+
+    def raw_pad(self) -> str:
+        return self.tree.add(6, PHYSICAL, where=USB, keys=RAW_ALLY_KEYS)
+
+    @staticmethod
+    def quirk(monitor):
+        device, = monitor.status()["devices"]
+        return device["quirk"]
+
+    def test_every_button_of_the_raw_pad_is_read_through_the_quirk(self):
+        node = self.raw_pad()
+        monitor = self.monitor()
+        self.assertEqual(monitor.status()["devices"],
+                         [{"path": node, "name": PHYSICAL.name, "quirk": "xinput-order-hid"}])
+        keys = monitor.interpreter.keys
+        self.send(node, [*((code, 1) for code in RAW), (core.BTN_SOUTH, 0)])
+        self.assertTrue(pump(lambda: keys[-1:] == [(core.BTN_SOUTH, 0)]))
+        self.assertEqual(keys[:-1], [(code, 1) for code in READ])    # eleven buttons; the unknown three are dropped
+
+    def test_keys_held_when_the_pad_is_adopted_are_read_through_the_quirk_too(self):
+        node = self.raw_pad()
+        self.tree.hold(6, RAW, {core.ABS_HAT0X: 1})
+        monitor = self.monitor()
+        pressed, axes = monitor.interpreter.synced[-1]
+        self.assertEqual((sorted(pressed), axes), (sorted(READ), {core.ABS_HAT0X: 1}))
+        self.tree.hold(6, [core.BTN_TL, core.BTN_TR])                # View and Menu are down when Home is shown
+        monitor.resync(node)
+        self.assertEqual(monitor.interpreter.devices[node].pressed, {core.BTN_SELECT, core.BTN_START})
+
+    def test_probe_judges_the_pad_by_the_buttons_it_really_has(self):
+        info = probe(self.raw_pad(), str(self.tree.sys))
+        self.assertEqual((info.gamepad, info.quirk.name, info.keys), (True, "xinput-order-hid", frozenset(RAW)))
+        self.assertEqual(info.buttons, frozenset(READ))
+        clone = self.tree.add(22, PHYSICAL, keys=RAW_ALLY_KEYS)      # uinput: what another program re-emits
+        self.assertIsNone(probe(clone, str(self.tree.sys)).quirk)
+
+    def test_same_pad_with_correct_codes_is_read_as_it_is(self):
+        node = self.tree.add(6, PHYSICAL, where=USB)                 # it has a right stick click: a driver is at work
+        monitor = self.monitor()
+        self.assertIsNone(self.quirk(monitor))
+        self.send(node, [(core.BTN_TL, 1), (core.BTN_SELECT, 1)])
+        self.assertTrue(pump(lambda: len(monitor.interpreter.keys) == 2))
+        self.assertEqual(monitor.interpreter.keys, [(core.BTN_TL, 1), (core.BTN_SELECT, 1)])
+
+    def test_environment_variable_reads_the_raw_pad_as_it_is(self):
+        node = self.raw_pad()
+        with mock.patch.dict(os.environ, {quirks.DISABLE_ENV: "1"}):
+            monitor = self.monitor()
+            self.assertIsNone(self.quirk(monitor))
+            self.tree.hold(6, [core.BTN_TL])
+            monitor.resync(node)
+            self.assertEqual(monitor.interpreter.synced[-1][0], {core.BTN_TL})
+            self.send(node, [(core.BTN_SELECT, 1)])
+            self.assertTrue(pump(lambda: monitor.interpreter.keys == [(core.BTN_SELECT, 1)]))
+            self.assertEqual(self.tree.asked, [])                    # its layout is not even watched
+
+    def test_inputplumbers_virtual_pad_is_not_read_through_the_quirk(self):
+        raw = self.raw_pad()                                         # the source InputPlumber re-emits...
+        elite = self.tree.add(21, ELITE)                             # ...through this pad, with its own codes
+        self.allow = VirtualGamepads({ELITE: 1}, frozenset({raw}))
+        monitor = self.monitor()
+        self.assertEqual(monitor.status()["devices"],
+                         [{"path": elite, "name": ELITE.name, "quirk": None, "virtual": True}])
+        self.send(elite, [(core.BTN_TL, 1), (core.BTN_SELECT, 1)])
+        self.assertTrue(pump(lambda: len(monitor.interpreter.keys) == 2))
+        self.assertEqual(monitor.interpreter.keys, [(core.BTN_TL, 1), (core.BTN_SELECT, 1)])
+
+    def test_codes_corrected_on_the_open_pad_are_noticed_before_udev_says_anything(self):
+        node = self.raw_pad()
+        monitor = self.monitor()
+        synced = len(monitor.interpreter.synced)
+        self.tree.set_keys(6, CORRECTED_KEYS)                        # a hwdb entry was applied; udev is not heard yet
+        self.send(node, [(core.BTN_TR, 1), (core.BTN_TR, 0)])        # RB under its corrected code: must not be Menu
+        self.assertTrue(pump(lambda: len(monitor.interpreter.synced) > synced))
+        self.assertEqual((self.actions, monitor.interpreter.keys, self.quirk(monitor)), ([], [], None))
+        self.send(node, [(core.BTN_START, 1), (core.BTN_START, 0)])  # Menu: no longer dropped as an unknown button
+        self.assertTrue(pump(lambda: self.actions))
+        self.assertEqual(self.actions, [core.MENU])
+
+    def test_layout_change_between_two_reads_drops_what_is_queued_and_reads_the_state_again(self):
+        node = self.raw_pad()
+        monitor = self.monitor()
+        self.send(node, [(quirks.BTN_Z, 1)])                         # RB of the raw pad
+        self.assertTrue(pump(lambda: self.actions == [core.NEXT_TAB]))
+        synced = len(monitor.interpreter.synced)
+        self.tree.set_keys(6, CORRECTED_KEYS)
+        self.tree.hold(6, [core.BTN_SELECT])                         # View is down, under its corrected code
+        reports = [(core.EV_SYN, core.SYN_REPORT, 0)] * 64           # more than one read takes
+        self.send(node, [*reports, (core.BTN_TL, 1)])                # still queued from before: View, not LB
+        self.assertTrue(pump(lambda: len(monitor.interpreter.synced) > synced))
+        self.assertEqual(monitor.interpreter.keys, [(core.BTN_TR, 1)])
+        self.assertEqual(monitor.interpreter.synced[-1][0], {core.BTN_SELECT})
+        self.assertEqual(self.actions, [core.NEXT_TAB])
+
+    def test_dropped_events_around_a_layout_change_switch_nothing_halfway_through_a_batch(self):
+        node = self.raw_pad()
+        monitor = self.monitor()
+        synced = len(monitor.interpreter.synced)
+        self.tree.set_keys(6, CORRECTED_KEYS)
+        # The queue overflowed around the change; a View pressed before it follows, under its old code.
+        self.send(node, [(core.EV_SYN, core.SYN_DROPPED, 0), (core.EV_SYN, core.SYN_REPORT, 0), (core.BTN_TL, 1)])
+        self.assertTrue(pump(lambda: len(monitor.interpreter.synced) > synced))
+        self.assertEqual((self.actions, monitor.interpreter.keys), ([], []))
+
+    def test_raw_pad_whose_layout_stays_costs_one_question_per_read_and_nothing_else(self):
+        node = self.raw_pad()
+        monitor = self.monitor()
+        asked, synced = len(self.tree.asked), len(monitor.interpreter.synced)
+        self.send(node, [(core.BTN_TL, 1), (core.BTN_TL, 0)])        # View
+        self.assertTrue(pump(lambda: len(monitor.interpreter.keys) == 2))
+        self.assertEqual(monitor.interpreter.keys, [(core.BTN_SELECT, 1), (core.BTN_SELECT, 0)])
+        self.assertEqual((len(self.tree.asked) - asked, len(monitor.interpreter.synced) - synced), (1, 0))
+
+    def test_pads_no_quirk_could_apply_to_are_read_without_any_question(self):
+        pad = self.tree.add(7, XBOX_360, where=USB_PAD)
+        elite = self.tree.add(21, ELITE)
+        self.allow = VirtualGamepads({ELITE: 1})
+        monitor = self.monitor()
+        self.send(pad, [(core.BTN_START, 1), (core.BTN_START, 0)])
+        self.send(elite, [(core.BTN_TR, 1)])
+        self.assertTrue(pump(lambda: len(self.actions) == 2))
+        self.assertEqual((sorted(self.actions), self.tree.asked), (sorted([core.MENU, core.NEXT_TAB]), []))
+
+    def test_node_name_taken_by_another_pad_changes_nothing_for_the_open_one(self):
+        unrelated = self.tree.add(7, XBOX_360, where=USB_PAD)
+        corrected = self.tree.add(8, PHYSICAL, where=USB, keys=CORRECTED_KEYS)
+        monitor = self.monitor()
+        for number, node in ((7, unrelated), (8, corrected)):
+            # Both stay open while their node names already lead to a raw ROG Xbox Ally pad.
+            self.tree.reassign(number, PHYSICAL, where=USB_AGAIN, keys=RAW_ALLY_KEYS)
+            self.hotplug(monitor, node, Gio.FileMonitorEvent.ATTRIBUTE_CHANGED)
+            monitor.resync(node)
+            self.send(node, [(core.BTN_START, 1), (core.BTN_START, 0)])  # Menu, queued on the open pad
+        self.assertTrue(pump(lambda: len(self.actions) == 2))
+        self.assertEqual(self.actions, [core.MENU, core.MENU])
+        self.assertEqual([device["quirk"] for device in monitor.status()["devices"]], [None, None])
+
+    def test_pad_whose_descriptor_no_longer_answers_is_closed(self):
+        node = self.raw_pad()
+        monitor = self.monitor()
+        changes = len(self.changes)
+        self.tree.unplug(6)
+        self.send(node, [(core.BTN_SOUTH, 1)])
+        self.assertTrue(pump(lambda: not monitor.devices))
+        self.assertEqual((monitor.interpreter.keys, len(self.changes) - changes), ([], 1))
+
+
+class RawPadEvdevTest(MonitorCase):
+    """The raw pad read the way evdev answers, next to what the virtual pad's recovery does."""
+
+    def raw_pad(self):
+        node = self.tree.add(6, PHYSICAL, where=USB, keys=RAW_ALLY_KEYS)
+        return node, self.monitor()
+
+    def test_layout_change_drops_the_batch_read_with_it_and_feeds_nothing_of_it(self):
+        raw, monitor = self.raw_pad()
+        self.tree.set_keys(6, CORRECTED_KEYS)                         # a hwdb entry was applied meanwhile
+        self.press(raw, (core.BTN_TR, 1), (core.BTN_TR, 0), (core.BTN_TR, 1))   # RB under its corrected code
+        self.assertTrue(pump(lambda: monitor.devices[raw].quirk is None))
+        self.assertEqual((self.actions, monitor.interpreter.keys), ([], []))  # not Menu, and not RB either
+        self.assertEqual(monitor.interpreter.devices[raw].pressed, {core.BTN_TR})   # read again: RB is held
+
+    def test_virtual_pad_is_neither_translated_nor_layout_watched(self):
+        clone = self.tree.add(21, PHYSICAL, keys=RAW_ALLY_KEYS)      # re-emitted by an announced stack
+        self.allow = VirtualGamepads({PHYSICAL: 1})
+        monitor = self.monitor()
+        self.press(clone, (core.BTN_TL, 1))
+        self.assertTrue(pump(lambda: self.actions))
+        self.assertEqual((self.actions, monitor.devices[clone].keys, self.tree.asked), ([core.PREV_TAB], None, []))
+        self.assertIsNone(monitor.status()["devices"][0]["quirk"])
+
+    def test_raw_pad_is_read_again_on_focus_and_never_distrusted(self):
+        raw, monitor = self.raw_pad()
+        device, state = monitor.devices[raw], monitor.interpreter.devices[raw]
+        self.evdev.keys[raw] = {core.BTN_TL}                         # View held, under its raw code
+        monitor.interpreter.set_nav_enabled(False)
+        monitor.interpreter.set_nav_enabled(True)
+        self.assertEqual((self.evdev.key_reads[raw], state.pressed), (2, {core.BTN_SELECT}))
+        # Dropped events, and the read after them fails: nothing held, as before, and the batch goes on.
+        self.evdev.fail[(raw, EVIOCGKEY(KEY_BYTES))] = errno.EIO
+        self.evdev.queue(raw, [(core.EV_SYN, core.SYN_DROPPED, 0), (core.EV_SYN, core.SYN_REPORT, 0),
+                               (core.EV_KEY, quirks.BTN_Z, 1), (core.EV_SYN, core.SYN_REPORT, 0)])
+        self.assertTrue(pump(lambda: self.actions))
+        self.assertEqual((self.actions, device.reads, state.dropping), ([core.NEXT_TAB], 0, False))
+
+
+    def test_raw_pad_keeps_its_translated_keys_when_only_an_axis_cannot_be_read(self):
+        raw, monitor = self.raw_pad()
+        state = monitor.interpreter.devices[raw]
+        self.press(raw, (core.BTN_TL, 1))                           # View, under its raw code
+        self.assertTrue(pump(lambda: state.pressed == {core.BTN_SELECT}))
+        self.evdev.fail[(raw, EVIOCGABS(core.ABS_X))] = errno.EINVAL
+        monitor.interpreter.set_nav_enabled(False)
+        monitor.interpreter.set_nav_enabled(True)
+        self.assertEqual(monitor.interpreter.synced[-1],
+                         ({core.BTN_SELECT}, {core.ABS_Y: 0, core.ABS_HAT0X: 0, core.ABS_HAT0Y: 0}))
+        self.press(raw, (core.BTN_TR, 1))                           # Menu, under its raw code: the Home hold
+        self.assertTrue(pump(lambda: core.BTN_START in state.pressed))
+        self.fire_timers()
+        self.press(raw, (core.BTN_TR, 0))
+        self.assertTrue(pump(lambda: core.BTN_START not in state.pressed))
+        self.assertEqual(self.actions, [core.HOME])
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ test check:
 	$(PYTHON) -m unittest discover -s tests
 
 install:
-	install -d "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(PKGDATADIR)/gaminghome" "$(DESTDIR)$(PKGDATADIR)/data/locales" "$(DESTDIR)$(PKGDATADIR)/data/icons"
+	install -d "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(PKGDATADIR)/gaminghome" "$(DESTDIR)$(PKGDATADIR)/data/locales" "$(DESTDIR)$(PKGDATADIR)/data/icons" "$(DESTDIR)$(PKGDATADIR)/contrib/udev"
 	sed -e 's|@BINDIR@|$(BINDIR)|g' -e 's|@PKGDATADIR@|$(PKGDATADIR)|g' bin/omarchy-game-mode.in > "$(DESTDIR)$(BINDIR)/omarchy-game-mode"
 	chmod 755 "$(DESTDIR)$(BINDIR)/omarchy-game-mode"
 	install -m 644 omarchy-game-mode.py "$(DESTDIR)$(PKGDATADIR)/"
@@ -25,6 +25,7 @@ install:
 	install -m 644 data/catalog.json "$(DESTDIR)$(PKGDATADIR)/data/"
 	install -m 644 data/locales/*.json "$(DESTDIR)$(PKGDATADIR)/data/locales/"
 	install -m 644 data/icons/*.svg "$(DESTDIR)$(PKGDATADIR)/data/icons/"
+	install -m 644 contrib/udev/*.hwdb "$(DESTDIR)$(PKGDATADIR)/contrib/udev/"
 	install -Dm 644 data/$(APP_ID).desktop "$(DESTDIR)$(DATADIR)/applications/$(APP_ID).desktop"
 	install -Dm 644 data/icons/$(APP_ID).svg "$(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps/$(APP_ID).svg"
 	rm -f "$(DESTDIR)$(DATADIR)/applications/$(LEGACY_APP_ID).desktop" "$(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps/$(LEGACY_APP_ID).svg" "$(DESTDIR)$(PKGDATADIR)/data/icons/$(LEGACY_APP_ID).svg"
