@@ -364,6 +364,36 @@ class WiredTest(unittest.TestCase):
         self.status.repaint()
         self.assertEqual(self.batteries, [None])
 
+    def test_a_ups_that_is_upowers_display_device_does_not_hide_the_battery_behind_it(self):
+        rc73ya_tree(self.root)                                       # the laptop's own battery, BAT1
+        self.status.start()
+        self.client.appear(self.bus)
+        self.bus.answer_all(rc73ya(Type=3, Percentage=100.0, State=4))   # a present UPS is the whole display device
+        self.assertEqual((self.status.monitor.source, self.batteries), ("sysfs", [Battery(78, DISCHARGING)]))
+        asked = len(self.bus.calls)
+        (self.root / "BAT1" / "capacity").write_text("77\n", encoding="utf-8")
+        self.wall.moment = datetime(2026, 11, 23, 21, 42, 0, 10_000)
+        self.timers.fire()                                           # the minute tick reads sysfs and asks UPower again
+        self.assertEqual((self.batteries[-1], len(self.bus.calls) - asked), (Battery(77, DISCHARGING), 1))
+        self.bus.answer_all(rc73ya(Percentage=77.0))                 # the UPS is gone: UPower can say again
+        self.assertEqual((self.status.monitor.source, self.batteries[-1]),
+                         ("upower", Battery(77, DISCHARGING, 28173)))
+
+    def test_upower_saying_that_nothing_is_present_is_believed_even_when_sysfs_lists_a_battery(self):
+        rc73ya_tree(self.root)
+        self.status.start()
+        self.client.appear(self.bus)
+        with mock.patch.object(headerstatus, "read_sysfs", wraps=headerstatus.read_sysfs) as sysfs:
+            self.bus.answer_all(rc73ya(IsPresent=False, Type=0, State=0, Percentage=0.0))
+            self.wall.moment = datetime(2026, 11, 23, 21, 42, 0, 10_000)
+            self.timers.fire()
+            self.assertEqual(sysfs.call_count, 0)                    # sysfs is not even looked at
+        self.assertEqual((self.status.monitor.source, self.status.monitor.battery, self.batteries),
+                         ("upower", None, []))
+        self.status.repaint()
+        self.assertEqual(self.batteries, [None])                     # the chip is hidden
+        self.assertEqual(len(self.bus.calls), 1)                     # and UPower is not asked again: it answered
+
 
 class GlibTimerTest(unittest.TestCase):
     def test_a_real_timer_fires_on_the_minute_and_is_really_gone_from_the_main_loop_when_stopped(self):

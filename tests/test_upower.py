@@ -92,6 +92,19 @@ class ClientLogicTest(unittest.TestCase):
         self.bus.answer_all(rc73ya(IsPresent=False, Type=0, State=0, Percentage=0.0))
         self.assertEqual((self.client.state, self.client.battery), ("ready", None))
 
+    def test_a_display_device_that_is_a_ups_is_no_answer_about_the_battery(self):
+        self.client.appear(self.bus)
+        self.bus.answer_all(rc73ya(Type=3, Percentage=100.0, State=4))
+        self.assertEqual((self.client.state, self.client.battery, self.client.idle), ("failed", None, True))
+        self.assertEqual(self.client.error, "the display device is not a battery (type 3)")
+        self.assertEqual([state for state, _ in self.seen], ["pending", "failed"])
+        self.client.refresh()                                           # still a UPS: the same state, nobody told
+        self.bus.answer_all(rc73ya(Type=3, Percentage=99.0, State=4))
+        self.assertEqual([state for state, _ in self.seen], ["pending", "failed"])
+        self.client.refresh()                                           # the UPS is gone: the battery is back
+        self.bus.answer_all(rc73ya(Percentage=60.0))
+        self.assertEqual((self.client.state, self.client.error, self.client.battery.percent), ("ready", None, 60))
+
     def test_a_change_signal_is_one_read_and_a_burst_is_one_more(self):
         self.client.appear(self.bus)
         self.bus.answer_all()
@@ -377,6 +390,16 @@ class ClientBusTest(unittest.TestCase):
         client = self.client()
         self.ready(client)
         self.assertIsNone(client.battery)
+
+    def test_a_ups_in_the_display_device_fails_to_say_until_it_is_gone(self):
+        fake = self.fake(Type=3, Percentage=100.0, State=4, TimeToEmpty=0)
+        client = self.client()
+        client.start()
+        self.assertTrue(pump(lambda: client.state == "failed"))
+        self.assertEqual((client.battery, client.error), (None, "the display device is not a battery (type 3)"))
+        fake.set(Type=2, Percentage=78.0, State=2, TimeToEmpty=28173)    # the UPS is unplugged and UPower says so
+        self.assertTrue(pump(lambda: client.state == "ready"))
+        self.assertEqual(client.battery, RC73YA)
 
     def test_a_refused_read_is_a_failure_and_a_later_request_recovers(self):
         fake = self.fake()

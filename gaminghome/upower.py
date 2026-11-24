@@ -22,7 +22,7 @@ import functools
 
 from gi.repository import Gio, GLib
 
-from .battery import Battery, from_upower
+from .battery import CANNOT_SAY, Battery, from_upower
 
 BUS_NAME = "org.freedesktop.UPower"
 DISPLAY_DEVICE = "/org/freedesktop/UPower/devices/DisplayDevice"
@@ -40,7 +40,7 @@ STATE_UNKNOWN = "unknown"     # the bus has not said yet whether anyone owns the
 STATE_ABSENT = "absent"       # nobody owns it
 STATE_PENDING = "pending"     # UPower is there and has not been read yet
 STATE_READY = "ready"         # the last read worked; ``battery`` is what it said, None for no battery
-STATE_FAILED = "failed"       # UPower is there and the last read failed
+STATE_FAILED = "failed"       # UPower is there and the last read failed, or UPower could not say (a UPS took over)
 
 
 def _text(value) -> str:
@@ -211,7 +211,11 @@ class UPowerClient:
         else:
             value = reply.unpack()
             if isinstance(value, tuple) and value and isinstance(value[0], dict):
-                self._succeed(from_upower(value[0]))
+                battery = from_upower(value[0])
+                if battery is CANNOT_SAY:
+                    self._fail(f"the display device is not a battery (type {value[0].get('Type')})")
+                else:
+                    self._succeed(battery)
             else:
                 self._fail("unexpected reply")
         if self._again and self.owner is not None:

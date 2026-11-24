@@ -68,33 +68,35 @@ game.
   be read shows no battery at all, and no message either.
 - **Where it comes from.** UPower's display device, over the system bus: the one object
   that adds up the batteries powering the machine. Game Mode only watches for UPower's bus
-  name and reads from it, and never starts it. Without UPower on the bus, it reads
-  `/sys/class/power_supply` instead, looking at entries of type `Battery` whose scope is
-  not `Device`. A battery the kernel marks as a device's own (scope `Device`), such as a
-  controller's, a mouse's or a headset's, is left out. sysfs has no time estimate to
-  offer for the tooltip.
+  name and reads from it, and never starts it. UPower saying that no battery is present is
+  believed. When a UPS is plugged in, UPower makes the UPS its display device and has
+  nothing to say about the laptop's own battery, so that case is read from sysfs too.
+  Without UPower on the bus, it reads `/sys/class/power_supply` instead, looking at
+  entries of type `Battery` whose scope is not `Device`. A battery the kernel marks as a
+  device's own (scope `Device`), such as a controller's, a mouse's or a headset's, is left
+  out. sysfs has no time estimate to offer for the tooltip.
 - **When it runs.** Only while Gaming Home is shown. One timer fires when the minute
   changes. It is set again from the wall clock each time, so a suspend, a change of time
   zone or a clock adjustment corrects itself within a minute. With UPower, the battery is
   read when Gaming Home is shown and again when UPower announces a change, with no timer
-  of its own. If UPower is on the bus but does not answer, the battery comes from sysfs
-  and UPower is asked again on the minute tick. Without UPower, sysfs is read when Gaming
-  Home is shown and then on that tick, because sysfs cannot say when it changes. While
-  Gaming Home is hidden, the clock and the battery hold no timer, no bus subscription and
-  no call in flight.
+  of its own. If UPower is on the bus but does not answer, or its display device is a UPS,
+  the battery comes from sysfs and UPower is asked again on the minute tick. Without
+  UPower, sysfs is read when Gaming Home is shown and then on that tick, because sysfs
+  cannot say when it changes. While Gaming Home is hidden, the clock and the battery hold
+  no timer, no bus subscription and no call in flight.
 
 How far this has been checked:
 
 - **Automated tests:** the 12-hour and 24-hour decision from locale formats, noon and
   midnight, and the minute-boundary delay (including a change of offset); UPower's state
-  codes, the percentage, the 20 % and 10 % edges, no battery, a UPS and garbled
-  properties; sysfs layouts like the ROG Xbox Ally's, with a controller, USB ports and an
-  empty bay ignored, several batteries and unreadable files; the UPower client against a
-  fake on a private bus, including that it sends nothing but reads, that watching for
-  UPower never starts it (on a bus where it could be started) and that nothing is
-  subscribed or asked while it is stopped; the timer's life across showing, hiding,
-  rebuilding the widgets and a late timer after a suspend. Every string exists in the
-  seven languages.
+  codes, the percentage, the 20 % and 10 % edges, no battery, a UPS (the battery is then
+  read from sysfs) and garbled properties; sysfs layouts like the ROG Xbox Ally's, with a
+  controller, USB ports and an empty bay ignored, several batteries and unreadable files;
+  the UPower client against a fake on a private bus, including that it sends nothing but
+  reads, that watching for UPower never starts it (on a bus where it could be started)
+  and that nothing is subscribed or asked while it is stopped; the timer's life across
+  showing, hiding, rebuilding the widgets and a late timer after a suspend. Every string
+  exists in the seven languages.
 - **Checked on an ASUS ROG Xbox Ally (RC73YA), read-only; nothing was pressed or
   unplugged:** UPower 1.91.5 reported its display device and Game Mode's client read it.
   The sysfs entries are an `ACAD` adapter, `BAT1` and two USB ports, and only `BAT1` is

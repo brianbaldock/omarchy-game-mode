@@ -14,8 +14,8 @@ from pathlib import Path
 
 from fakes.rc73ya import rc73ya, rc73ya_tree, supply
 from gaminghome import battery as battery_module
-from gaminghome.battery import (CHARGING, CRITICAL_PERCENT, DISCHARGING, FULL, LOW_PERCENT, MAX_ESTIMATE_S, UNKNOWN,
-                                Battery, describe, duration, from_upower, read_sysfs)
+from gaminghome.battery import (CANNOT_SAY, CHARGING, CRITICAL_PERCENT, DISCHARGING, FULL, LOW_PERCENT,
+                                MAX_ESTIMATE_S, UNKNOWN, Battery, describe, duration, from_upower, read_sysfs)
 from gaminghome.i18n import Translator
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,10 +53,17 @@ class UPowerTest(unittest.TestCase):
         properties = rc73ya()
         del properties["IsPresent"]
         self.assertIsNone(from_upower(properties))
+        # Nothing present is believed whatever the type says: a UPS that is not there hides nothing.
+        self.assertIsNone(from_upower(rc73ya(IsPresent=False, Type=3)))
 
-    def test_only_a_battery_counts_not_a_ups_or_anything_else(self):
+    def test_a_display_device_that_is_not_a_battery_is_one_upower_cannot_speak_for(self):
+        # A present UPS becomes the whole display device (Type 3) and hides the laptop's battery behind it.
         for kind in (0, 1, 3, 5, 12, 99):
-            self.assertIsNone(from_upower(rc73ya(Type=kind)), kind)
+            self.assertIs(from_upower(rc73ya(Type=kind)), CANNOT_SAY, kind)
+        self.assertIs(from_upower(rc73ya(Type=3, Percentage=100.0, State=4)), CANNOT_SAY)
+        self.assertIsNot(CANNOT_SAY, None)
+        self.assertFalse(isinstance(CANNOT_SAY, Battery))
+        self.assertEqual(repr(CANNOT_SAY), "CANNOT_SAY")
         properties = rc73ya()
         del properties["Type"]
         self.assertEqual(from_upower(properties).percent, 78)       # a reading without a type is not rejected

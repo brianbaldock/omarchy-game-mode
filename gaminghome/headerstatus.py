@@ -38,11 +38,14 @@ def _timeout_add(milliseconds, callback):
 
 
 class BatteryMonitor:
-    """Where the battery comes from: UPower while it is on the bus, sysfs otherwise.
+    """Where the battery comes from: UPower while it is on the bus and can say, sysfs otherwise.
 
     UPower says when something changed. sysfs cannot, so it is read when the monitor starts and then each time
     ``poll`` is called (the header does that on its minute tick). ``battery`` is what to show; None shows nothing,
     which is right for a machine without a battery and for one whose battery cannot be read.
+
+    UPower is believed when it reports no battery. When it is on the bus but fails to answer, or answers with a
+    display device that is not a battery (a UPS takes its place there), sysfs is used and UPower is asked again.
     """
 
     def __init__(self, on_change, make_client=UPowerClient, sysfs_root: str = SYSFS_ROOT):
@@ -63,7 +66,7 @@ class BatteryMonitor:
         self._client.stop()
 
     def poll(self):
-        """Look again where nothing says when to: sysfs, and a UPower that failed to answer."""
+        """Look again where nothing says when to: sysfs, and a UPower that failed to answer or could not say."""
         if not self.running:
             return
         if self.source == SOURCE_SYSFS:

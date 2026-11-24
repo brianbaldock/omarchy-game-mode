@@ -1,8 +1,9 @@
 """What the Home header says about the battery: its reading, the two places it comes from and the words for it.
 
-The reading is built from UPower's DisplayDevice (see ``upower.py``) or, when UPower is not on the bus, from sysfs.
-Nothing here touches GTK, GLib or D-Bus, and nothing here raises on missing or garbled data: a reading that
-cannot be trusted is no reading, and then the header shows no battery at all.
+The reading is built from UPower's DisplayDevice (see ``upower.py``) or, when UPower is not on the bus or has
+nothing to say about the machine's battery, from sysfs. Nothing here touches GTK, GLib or D-Bus, and nothing here
+raises on missing or garbled data: a reading that cannot be trusted is no reading, and then the header shows no
+battery at all.
 """
 
 from __future__ import annotations
@@ -74,17 +75,29 @@ def _estimate(value) -> int | None:
     return value
 
 
-def from_upower(properties) -> Battery | None:
-    """The battery behind UPower's DisplayDevice, or None when there is none to show.
+class CannotSay:
+    """What ``from_upower`` answers when UPower's display device is not about this machine's battery."""
 
-    No battery is what UPower says on a desktop, in a virtual machine or with only a UPS (``Type`` 3).
+    def __repr__(self):
+        return "CANNOT_SAY"
+
+
+CANNOT_SAY = CannotSay()
+
+
+def from_upower(properties) -> Battery | CannotSay | None:
+    """The battery behind UPower's DisplayDevice, None when UPower says there is none, CANNOT_SAY when it cannot tell.
+
+    No battery is what UPower says on a desktop or in a virtual machine: nothing is present. A UPS is another
+    matter. A present UPS becomes the whole display device (``Type`` 3) and hides the battery of the laptop
+    behind it, so UPower has nothing to say about that battery and the caller has to look elsewhere.
     Peripherals never reach the DisplayDevice: it only adds up the batteries that power the system.
     """
     if not isinstance(properties, dict) or properties.get("IsPresent") is not True:
         return None
     kind = properties.get("Type")
     if isinstance(kind, int) and not isinstance(kind, bool) and kind != UPOWER_BATTERY:
-        return None
+        return CANNOT_SAY
     percent = _percent(properties.get("Percentage"))
     if percent is None:
         return None
