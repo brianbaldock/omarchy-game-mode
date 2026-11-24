@@ -708,9 +708,57 @@ class FakeBluetoothTest(unittest.TestCase):
         for number in range(bt.MAX_DEVICES):
             source.add_device(f"Sensor {number}", "other")
         source.add_device("Pad", "gamepad", paired=True)
+        source.start()
         self.assertTrue(source.snapshot.truncated)
         self.assertEqual(len(source.snapshot.devices), bt.MAX_DEVICES)
         self.assertEqual(source.snapshot.devices[0].name, "Pad")
+
+    def test_like_the_bluez_client_it_knows_nothing_before_start_and_forgets_everything_at_stop(self):
+        source = FakeBluetooth()
+        source.add_device("Pad", "gamepad", paired=True)
+        self.assertEqual(source.snapshot, bt.Snapshot())
+        source.start()
+        source.connect(1)
+        source.fail(bt.TIMEOUT)
+        source.scan(True)
+        source.stop()
+        self.assertEqual(source.snapshot, bt.Snapshot())
+        source.start()
+        snapshot = source.snapshot
+        self.assertEqual((snapshot.state, [d.name for d in snapshot.devices]), (bt.ON, ["Pad"]))
+        self.assertEqual((snapshot.scanning, snapshot.activity, snapshot.failure), (False, None, None))
+
+    def test_like_the_bluez_client_it_starts_no_search_while_something_runs(self):
+        source = world()
+        source.connect(2)
+        source.scan(True)
+        self.assertEqual((source.calls[-1], source.snapshot.scanning), (("scan", True), False))
+
+    def test_a_cancel_that_waits_takes_the_question_away_and_ends_the_pairing_when_bluez_answers(self):
+        source = FakeBluetooth(cancel_waits=True)
+        source.add_device("Speaker", "speaker")
+        source.start()
+        source.pair(1)
+        source.show_prompt(bt.PIN, max_length=16)
+        source.cancel()
+        source.cancel()
+        self.assertEqual((source.snapshot.prompt, source.snapshot.activity.kind), (None, bt.PAIRING))
+        source.finish_cancel()
+        self.assertEqual((source.snapshot.activity, source.snapshot.failure.code), (None, bt.CANCELED))
+
+    def test_a_deferred_change_is_reported_later_once_for_a_burst_and_never_after_stop(self):
+        later, reported = [], []
+        source = FakeBluetooth(lambda: reported.append(source.snapshot), defer=later.append)
+        source.start()
+        source.add_device("Pad", "gamepad")
+        source.add_device("Buds", "headphones")
+        self.assertEqual((reported, len(later)), ([], 1))
+        later.pop()()
+        self.assertEqual(len(reported[-1].devices), 2)
+        source.add_device("Speaker", "speaker")
+        source.stop()
+        later.pop()()
+        self.assertEqual(len(reported), 1)
 
     def test_the_stand_in_owns_no_timer_and_touches_nothing_of_the_machine(self):
         tree = ast.parse((ROOT / "tests" / "fakes" / "fake_bluetooth.py").read_text(encoding="utf-8"))

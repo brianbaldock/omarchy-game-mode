@@ -116,9 +116,16 @@ class FakeBattery:
         pass
 
 
+def later(callback):
+    """Report a change from the main loop, as the BlueZ client does, and never from inside the call that made it."""
+    GLib.timeout_add(0, lambda: callback() and False)
+
+
 def bluetooth_world(word, on_change):
-    """What Bluetooth looks like before the sheet is opened. The names are made up and no address appears."""
-    source = FakeBluetooth(on_change, {"btoff": bt.OFF, "bterror": bt.ERROR, "btnone": bt.ABSENT}.get(word, bt.ON))
+    """What Bluetooth looks like before the sheet is opened. The names are made up and no address appears. Changes
+    are reported later and a cancelled pairing waits for BlueZ to answer, as with the BlueZ client."""
+    source = FakeBluetooth(on_change, {"btoff": bt.OFF, "bterror": bt.ERROR, "btnone": bt.ABSENT}.get(word, bt.ON),
+                           defer=later, cancel_waits=True)
     if word in ("bterror", "btnone"):
         return source
     if word == "btdupes":
@@ -153,6 +160,7 @@ def press(window, name):
             time.sleep(0.005)
     button.disconnect(handler)
     check(clicked, f"pressing A on {name} did not click it")
+    settle()
 
 
 def settle(milliseconds=60):
@@ -194,7 +202,9 @@ def play(word, window, source):
     elif word == "btforget":
         press(window, f"{sheet.FORGET}3")
     elif word in PAIRING:
-        press(window, f"{sheet.PAIR}{source.add_device('Travel Speaker', 'speaker')}")
+        speaker = source.add_device("Travel Speaker", "speaker")
+        settle()
+        press(window, f"{sheet.PAIR}{speaker}")
         if word == "btconfirm":
             source.show_prompt(bt.CONFIRM, code="042917")
         elif word == "btcode":
@@ -202,6 +212,7 @@ def play(word, window, source):
             source.type_digits(2)
         elif word in ("btpin", "btpasskey"):
             source.show_prompt(bt.PIN if word == "btpin" else bt.PASSKEY, max_length=16 if word == "btpin" else 6)
+            settle()
             press(window, f"{sheet.PAD}0")
             press(window, f"{sheet.PAD}4")
             window._on_key(None, Gdk.KEY_2, 0, Gdk.ModifierType(0))       # and one from a keyboard
@@ -210,6 +221,7 @@ def play(word, window, source):
         elif word == "btpaired":
             source.stage(bt.STAGE_CONNECT)
             source.fail(bt.UNREACHABLE, paired=True)
+    settle()
 
 
 FIRST_FOCUS = {"bt": sheet.SEARCH, "btoff": sheet.POWER, "bterror": sheet.RETRY, "btforget": f"{sheet.FORGET_NO}3",
@@ -270,12 +282,14 @@ def check_behaviour(word, language, window, source):
         check(not busy, f"{busy} can be pressed while a device connects")
         check(window._bt_buttons[sheet.SEARCH].get_sensitive(), "Search is disabled while a device connects")
         source.finish()
+        settle()
         check(window.selected_name() == f"{sheet.CONNECT}2",
               f"the focus went to {window.selected_name()} after connecting, not back to the device")
         check(window._bt_buttons[f"{sheet.CONNECT}2"].get_label() == t("bluetooth.disconnect"), "no Disconnect")
     elif word == "btscan":
         check(window._focus_by_name(f"{sheet.PAIR}5"), "a nearby device cannot be selected")
         source.remove_device(5)
+        settle()
         check(window.selected_name() == sheet.SEARCH,
               f"the focus went to {window.selected_name()} when the selected device vanished, not to Search")
     elif word == "btforget":
@@ -287,8 +301,9 @@ def check_behaviour(word, language, window, source):
         cancels = source.calls.count(("cancel",))
         window.sheet = None                                         # as a change of language does
         window.build()
-        check(source.calls.count(("cancel",)) > cancels and source.snapshot.activity is None,
-              "building the window again during a pairing did not abandon it")
+        check(source.calls.count(("cancel",)) > cancels, "building the window again during a pairing did not abandon it")
+        source.finish_cancel()                                      # BlueZ answers the cancel
+        settle()
     elif word == "btpin":
         cancels = source.calls.count(("cancel",))
         window.set_visible(False)
@@ -302,6 +317,8 @@ def check_behaviour(word, language, window, source):
         window.handle_action(core.MENU)
         check(window.sheet is None and source.calls[-1] == ("cancel",), "Menu did not give up the pairing")
         check(not any("042" in text for text in texts_in(window)), "the digits typed stay in a hidden label")
+        source.finish_cancel()
+        settle()
     if word != "btnone":
         check_exits(window, source)
         check_late_clicks(window, source)
@@ -327,11 +344,15 @@ def check_late_clicks(window, source):
 
     if source.snapshot.scanning:
         source.scan(False)
+        settle()
     attempt(sheet.SEARCH, lambda: window.handle_action(core.ACTIVATE), lambda: window.handle_action(core.BACK),
             ("scan", True))
-    nearby = source.add_device("Late Speaker", "speaker")
     window.open_bluetooth()
     press(window, sheet.SEARCH)                                     # the nearby list shows once Search was pressed
+    nearby = next((device.id for device in bt.nearby(source.snapshot.devices)), None)
+    if nearby is None:
+        nearby = source.add_device("Late Speaker", "speaker")
+        settle()
     attempt(f"{sheet.PAIR}{nearby}", lambda: window.handle_action(core.ACTIVATE),
             lambda: window.handle_action(core.MENU), ("pair", nearby))
     attempt(sheet.SEARCH, lambda: window.get_focus().activate(),
@@ -371,6 +392,7 @@ def check_exits(window, source):
           "hiding the window did not end the search and stop Bluetooth")
     window.set_visible(True)
     check(source.running, "showing the window again did not start Bluetooth")
+    settle()
 
 
 class FakeRuntime(application.Runtime):
