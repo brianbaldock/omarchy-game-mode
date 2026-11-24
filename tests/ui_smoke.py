@@ -43,7 +43,7 @@ import gi  # noqa: E402
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from fakes.fake_bluetooth import FakeBluetooth  # noqa: E402
 from gaminghome import application, bluetooth as bt, bluetoothsheet as sheet, core, settings as settings_mod  # noqa: E402
@@ -491,7 +491,9 @@ def main():
     battery = next((word for word in words if word in BATTERIES), "")
     bluetooth = next((word for word in words if word in BLUETOOTH), "")
     suffix = "".join(f"-{word}" for word in words)
-    app = Gtk.Application(application_id="io.github.brianbaldock.OmarchyGameModeSmoke")
+    # Not unique: a run that found another one on the session bus would hand its work over and exit at once, passing.
+    app = Gtk.Application(application_id="io.github.brianbaldock.OmarchyGameModeSmoke",
+                          flags=Gio.ApplicationFlags.NON_UNIQUE)
     failures = []
 
     def shoot(window, name):
