@@ -23,6 +23,11 @@ step; see [Changelog and releases](CONTRIBUTING.md#changelog-and-releases).
   D-pad, mouse and touch. A search or a pairing starts only when you ask and ends when you leave the sheet, and a
   hidden Gaming Home still runs nothing. Below 1400 px the header shows the logo without the title to make room.
   Not yet tested with real devices.
+- **`omarchy-game-mode power`** (#23). `power status` prints the power profile and the ones the machine offers,
+  `power set power-saver|balanced|performance` changes it, and `power cycle` steps to the next one, for example from
+  a key bind. It asks power-profiles-daemon, which applies the profile before it answers, never starts the daemon
+  and never asks for a password; a session the system does not allow is refused. It also tells Omarchy to keep the
+  choice for the current power source.
 
 ## [0.2.1] - 2026-11-24
 
