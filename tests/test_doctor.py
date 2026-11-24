@@ -2203,14 +2203,15 @@ STACK_BUS = ("busctl", "--system", "status", "org.shadowblip.InputPlumber")
 
 
 def add_input(root, number, name, keys, axes="0", vendor="0b05", product="1b4c", virtual=False, mode=0o660,
-              bus="0003", usb="3-6", interface=5):
+              bus="0003", usb="3-6", interface=5, ff="0"):
     """One evdev device laid out like sysfs, with canary serials next to the fields the doctor reads."""
     hid_device = f"0003:{vendor.upper()}:{product.upper()}.{interface + 1:04X}"
     parent = "sys/devices/virtual/input" if virtual else f"{USB_ROOT}/{usb}/{usb}:1.{interface}/{hid_device}/input"
     base = root / parent / f"input{number}"
     for relative, text in (("name", name), ("id/bustype", bus), ("id/vendor", vendor), ("id/product", product),
                            ("id/version", "0110"), ("capabilities/key", keys), ("capabilities/abs", axes),
-                           ("uniq", CANARY_SERIAL), ("phys", f"usb-0000:04:00.4-6/input5 {CANARY_MAC}")):
+                           ("capabilities/ff", ff), ("uniq", CANARY_SERIAL),
+                           ("phys", f"usb-0000:04:00.4-6/input5 {CANARY_MAC}")):
         write(base / relative, text + "\n")
     event = base / f"event{number}"
     event.mkdir()
@@ -2221,11 +2222,13 @@ def add_input(root, number, name, keys, axes="0", vendor="0b05", product="1b4c",
     write(root / "dev/input" / f"event{number}").chmod(mode)
 
 
-def add_hidraw(root, number, interface, mode, vendor="0B05", product="1B4C", usb="3-6"):
+def add_hidraw(root, number, interface, mode, vendor="0B05", product="1B4C", usb="3-6", descriptor=None):
     device = root / USB_ROOT / usb / f"{usb}:1.{interface}" / f"0003:{vendor}:{product}.{interface + 1:04X}"
     write(device / "uevent", f"DRIVER=hid-generic\nHID_ID=0003:0000{vendor}:0000{product}\n"
                              "HID_NAME=ASUSTeK Computer Inc. N-KEY Device\n"
                              f"HID_PHYS=usb-0000:04:00.4-6/input{interface}\nHID_UNIQ={CANARY_SERIAL}\n")
+    if descriptor is not None:
+        (device / "report_descriptor").write_bytes(descriptor)
     write(device.parent / "bInterfaceNumber", f"{interface:02x}\n")
     node = device / "hidraw" / f"hidraw{number}"
     node.mkdir(parents=True)
@@ -2569,7 +2572,8 @@ class PlanTest(World):
         ids = {scope: [check.id for check in checks.plan(Options(scope=scope))] for scope in checks.SCOPES}
         self.assertEqual(ids["system"], ["system.platform", "system.device", "system.gpu"])
         self.assertEqual(ids["input"][:3], ids["system"])
-        self.assertEqual(ids["input"][3:], ["input.gamepads", "input.stack", "input.handheld", "input.hidraw-access"])
+        self.assertEqual(ids["input"][3:], ["input.gamepads", "input.stack", "input.handheld", "input.hidraw-access",
+                                            "input.vibration"])
         self.assertEqual(ids["all"], ids["streaming"] + ids["input"][3:])
         self.assertFalse(any(name.startswith("input.") for name in ids["streaming"]))
         for expected in ("stun.binding", "turn.challenge", "nat.mapping_stability", "dns.required", "tls443.required",
@@ -3189,7 +3193,8 @@ class EntryPointTest(unittest.TestCase):
 # ---- guided button test: scripted events against a fake clock --------------------------
 
 # Report descriptor of the ROG Xbox Ally's gamepad interface (identical on every unit):
-# report 0x0b declares 14 buttons at bits 96-109, followed by 2 padding bits.
+# report 0x0b declares 14 buttons at bits 96-109, followed by 2 padding bits, and output
+# report 0x0d is a haptics report laid out like the Xbox One controller's rumble report.
 ALLY_REPORT_DESCRIPTOR = bytes.fromhex(
     "05010905a101850ba10009300931150026ffff350046ffff950275108102c0a10009330934150026ffff950275108102c0"
     "05010932150026ff039501750a81021500250075069501810305010935150026ff039501750a810215002500750695018103"
@@ -4128,6 +4133,180 @@ class ButtonCommandTest(InputCase):
         self.assertEqual(reader.read(), [])
         self.assertEqual((buttonsio.EVENT.size, buttonsio.ABSINFO.size), (24, 24))
         self.assertEqual((buttonsio._eviocgkey(96), buttonsio._eviocgabs(0)), (0x80604518, 0x80184540))
+
+
+# ---- vibration: what the kernel offers games, what the controller's descriptor declares ----
+
+# A force-feedback bitmap as sysfs prints it, most significant word first: FF_RUMBLE (bit 80) and
+# the effects the kernel emulates with it.
+RUMBLE_FF = "107030000 0"
+ALLY_PAD_FF = f"{USB_PARENT}/3-6:1.5/0003:0B05:1B4C.0006/input/input6/capabilities/ff"
+ELITE_VIRTUAL_FF = "sys/devices/virtual/input/input21/capabilities/ff"
+# A boot keyboard: its one output report drives the LEDs.
+KEYBOARD_DESCRIPTOR = bytes.fromhex(
+    "05 01 09 06 a1 01 85 01 05 07 19 e0 29 e7 15 00 25 01 75 01 95 08 81 02 95 01 75 08 81 01 95 05 75 01 05 08"
+    " 19 01 29 05 91 02 95 01 75 03 91 01 95 06 75 08 15 00 25 65 05 07 19 00 29 65 81 00 c0")
+LONG_ITEM = b"\xfe\xff\x00" + bytes(255)  # 258 bytes that make up a single item
+
+
+class VibrationTest(World):
+    def ally_with_descriptors(self, **ally):
+        """The Ally's input devices, with the gamepad interface's real descriptor and keyboards on the others."""
+        ctx = self.ally(**ally)
+        for number in range(6):
+            add_hidraw(SCRATCH, number, number, 0o600,
+                       descriptor=ALLY_REPORT_DESCRIPTOR if number == 5 else KEYBOARD_DESCRIPTOR)
+        return ctx
+
+    def test_the_ally_gamepad_descriptor_declares_an_xbox_style_haptics_report(self):
+        fields = hid.output_fields(ALLY_REPORT_DESCRIPTOR)
+        self.assertEqual([(item.report_id, item.usages, item.size, item.count, item.constant, item.minimum,
+                           item.maximum) for item in fields],
+                         [(0x0D, (0x0F0097,), 4, 1, False, 0, 1), (0x0D, (), 4, 1, True, 0, 0),
+                          (0x0D, (0x0F0070,), 8, 4, False, 0, 100), (0x0D, (0x0F0050,), 8, 1, False, 0, 255),
+                          (0x0D, (0x0F00A7,), 8, 1, False, 0, 255), (0x0D, (0x0F007C,), 8, 1, False, 0, 255)])
+        self.assertEqual(hid.haptics_report(ALLY_REPORT_DESCRIPTOR), hid.Haptics(0x0D, True))
+        # The Xbox One controller declares the same report as report 3 over Bluetooth.
+        report_3 = ALLY_REPORT_DESCRIPTOR.replace(bytes.fromhex("850da102"), bytes.fromhex("8503a102"))
+        self.assertEqual(hid.haptics_report(report_3), hid.Haptics(3, True))
+        two_motors = ALLY_REPORT_DESCRIPTOR.replace(bytes.fromhex("09701500256475089504"),
+                                                    bytes.fromhex("09701500256475089502"))
+        self.assertEqual(hid.haptics_report(two_motors), hid.Haptics(0x0D, False))
+        # A four-byte usage names its own page, whatever the usage page in effect.
+        vendor_page = bytes.fromhex("06 00 ff 09 01 a1 01 85 05 0b 97 00 0f 00 15 00 25 01 75 04 95 01 91 02"
+                                    " 0b 70 00 0f 00 25 64 75 08 95 04 91 02 c0")
+        self.assertEqual(hid.haptics_report(vendor_page), hid.Haptics(5, False))
+
+    def test_descriptors_without_a_haptics_output_report(self):
+        no_magnitude = ALLY_REPORT_DESCRIPTOR.replace(bytes.fromhex("0970"), bytes.fromhex("0971"))
+        as_features = ALLY_REPORT_DESCRIPTOR.replace(b"\x91", b"\xb1")  # here 0x91 only ever starts an Output item
+        self.assertEqual(len(hid.output_fields(KEYBOARD_DESCRIPTOR)), 2)
+        for data in (KEYBOARD_DESCRIPTOR, no_magnitude, as_features, b""):
+            self.assertIsNone(hid.haptics_report(data))
+
+    def test_reading_a_descriptor_is_bounded_and_survives_truncation_and_garbage(self):
+        # Cut inside the last Output item, then inside the Magnitude one.
+        self.assertEqual(hid.haptics_report(ALLY_REPORT_DESCRIPTOR[:-3]), hid.Haptics(0x0D, False))
+        self.assertIsNone(hid.haptics_report(ALLY_REPORT_DESCRIPTOR[:189]))
+        self.assertEqual(hid.haptics_report(LONG_ITEM * 14 + ALLY_REPORT_DESCRIPTOR), hid.Haptics(0x0D, True))
+        oversized = LONG_ITEM * 16 + ALLY_REPORT_DESCRIPTOR
+        self.assertGreater(len(oversized) - len(ALLY_REPORT_DESCRIPTOR), hid.MAX_DESCRIPTOR_BYTES)
+        self.assertIsNone(hid.haptics_report(oversized))
+        filler = b"\xc0" * (hid.MAX_DESCRIPTOR_ITEMS - 120)  # the Ally's report ends at its 115th item
+        self.assertEqual(hid.haptics_report(filler + ALLY_REPORT_DESCRIPTOR), hid.Haptics(0x0D, True))
+        self.assertIsNone(hid.haptics_report(b"\xc0" * hid.MAX_DESCRIPTOR_ITEMS + ALLY_REPORT_DESCRIPTOR))
+        started = time.perf_counter()
+        for data in (b"\xfe", b"\xfe\x03", b"\x0b\x97\x00", bytes(range(256)) * 16, b"\xff" * 5000,
+                     b"\xa4" * 4096 + ALLY_REPORT_DESCRIPTOR, bytes((n * 37 + 11) % 256 for n in range(6000))):
+            self.assertIsNone(hid.haptics_report(data))
+        self.assertLess(time.perf_counter() - started, 0.5)
+
+    def test_force_feedback_is_read_from_the_sysfs_bitmap(self):
+        ctx = self.ally()
+        pad = evdev.gamepads(ctx)[0]
+        for text, rumble in (("0", False), (RUMBLE_FF, True), ("10000 0", True), ("10000", False), ("zz", False),
+                             ("", False)):
+            write(SCRATCH / ALLY_PAD_FF, text + "\n")
+            self.assertEqual(evdev.FF_RUMBLE in evdev.force_feedback(ctx, pad), rumble, text)
+        (SCRATCH / ALLY_PAD_FF).unlink()
+        self.assertEqual(evdev.force_feedback(ctx, pad), set())
+
+    def test_a_controller_that_declares_haptics_but_offers_no_force_feedback_warns(self):
+        outcome = inputstack.check_vibration(self.ally_with_descriptors())
+        self.assertEqual(outcome.status, Status.WARN)
+        self.assertEqual(outcome.detail,
+                         "The controller can vibrate (haptics output report 0x0D on ASUSTeK Computer Inc. N-KEY "
+                         "Device) but the kernel offers no force feedback for it, so games cannot make it vibrate "
+                         "through evdev.")
+        self.assertEqual(outcome.remediation,
+                         "A kernel driver or a handheld daemon has to forward rumble to that report (laid out like "
+                         "the Xbox One controller's rumble report).")
+        self.assertEqual((outcome.proves, outcome.does_not_prove),
+                         ("The controller's HID descriptor declares a haptics report; its event node offers no rumble.",
+                          "Whether Steam's own HID driver reaches it."))
+        self.assertEqual(outcome.evidence["controllers"], [{
+            "name": "ASUSTeK Computer Inc. N-KEY Device", "node": "event6", "kind": "physical", "access": "readable",
+            "rumble": False, "haptics_report": "0x0D", "xbox_layout": True, "interface": "hidraw5"}])
+
+    def test_rumble_counts_only_on_a_controller_games_can_open(self):
+        ctx = self.ally_with_descriptors()
+        write(SCRATCH / ALLY_PAD_FF, RUMBLE_FF + "\n")
+        offered = inputstack.check_vibration(ctx)
+        self.assertEqual(offered.status, Status.PASS)
+        self.assertEqual(offered.detail,
+                         "Vibration is offered to games (FF_RUMBLE on ASUSTeK Computer Inc. N-KEY Device).")
+        self.assertEqual((offered.proves, offered.does_not_prove), (None, None))  # the check's own lines apply
+        plumber = self.ally_with_descriptors(inputplumber=True)  # the raw pad is hidden behind a virtual one
+        write(SCRATCH / ELITE_VIRTUAL_FF, RUMBLE_FF + "\n")
+        self.assertEqual(inputstack.check_vibration(plumber).detail,
+                         "Vibration is offered to games (FF_RUMBLE on Microsoft X-Box One Elite 2 pad).")
+        write(SCRATCH / ELITE_VIRTUAL_FF, "0\n")
+        write(SCRATCH / ALLY_PAD_FF, RUMBLE_FF + "\n")
+        hidden = inputstack.check_vibration(plumber)
+        self.assertEqual((hidden.status, hidden.detail),
+                         (Status.INFO, "Only controllers this user cannot open offer force feedback (FF_RUMBLE on "
+                                       "ASUSTeK Computer Inc. N-KEY Device), so games cannot use it."))
+
+    def test_without_force_feedback_or_a_haptics_report_it_says_so_and_what_that_does_not_prove(self):
+        ctx = self.ally()
+        outcome = inputstack.check_vibration(ctx)
+        self.assertEqual((outcome.status, outcome.detail),
+                         (Status.INFO, "No controller offers force feedback (FF_RUMBLE) to games, and no physical "
+                                       "controller's HID descriptor declares a haptics output report."))
+        self.assertEqual(outcome.does_not_prove,
+                         "That the controller has no motors: a report the doctor does not know may drive them.")
+        add_hidraw(SCRATCH, 5, 5, 0o600, descriptor=LONG_ITEM * 16 + ALLY_REPORT_DESCRIPTOR)
+        self.assertEqual(inputstack.check_vibration(ctx).status, Status.INFO)  # past the bytes that are read
+        shutil.rmtree(SCRATCH)
+        SCRATCH.mkdir()
+        self.assertEqual(inputstack.check_vibration(make_context(root=SCRATCH)).status, Status.SKIP)
+
+    def test_a_haptics_report_is_only_ever_attributed_to_its_own_controller(self):
+        ctx = self.ally()
+        add_input(SCRATCH, 30, "Microsoft X-Box One Elite 2 pad", ELITE_PAD_KEYS, PAD_AXES, "045e", "0b13", usb="3-2",
+                  interface=0)
+        add_hidraw(SCRATCH, 7, 0, 0o600, vendor="045E", product="0B13", usb="3-2", descriptor=ALLY_REPORT_DESCRIPTOR)
+        add_input(SCRATCH, 31, ROGUE_PAD_NAME, ELITE_PAD_KEYS, PAD_AXES, "045e", "0b13", usb="3-3", interface=0,
+                  ff=RUMBLE_FF, mode=0o000)
+        outcome = inputstack.check_vibration(ctx)
+        self.assertEqual(outcome.status, Status.WARN)
+        self.assertIn("(haptics output report 0x0D on Microsoft X-Box One Elite 2 pad)", outcome.detail)
+        self.assertEqual([(row["node"], row["rumble"], row["haptics_report"], row["interface"])
+                          for row in outcome.evidence["controllers"]],
+                         [("event6", False, "", ""), ("event30", False, "0x0D", "hidraw7"), ("event31", True, "", "")])
+        (SCRATCH / "dev/input/event31").chmod(0o660)
+        named = inputstack.check_vibration(make_context(root=SCRATCH, commands=self.commands))
+        self.assertEqual(named.detail, "Vibration is offered to games (FF_RUMBLE on <controller>).")
+        for canary in VALUE_CANARIES + (CANARY_SERIAL, CANARY_MAC):
+            self.assertNotIn(canary, named.detail + json.dumps(named.evidence))
+
+    def test_the_report_states_the_vibration_finding_with_what_it_proves(self):
+        ctx = self.world(Options(scope="input"))  # InputPlumber hides the raw pad; its virtual pad offers no rumble
+        (SCRATCH / USB_PARENT / "3-6:1.5/0003:0B05:1B4C.0006/report_descriptor").write_bytes(ALLY_REPORT_DESCRIPTOR)
+        result = cli.diagnose(ctx)
+        text = " ".join(cli.render(result, ctx.redactor, "text").split())
+        self.assertIn("[WARN] Vibration: The controller can vibrate (haptics output report 0x0D on ASUSTeK Computer "
+                      "Inc. N-KEY Device) but the kernel offers no force feedback for it, so games cannot make it "
+                      "vibrate through evdev. fix: A kernel driver or a handheld daemon has to forward rumble to that "
+                      "report (laid out like the Xbox One controller's rumble report). proves: The controller's HID "
+                      "descriptor declares a haptics report; its event node offers no rumble. Not: Whether Steam's "
+                      "own HID driver reaches it.", text)
+        markdown = cli.render(result, ctx.redactor, "markdown")
+        for line in ("| WARN | Vibration | The controller can vibrate (haptics output report 0x0D on ASUSTeK Computer "
+                     "Inc. N-KEY Device) but the kernel offers no force feedback for it, so games cannot make it "
+                     "vibrate through evdev. |",
+                     "- **Vibration** (WARN): A kernel driver or a handheld daemon has to forward rumble to that "
+                     "report (laid out like the Xbox One controller's rumble report).",
+                     "| Vibration (`input.vibration`) | The controller's HID descriptor declares a haptics report; its "
+                     "event node offers no rumble. | Whether Steam's own HID driver reaches it. |"):
+            self.assertIn(line, markdown)
+        document = json.loads(cli.render(result, ctx.redactor, "json"))
+        vibration = next(check for check in document["checks"] if check["id"] == "input.vibration")
+        self.assertEqual(vibration["evidence"]["controllers"], [
+            {"name": "ASUSTeK Computer Inc. N-KEY Device", "node": "event6", "kind": "physical", "access": "hidden",
+             "rumble": False, "haptics_report": "0x0D", "xbox_layout": True, "interface": "hidraw5"},
+            {"name": "Microsoft X-Box One Elite 2 pad", "node": "event21", "kind": "virtual", "access": "readable",
+             "rumble": False, "haptics_report": "", "xbox_layout": False, "interface": ""}])
 
 
 if __name__ == "__main__":

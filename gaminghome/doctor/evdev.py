@@ -23,6 +23,7 @@ BTN_SELECT, BTN_START, BTN_MODE, BTN_THUMBL, BTN_THUMBR = 0x13A, 0x13B, 0x13C, 0
 BTN_DPAD_UP, BTN_DPAD_DOWN, BTN_DPAD_LEFT, BTN_DPAD_RIGHT = 0x220, 0x221, 0x222, 0x223
 BTN_TRIGGER_HAPPY1 = 0x2C0
 KEY_PROG1, KEY_F13 = 148, 183
+FF_RUMBLE = 0x50
 ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ = 0x00, 0x01, 0x02, 0x03, 0x04, 0x05
 ABS_GAS, ABS_BRAKE, ABS_HAT0X, ABS_HAT0Y, ABS_HAT2X, ABS_HAT2Y = 0x09, 0x0A, 0x10, 0x11, 0x14, 0x15
 BUS_NAMES = {0x03: "USB", 0x05: "Bluetooth", 0x06: "virtual", 0x18: "I2C", 0x19: "built-in"}
@@ -250,6 +251,11 @@ def physical_device(ctx: Context, sysfs_device: str) -> str:
 
 def gamepads(ctx: Context) -> list[InputDevice]:
     return ctx.once("gamepads", lambda: [device for device in input_devices(ctx) if device.is_gamepad])
+
+
+def force_feedback(ctx: Context, device: InputDevice) -> set[int]:
+    """The force-feedback effects (FF_RUMBLE and the like) that the kernel offers on an evdev node."""
+    return parse_bitmap(ctx.fs.read(f"/sys/class/input/{device.node}/device/capabilities/ff", 4096) or "")
 
 
 @dataclass(frozen=True)

@@ -1,20 +1,22 @@
-"""Controller audit: which gamepads apps can see, what they cannot report, and which
-input daemons sit in between.
+"""Controller audit: which gamepads apps can see, what they cannot report, whether games
+can make them vibrate, and which input daemons sit in between.
 
-Read-only and passive: capabilities come from sysfs, daemons are found through
-systemd, the system D-Bus name list and /proc. No device node is opened, nothing
-is grabbed and nothing is installed; the advice for a handheld is printed text.
+Read-only and passive: capabilities and HID report descriptors come from sysfs, daemons
+are found through systemd, the system D-Bus name list and /proc. No device node is
+opened, nothing is grabbed and nothing is installed; the advice for a handheld is
+printed text.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Sequence
 
 from .context import Context
 from .devices import Handheld, dmi, known_handheld
-from .evdev import InputDevice, gamepads, hidraw_nodes
+from .evdev import FF_RUMBLE, InputDevice, force_feedback, gamepads, hid_parent, hidraw_nodes, physical_device
+from .hid import MAX_DESCRIPTOR_BYTES, Haptics, haptics_report
 from .model import Outcome, info, ok, skip, warn
 
 INPUTPLUMBER_BUS_NAME = "org.shadowblip.InputPlumber"
@@ -205,3 +207,64 @@ def check_hidraw_access(ctx: Context) -> Outcome:
                 f"{': ' + '; '.join(clues) if clues else ''}.",
                 "This is expected while a handheld daemon manages the controller, but tools that read the raw "
                 f"interfaces cannot work at the same time.{manual} The doctor never does this for you.", **evidence)
+
+
+def _haptics(ctx: Context, pad: InputDevice) -> tuple[str, Haptics] | None:
+    """A haptics output report declared by a raw HID interface of `pad`'s own physical device, and that interface.
+
+    Report descriptors are read from sysfs, which every user may read: no device node is opened. The pad's
+    own interface is looked at first; a virtual pad has no descriptor of its own.
+    """
+    sysfs = f"/sys/class/input/{pad.node}/device"
+    device = "" if pad.virtual else physical_device(ctx, sysfs)
+    if not device:
+        return None
+    own = hid_parent(ctx, sysfs)
+    nodes = [node.node for node in hidraw_nodes(ctx)
+             if physical_device(ctx, f"/sys/class/hidraw/{node.node}/device") == device]
+    for node in sorted(nodes, key=lambda name: hid_parent(ctx, f"/sys/class/hidraw/{name}/device") != own):
+        descriptor = ctx.fs.read_bytes(f"/sys/class/hidraw/{node}/device/report_descriptor", MAX_DESCRIPTOR_BYTES)
+        found = haptics_report(descriptor or b"")
+        if found:
+            return node, found
+    return None
+
+
+def check_vibration(ctx: Context) -> Outcome:
+    """Whether games can make a controller vibrate through evdev, and whether its HID descriptor says it can."""
+    found = gamepads(ctx)
+    if not found:
+        return skip("No gamepad was found.", "Connect or wake a controller and run the doctor again.")
+    rows, offered, unopened, haptic = [], [], [], None
+    for pad in found:
+        rumble = FF_RUMBLE in force_feedback(ctx, pad)
+        declared = _haptics(ctx, pad)
+        rows.append({"name": pad.name, "node": pad.node, "kind": pad.kind(), "access": pad.access, "rumble": rumble,
+                     "haptics_report": f"0x{declared[1].report_id:02X}" if declared else "",
+                     "xbox_layout": bool(declared and declared[1].xbox_layout),
+                     "interface": declared[0] if declared else ""})
+        if rumble:
+            (offered if pad.access == "readable" else unopened).append(pad.name)
+        elif declared and haptic is None:
+            haptic = (pad, declared[1])
+    evidence = dict(controllers=rows)
+    if offered:
+        return ok(f"Vibration is offered to games (FF_RUMBLE on {', '.join(dict.fromkeys(offered))}).", **evidence)
+    if haptic:
+        pad, report = haptic
+        layout = "laid out like" if report.xbox_layout else "not laid out like"
+        return replace(warn(
+            f"The controller can vibrate (haptics output report 0x{report.report_id:02X} on {pad.name}) but the "
+            "kernel offers no force feedback for it, so games cannot make it vibrate through evdev.",
+            f"A kernel driver or a handheld daemon has to forward rumble to that report ({layout} the Xbox One "
+            "controller's rumble report).", **evidence),
+            proves="The controller's HID descriptor declares a haptics report; its event node offers no rumble.",
+            does_not_prove="Whether Steam's own HID driver reaches it.")
+    if unopened:
+        return info(f"Only controllers this user cannot open offer force feedback (FF_RUMBLE on "
+                    f"{', '.join(dict.fromkeys(unopened))}), so games cannot use it.", **evidence)
+    return replace(info("No controller offers force feedback (FF_RUMBLE) to games, and no physical controller's HID "
+                        "descriptor declares a haptics output report.", **evidence),
+                   proves="No event node offers rumble, and no HID descriptor declares a haptics output report.",
+                   does_not_prove="That the controller has no motors: a report the doctor does not know may drive "
+                                  "them.")

@@ -2,18 +2,22 @@
 
 Used by `doctor buttons --raw`. Some controllers put a button into bits their
 descriptor marks as padding; the kernel then cannot expose it through evdev, but
-it is plainly visible in the raw input report. This module only decodes bytes that
-were read elsewhere: it performs no I/O.
+it is plainly visible in the raw input report. The doctor's vibration check uses
+the descriptor's output reports to find a haptics report the kernel does not drive.
+This module only decodes bytes that were read elsewhere: it performs no I/O.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Iterator
 
 USAGE_PAGE_BUTTON = 0x09
+USAGE_PAGE_PHYSICAL = 0x0F  # Physical Interface Device: force feedback and haptics
 _MAIN, _GLOBAL, _LOCAL = 0, 1, 2
-_INPUT, _COLLECTION, _END_COLLECTION = 0x8, 0xA, 0xC
+_INPUT, _OUTPUT, _COLLECTION, _END_COLLECTION = 0x8, 0x9, 0xA, 0xC
 _USAGE_PAGE, _REPORT_SIZE, _REPORT_ID, _REPORT_COUNT, _PUSH, _POP = 0x0, 0x7, 0x8, 0x9, 0xA, 0xB
+_LOGICAL_MIN, _LOGICAL_MAX = 0x1, 0x2
 _USAGE, _USAGE_MIN, _USAGE_MAX = 0x0, 0x1, 0x2
 _CONSTANT = 0x01
 MAX_REPORT_BITS = 8 * 4096
@@ -23,6 +27,19 @@ MAX_REPORT_BYTES = 512
 MAX_REPORT_IDS = 16
 MAX_BITS_PER_REPORT = 32
 MAX_BITS_TOTAL = 256
+# Bounds on reading a descriptor for its output reports. The kernel keeps at most 4096 bytes of one,
+# and a real descriptor holds a few hundred items.
+MAX_DESCRIPTOR_BYTES = 4096
+MAX_DESCRIPTOR_ITEMS = 1024
+MAX_PUSH_DEPTH = 16
+MAX_ITEM_USAGES = 64
+ENABLE_ACTUATORS, MAGNITUDE, DURATION, START_DELAY, LOOP_COUNT = (
+    USAGE_PAGE_PHYSICAL << 16 | usage for usage in (0x97, 0x70, 0x50, 0xA7, 0x7C))
+# The Xbox One controller's rumble report, as (usages, size, count, logical minimum, logical maximum) per
+# Output item: a 4-bit mask of the motors to drive and 4 bits of padding, the strength of each of the four
+# motors in percent, then duration, start delay and loop count.
+XBOX_HAPTICS = (((ENABLE_ACTUATORS,), 4, 1, 0, 1), ((), 4, 1, 0, 0), ((MAGNITUDE,), 8, 4, 0, 100),
+                ((DURATION,), 8, 1, 0, 255), ((START_DELAY,), 8, 1, 0, 255), ((LOOP_COUNT,), 8, 1, 0, 255))
 
 
 @dataclass(frozen=True)
@@ -42,6 +59,28 @@ class Field:
         return not self.constant and self.usage_page == USAGE_PAGE_BUTTON
 
 
+def _items(data: bytes, limit: int | None = None) -> Iterator[tuple[int, int, bytes]]:
+    """(type, tag, data) of each short item in order, one at a time; at most `limit` items are walked.
+
+    Long items are skipped: nothing in them describes a field. A truncated item ends the walk.
+    """
+    index = walked = 0
+    while index < len(data) and (limit is None or walked < limit):
+        walked += 1
+        prefix = data[index]
+        if prefix == 0xFE:
+            if index + 2 >= len(data):
+                return
+            index += 3 + data[index + 1]
+            continue
+        size = (0, 1, 2, 4)[prefix & 0x03]
+        payload = data[index + 1:index + 1 + size]
+        if len(payload) < size:
+            return
+        index += 1 + size
+        yield (prefix >> 2) & 0x03, prefix >> 4, payload
+
+
 def parse_report_descriptor(data: bytes) -> list[Field]:
     """Input fields of a HID report descriptor, in report order. Malformed input ends the walk."""
     fields: list[Field] = []
@@ -50,21 +89,8 @@ def parse_report_descriptor(data: bytes) -> list[Field]:
     offsets: dict[int, int] = {}
     usages: list[int] = []
     usage_min = usage_max = 0
-    index = 0
-    while index < len(data):
-        prefix = data[index]
-        if prefix == 0xFE:  # long item: skip, nothing in it describes a field
-            if index + 2 >= len(data):
-                break
-            index += 3 + data[index + 1]
-            continue
-        size = (0, 1, 2, 4)[prefix & 0x03]
-        kind, tag = (prefix >> 2) & 0x03, prefix >> 4
-        payload = data[index + 1:index + 1 + size]
-        if len(payload) < size:
-            break
+    for kind, tag, payload in _items(data):
         value = int.from_bytes(payload, "little")
-        index += 1 + size
         if kind == _GLOBAL:
             if tag == _USAGE_PAGE:
                 state["page"] = value
@@ -104,6 +130,87 @@ def parse_report_descriptor(data: bytes) -> list[Field]:
 
 def uses_report_ids(fields: list[Field]) -> bool:
     return any(item.report_id for item in fields)
+
+
+@dataclass(frozen=True)
+class OutputField:
+    """One Output item: `count` values of `size` bits each. A usage holds its page in its high 16 bits."""
+
+    report_id: int
+    usages: tuple[int, ...]
+    size: int
+    count: int
+    constant: bool
+    minimum: int
+    maximum: int
+
+    @property
+    def shape(self) -> tuple[tuple[int, ...], int, int, int, int]:
+        """Usages, size, count and logical range; padding is padding whatever range it declares."""
+        if self.constant:
+            return (), self.size, self.count, 0, 0
+        return self.usages, self.size, self.count, self.minimum, self.maximum
+
+
+@dataclass(frozen=True)
+class Haptics:
+    """An output report that drives the controller's vibration motors."""
+
+    report_id: int
+    xbox_layout: bool  # laid out exactly like the Xbox One controller's rumble report
+
+
+def output_fields(data: bytes) -> list[OutputField]:
+    """Output items of a HID report descriptor, in order.
+
+    Bounded whatever the bytes: only the first MAX_DESCRIPTOR_BYTES bytes and MAX_DESCRIPTOR_ITEMS items
+    are looked at, one item at a time and without recursion. Long items are skipped, and a truncated
+    item ends the walk with what was found before it.
+    """
+    fields: list[OutputField] = []
+    state = {"page": 0, "size": 0, "count": 0, "report_id": 0, "minimum": 0, "maximum": 0}
+    stack: list[dict[str, int]] = []
+    usages: list[tuple[int, bool]] = []
+    for kind, tag, payload in _items(data[:MAX_DESCRIPTOR_BYTES], MAX_DESCRIPTOR_ITEMS):
+        value = int.from_bytes(payload, "little")
+        if kind == _GLOBAL:
+            if tag == _USAGE_PAGE:
+                state["page"] = value
+            elif tag == _LOGICAL_MIN:
+                state["minimum"] = int.from_bytes(payload, "little", signed=True)
+            elif tag == _LOGICAL_MAX:
+                # Read as the kernel reads it: unsigned unless the minimum is negative.
+                state["maximum"] = value if state["minimum"] >= 0 else int.from_bytes(payload, "little", signed=True)
+            elif tag == _REPORT_SIZE:
+                state["size"] = value
+            elif tag == _REPORT_COUNT:
+                state["count"] = value
+            elif tag == _REPORT_ID:
+                state["report_id"] = value
+            elif tag == _PUSH and len(stack) < MAX_PUSH_DEPTH:
+                stack.append(dict(state))
+            elif tag == _POP and stack:
+                state = stack.pop()
+        elif kind == _LOCAL and tag == _USAGE and len(usages) < MAX_ITEM_USAGES:
+            usages.append((value, len(payload) == 4))  # a 4-byte usage names its own page
+        elif kind == _MAIN:
+            if tag == _OUTPUT:
+                full = tuple(usage if extended else state["page"] << 16 | usage for usage, extended in usages)
+                fields.append(OutputField(state["report_id"], full, state["size"], state["count"],
+                                          bool(value & _CONSTANT), state["minimum"], state["maximum"]))
+            usages = []  # local items end at every main item
+    return fields
+
+
+def haptics_report(data: bytes) -> Haptics | None:
+    """The output report that carries `Enable Actuators` and `Magnitude` of the Physical Interface page, if any."""
+    fields = output_fields(data)
+    for report_id in dict.fromkeys(item.report_id for item in fields):
+        report = [item for item in fields if item.report_id == report_id]
+        declared = {usage for item in report if not item.constant for usage in item.usages}
+        if {ENABLE_ACTUATORS, MAGNITUDE} <= declared:
+            return Haptics(report_id, tuple(item.shape for item in report) == XBOX_HAPTICS)
+    return None
 
 
 @dataclass(frozen=True)

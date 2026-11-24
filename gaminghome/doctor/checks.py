@@ -169,6 +169,11 @@ INPUT = (
           "Which program changed their permissions, or that the controller is faulty.",
           ("interfaces", "interfaces.node", "interfaces.interface", "interfaces.mode", "interfaces.access",
            "hide_rules", "inputplumber", "hhd")),
+    Check("input.vibration", "Vibration", "input", inputstack.check_vibration,
+          "Whether the kernel offers games rumble (FF_RUMBLE) on each controller.",
+          "That the motors respond, or that a daemon passes rumble on to the hardware.",
+          ("controllers", "controllers.name", "controllers.node", "controllers.kind", "controllers.access",
+           "controllers.rumble", "controllers.haptics_report", "controllers.xbox_layout", "controllers.interface")),
 )
 
 
