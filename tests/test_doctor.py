@@ -31,6 +31,18 @@ from gaminghome.doctor.runner import Check
 ROOT = Path(__file__).resolve().parent.parent
 SCRATCH = Path(__file__).resolve().parent / "scratch" / "doctor"
 
+
+def descriptors_open_on(path: str) -> list[str]:
+    """Numbers of this process's descriptors that point at `path`; descriptors of anything else do not count."""
+    target, found = os.path.realpath(path), []
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            if os.readlink(f"/proc/self/fd/{name}") == target:
+                found.append(name)
+        except OSError:
+            pass  # closed since it was listed, or the descriptor the listing itself opened
+    return found
+
 # Canary values planted in fake inputs; none may ever reach any output.
 CANARY_SSID = "CanaryNet-5G"
 CANARY_BSSID = "de:ad:be:ef:00:01"
@@ -4115,7 +4127,7 @@ class ButtonCommandTest(InputCase):
     def test_a_failure_while_reading_the_axes_closes_everything_and_restores_the_terminal(self):
         follower, raw_path = self.terminal()
         before, opened = termios.tcgetattr(follower), []
-        descriptors = set(os.listdir("/proc/self/fd"))
+        self.assertEqual(descriptors_open_on(raw_path), [])
 
         class Reader(buttonsio.EvdevReader):
             def __init__(self, _path):
@@ -4130,7 +4142,7 @@ class ButtonCommandTest(InputCase):
             buttonsio.LiveSource([pad], raw_path, follower)
         self.assertEqual(len(opened), 1)
         self.assertEqual(termios.tcgetattr(follower), before)
-        self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors)
+        self.assertEqual(descriptors_open_on(raw_path), [])
 
     def test_event_reader_parses_kernel_events_and_survives_a_node_that_is_not_evdev(self):
         read_end, write_end = os.pipe()
