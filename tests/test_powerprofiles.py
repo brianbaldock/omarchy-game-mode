@@ -1311,6 +1311,9 @@ class RememberTest(BusCase):
         source.start()                                                 # finds power-saver: it is remembered now
         self.assertTrue(pump(lambda: len(runs.started) == 2))
         self.assertEqual((runs.started[1].argv[1:], source.snapshot.note), (["autodetect", SAVER], ""))
+        for run in runs.started:
+            run.on_exit(-signal.SIGKILL)
+        self.assertEqual((source.helping, self.timers.pending), (False, {}))
 
     def setting(self, name) -> Path:
         """A gated stand-in that, once let through, sets its profile on the fake daemon like Omarchy's script."""
