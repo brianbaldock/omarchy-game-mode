@@ -1627,5 +1627,15 @@ class NeverStartedTest(unittest.TestCase):
         self.assertEqual(client.error, "")
 
 
+class RuntimeTest(unittest.TestCase):
+    def test_the_window_gets_a_bluez_source_that_holds_nothing_until_started(self):
+        from gaminghome.application import Runtime
+        source = Runtime.bluetooth(None, lambda: None)
+        self.assertIsInstance(source, bluez.BlueZ)
+        self.assertIs(source.snapshot, bluez.IDLE)
+        self.assertTrue(source.idle)
+        self.assertIsNone(source._connection)
+
+
 if __name__ == "__main__":
     unittest.main()
