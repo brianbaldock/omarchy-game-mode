@@ -58,10 +58,13 @@ Power
 -----
 ``omarchy-bluetooth-power`` switches every Bluetooth radio of the machine through rfkill and keeps the choice across
 reboots. It runs as an argument list without a shell, with a minimal environment and its output silenced and never
-read, and it is killed after ``POWER_COMMAND_TIMEOUT_MS`` (it may legitimately take about ten seconds). Whatever its
-exit status, the selected adapter is checked afterwards, and its ``Powered`` is set once directly when it did not
-follow. ``BLOCKED`` is reported only when the adapter says ``off-blocked`` or the write was refused because of
-rfkill. A command that still runs at ``stop()`` is left to finish on its own.
+read. After ``POWER_COMMAND_TIMEOUT_MS`` (it may legitimately take about ten seconds) only the command itself, a
+shell script, is killed: what it started (``bluetoothctl`` under ``timeout``, ``sleep``) ends by its own time limits
+within a few seconds. Killing a process group would not reach further, since GNU ``timeout`` moves into a group of
+its own. Whatever the exit status, the selected adapter is checked afterwards, and its ``Powered`` is set once
+directly when it did not follow; when BlueZ answers that write ``Busy``, a change is under way already and is waited
+for. ``BLOCKED`` is reported only when the adapter says ``off-blocked`` or the write was refused because of rfkill. A
+command that still runs at ``stop()`` is left to finish on its own.
 
 Timers and the rest
 -------------------
@@ -134,6 +137,8 @@ ERRORS = {
     "AuthenticationTimeout": TIMEOUT,
     "ConnectionAttemptFailed": UNREACHABLE,
     "InProgress": IN_PROGRESS,
+    "Busy": IN_PROGRESS,                         # a write of a setting while BlueZ still makes an earlier one
+    "Blocked": BLOCKED,                          # BlueZ 5.87's answer to powering an adapter rfkill blocks
     "NotReady": NOT_READY,
     "NotSupported": UNSUPPORTED,
     "ProfileUnavailable": UNSUPPORTED,           # org.bluez.Error.BREDR.ProfileUnavailable
@@ -1341,6 +1346,9 @@ class BlueZ:
 
     def _on_powered_written(self, _reply, error, op):
         if self._op is not op:
+            return
+        if error is not None and short_name(error) == "Busy":
+            op.step = VERIFY                    # a change of Powered is under way already: wait for it
             return
         if error is not None:
             op.write_code = code_of(error)

@@ -50,6 +50,8 @@ class ErrorTableTest(unittest.TestCase):
                  "org.bluez.Error.PermissionDenied": bt.UNAVAILABLE,
                  "org.freedesktop.DBus.Error.ServiceUnknown": bt.UNAVAILABLE,
                  "org.freedesktop.DBus.Error.NoReply": bt.TIMEOUT,
+                 "org.bluez.Error.Busy": bt.IN_PROGRESS,
+                 "org.bluez.Error.Blocked": bt.BLOCKED,
                  "org.bluez.Error.Failed": bt.FAILED,
                  "org.bluez.Error.SomethingNew": bt.FAILED,
                  "": bt.FAILED}
@@ -192,7 +194,8 @@ class AllowListTest(unittest.TestCase):
         forbidden = {"SetDiscoveryFilter", "RequestDefaultAgent", "ConnectDevice", "Discoverable", "Pairable",
                      "Blocked", "WakeAllowed", "PreferredBearer", "Introspect", "GetAll"}
         docstring = ast.get_docstring(tree)
-        self.assertEqual({text for text in strings if text != docstring} & forbidden, set())
+        # Error names such as org.bluez.Error.Blocked are not property names.
+        self.assertEqual({text for text in strings if text != docstring} - set(bluez.ERRORS) & forbidden, set())
         imported = {alias.name for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))
                     for alias in node.names}
         imported |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
@@ -1672,6 +1675,39 @@ class PowerTest(BusCase):
         fake.set(self.HCI0, ADAPTER, PowerState="off-blocked")                  # rfkill blocked it meanwhile
         self.until(lambda: client._selected().power_state == "off-blocked")
         self.clock.fire_after(bluez.CALL_TIMEOUT_MS)
+        self.assertEqual(client.snapshot.failure, bt.Failure(bt.BLOCKED, bt.POWERING))
+
+    def test_a_write_answered_busy_waits_for_the_change_under_way(self):
+        fake = self.fake(powered=False)
+        client = self.ready(bt.OFF)
+        other = self.bus.connect()                        # bluetoothctl, still switching the adapter on
+        fake.defer = lambda call: call[3] == "Set" and call[0] == other.get_unique_name()
+        other.call(fake.unique_name, self.HCI0, PROPERTIES, "Set",
+                   GLib.Variant("(ssv)", (ADAPTER, "Powered", GLib.Variant("b", True))), None,
+                   Gio.DBusCallFlags.NONE, 3000, None, lambda *_args: None, None)
+        self.until(lambda: fake.deferred)
+        client.set_power(True)
+        self.until(lambda: self.sent(fake, client, "Set") and client._op.step == bluez.VERIFY)
+        self.assertIsNone(client.snapshot.failure)        # Busy: not a failure, a change to wait for
+        fake.answer_deferred()
+        self.until(lambda: client.snapshot.activity is None)
+        self.assertEqual((client.snapshot.state, client.snapshot.failure), (bt.ON, None))
+
+    def test_a_write_answered_busy_that_never_follows_times_out(self):
+        fake = self.fake(powered=False)
+        fake.failures["Set"] = ("org.bluez.Error.Busy", "")
+        client = self.ready(bt.OFF)
+        client.set_power(True)
+        self.until(lambda: client._op is not None and client._op.step == bluez.VERIFY)
+        self.clock.fire_after(bluez.CALL_TIMEOUT_MS)
+        self.assertEqual(client.snapshot.failure, bt.Failure(bt.TIMEOUT, bt.POWERING))
+
+    def test_a_write_refused_blocked_is_blocked_whatever_the_power_state_says(self):
+        fake = self.fake(powered=False)
+        fake.failures["Set"] = ("org.bluez.Error.Blocked", "Blocked through rfkill")
+        client = self.ready(bt.OFF)
+        client.set_power(True)
+        self.until(lambda: client.snapshot.activity is None)
         self.assertEqual(client.snapshot.failure, bt.Failure(bt.BLOCKED, bt.POWERING))
 
     def test_a_write_that_fails_for_another_reason(self):
