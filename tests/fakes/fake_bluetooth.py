@@ -203,11 +203,13 @@ class FakeBluetooth:
         self._update(**changes)
 
     def fail(self, code, action=None, paired=False):
-        """The activity under way fails (or, with no activity, the operation ``action``). ``paired``: the device
-        was paired before connecting failed, so it is now among the remembered."""
+        """The activity under way fails (or, with no activity, the operation ``action``: a search that could not
+        start after all stops searching, as the BlueZ client says it searches before BlueZ has answered).
+        ``paired``: the device was paired before connecting failed, so it is now among the remembered."""
         activity = self._own["activity"]
         if activity is None:
-            self._update(failure=bt.Failure(code, action or ""))
+            self._update(failure=bt.Failure(code, action or ""), **({"scanning": False} if action == bt.SEARCHING
+                                                                     else {}))
             return
         if paired and activity.device in self._devices:
             self._devices[activity.device] = replace(self._devices[activity.device], paired=True, trusted=True)

@@ -594,6 +594,18 @@ class BlocksTest(unittest.TestCase):
         source.fail(bt.BLOCKED, bt.SEARCHING)                         # it could not start
         self.assertNotIn("Nothing found. Check that the device is in pairing mode.", texts(self.blocks(source, visit)))
 
+    def test_a_search_said_to_run_that_then_could_not_start_found_nothing_to_report(self):
+        source = world()
+        visit = opened(source)
+        visit.press(sheet.SEARCH)                                     # the source says at once that it searches ...
+        self.assertTrue(source.snapshot.scanning)
+        source.fail(bt.BLOCKED, bt.SEARCHING)                         # ... and then that the search could not start
+        for step in ("failed", "dismissed"):
+            with self.subTest(step):
+                self.assertNotIn("Nothing found. Check that the device is in pairing mode.",
+                                 texts(self.blocks(source, visit)))
+                visit.press(sheet.DISMISS)
+
     def test_search_waits_while_something_runs_and_a_search_that_runs_can_always_stop(self):
         source = world()
         visit = opened(source)

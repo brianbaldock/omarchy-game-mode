@@ -382,6 +382,8 @@ class BluetoothSheet:
             self.forgetting = 0
         if self.visiting and snapshot.scanning:
             self._search_seen = True
+        elif snapshot.failure is not None and snapshot.failure.action == bt.SEARCHING:
+            self._search_seen = False               # the source said it searched, and then that it could not start
         if not pairing(snapshot):
             self._cancelled = None
         if snapshot.activity is None or snapshot.activity.kind != bt.POWERING:
