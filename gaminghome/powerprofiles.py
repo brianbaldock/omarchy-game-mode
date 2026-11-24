@@ -18,7 +18,9 @@ Every call it may make, and when
   ``retry()`` sends the same ``GetAll`` again, and only after a reading failed.
 * ``set_profile()`` sends one ``org.freedesktop.DBus.Properties.Set`` of ``ActiveProfile`` to one of the three
   profiles: only when the service was read in this visit, offers that profile and is not in it already, and no
-  other request is on its way.
+  other request is on its way. Between ``start()`` and that visit's first reading the last visit's reading is shown
+  (``READY``), yet a request ends at once as ``UNAVAILABLE``: the owner is not known yet, and what is shown may be
+  out of date.
 
 Nothing else: no ``HoldProfile``, ``ReleaseProfile`` or ``SetActionEnabled``, and no other property. One method,
 ``_call``, sends every call. It refuses anything but those two, addresses the unique name of the current owner (never
