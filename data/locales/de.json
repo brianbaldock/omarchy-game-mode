@@ -92,5 +92,15 @@
   "app.battlenet.description": "Battle.net-Spiele über den Launcher von Omarchy, ohne Steam.",
   "app.minecraft.description": "Der offizielle Minecraft Launcher auf diesem Desktop.",
   "app.moonlight.installHelp": "Moonlight gehört zu Omarchy, deshalb gibt es hier keinen eigenen Installer. Fehlt der Befehl moonlight, installiere das Paket moonlight-qt aus dem Basisumfang von Omarchy erneut.",
-  "app.remote.installHelp": "Installieren wählen ist die Bestätigung. Omarchy fügt danach das geprüfte Paket greenlight-bin hinzu und fragt im Terminal nicht erneut."
+  "app.remote.installHelp": "Installieren wählen ist die Bestätigung. Omarchy fügt danach das geprüfte Paket greenlight-bin hinzu und fragt im Terminal nicht erneut.",
+  "inputplumber.device": "InputPlumber {version} verwaltet {name} mit dem Profil {profile}.",
+  "inputplumber.reading": "Omarchy Game Mode liest dessen virtuelles Gamepad und ändert nichts an InputPlumber.",
+  "inputplumber.noDevice": "InputPlumber läuft, verwaltet aber keinen Controller.",
+  "inputplumber.readFailed": "InputPlumber läuft, aber Omarchy Game Mode konnte dessen Zustand nicht lesen.",
+  "inputplumber.unrecognized": "Omarchy Game Mode erkennt dessen virtuellen Controllertyp ({kinds}) nicht. Benutze hier Tastatur oder Touch.",
+  "inputplumber.ambiguous": "Mehrere virtuelle Controller sehen aus wie der von InputPlumber gemeldete, deshalb benutzt Omarchy Game Mode keinen davon. Benutze hier Tastatur oder Touch.",
+  "inputplumber.hidden": "{name} ist vorhanden, wird aber von InputPlumber verborgen, und Omarchy Game Mode kann ihn nicht lesen.",
+  "inputplumber.evdevOnly": "Es liest diesen Controller nur über evdev.",
+  "inputplumber.noR3": "Es meldet keinen Klick des rechten Sticks (R3).",
+  "inputplumber.padName": "{name} (InputPlumber)"
 }

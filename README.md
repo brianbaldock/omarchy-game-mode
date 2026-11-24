@@ -37,7 +37,9 @@ This is an independent preview, not an official Omarchy component.
   then `LANG`, and you can pick a language in Settings. Missing strings fall back to
   English.
 - **Theme**: uses your current Omarchy theme colors when they can be read, with a dark
-  fallback. There are no background images, network fetches or idle redraws.
+  fallback. There are no background images or idle redraws, and the launcher itself makes
+  no network requests. Only the `doctor` command, when you run it, sends the diagnostic
+  probes listed under [Doctor](#doctor).
 
 ## Controls
 
@@ -55,13 +57,156 @@ Keyboard (arrows, Enter, Escape), mouse and touch work everywhere.
 **About the Home chord.** The global gesture is holding **View (Back) and Menu (Start)
 together for at least 0.8 seconds**. A single or brief press does nothing. The native
 Guide/Xbox button is deliberately left alone, so Steam and other apps keep using it.
+On InputPlumber's virtual gamepad only, a button or direction pressed while Guide is
+held is ignored too, until it is released: InputPlumber sends vendor buttons as Guide
+chords. Game Mode follows that gamepad event by event, focused or not, and reads what
+is held only when it connects or after events were dropped. Such a read cannot tell
+how a hold began, so a button or direction held then, other than Guide, has to be
+released once before it counts. On every other controller Game Mode ignores just
+the Guide button itself.
 Vendor-specific buttons (for example ROG Ally's dedicated keys) are not mapped.
 
 Controller input is read **read-only and non-exclusively** from evdev. Devices that
-report gamepad buttons or a hat are used, and virtual devices are skipped. Your user
+report gamepad buttons or a hat are used. Virtual devices are skipped, except the
+virtual gamepad that a running InputPlumber announces (see
+[InputPlumber](#inputplumber-read-only)). Your user
 needs read access to `/dev/input/event*` (usually the `input` group, or a uaccess rule).
 If access is denied, Game Mode says so on screen and keeps working with keyboard and
 touch.
+
+### ASUS ROG Xbox Ally controller layout
+
+On the ASUS ROG Xbox Ally (RC73YA) with a kernel that lacks ASUS's Ally HID driver, the
+generic HID driver reads the built-in controller, `ASUSTeK Computer Inc. N-KEY Device`
+(`0b05:1b4c`). Its descriptor declares 14 buttons in XInput order, and that driver gives
+them the codes `BTN_SOUTH` (304) to `BTN_THUMBL` (317) by position. From X on, each
+button then arrives under the code of another one, and none as the right stick click
+`BTN_THUMBR`:
+
+| Button | Arrives as | Xbox controller code |
+| --- | --- | --- |
+| A, B | `BTN_SOUTH`, `BTN_EAST` | the same |
+| X, Y | `BTN_C`, `BTN_NORTH` | `BTN_NORTH`, `BTN_WEST` |
+| LB, RB | `BTN_WEST`, `BTN_Z` | `BTN_TL`, `BTN_TR` |
+| View, Menu | `BTN_TL`, `BTN_TR` | `BTN_SELECT`, `BTN_START` |
+| L3, R3 | `BTN_TL2`, `BTN_TR2` | `BTN_THUMBL`, `BTN_THUMBR` |
+| Xbox | `BTN_SELECT` | `BTN_MODE` |
+| Three buttons of unknown meaning | `BTN_START`, `BTN_MODE`, `BTN_THUMBL` | none |
+
+The last column holds the codes the kernel's Xbox controller driver reports, which Game
+Mode expects. The table was derived from two independent projects, Handheld Daemon's Ally
+X button map and InputPlumber's former Ally X fallback map, both for this USB id, and was
+then confirmed by a guided press test on one ROG Xbox Ally (RC73YA, Linux 7.2): each of
+the eleven buttons from A to Xbox sent the code in the middle column (see
+[Limitations](#limitations) for what that test did not cover).
+
+**How Game Mode compensates.** When Game Mode reads this pad itself, without
+InputPlumber, it translates every button through the table before acting on it, for its
+own menus only: LB/RB switch pages, Menu opens Settings, holding View + Menu shows Game
+Mode, the Xbox button counts as Guide and is left alone, and the three unknown buttons
+are ignored. Nothing changes on the device or in the kernel: Steam, browsers, Moonlight,
+games and AntiMicroX keep reading the middle column. The translation applies only to a
+pad that has that name and USB id, the 14 button codes of the middle column but no
+`BTN_THUMBR`, and sticks and a D-pad. A pad whose codes were corrected, by the udev entry
+below or by a kernel driver, has `BTN_THUMBR` and is read as it is. Game Mode also
+notices a correction made while it runs, at the pad's next input, which it drops while it
+reads the pad's state again. udev applies the entry's twelve lines one after another, so
+a press in the instant that happens can still be misread once; a restart is the
+cleanest. InputPlumber's virtual
+gamepad is never translated. `omarchy-game-mode status` shows
+`"quirk": "xinput-order-hid"` for a translated device under `controllers`, and `null`
+for the others. To read every controller exactly as the kernel reports it, quit Game
+Mode and start it with `GAMEMODE_NO_BUTTON_QUIRKS=1`, for example
+`GAMEMODE_NO_BUTTON_QUIRKS=1 omarchy-game-mode show`.
+
+**System-wide fix (optional, as root).** For every program to get the Xbox controller
+codes, a udev hwdb entry can have the kernel report them. Game Mode ships it as
+`contrib/udev/61-rog-xbox-ally-gamepad.hwdb`, installed to
+`/usr/share/omarchy-game-mode/contrib/udev/` (or under your `PREFIX`), and never copies
+it into the system or applies it. It matches only the controller's gamepad interface on
+RC73YA and RC73XA (Xbox Ally X) boards, follows the table above and puts the three
+unknown buttons on `BTN_TRIGGER_HAPPY1` to `3`, where they cannot pass for a standard
+button. To apply it, install the file and update the database, then reboot:
+
+```bash
+sudo install -Dm644 /usr/share/omarchy-game-mode/contrib/udev/61-rog-xbox-ally-gamepad.hwdb /etc/udev/hwdb.d/61-rog-xbox-ally-gamepad.hwdb
+sudo systemd-hwdb update
+```
+
+The entry takes effect when the controller is set up, which for a built-in one means at
+the next boot, and every program then starts with the new codes. Applying it to the
+running controller instead is an advanced option, safe only with every button released:
+the kernel moves the codes one button at a time, and a button held meanwhile can stay
+down under its old code. A held Xbox button, for example, stays down as View
+(`BTN_SELECT`) until View is pressed and released, so Menu alone looks like View + Menu
+to every program. If you take that route, run
+`sudo udevadm trigger --action=change --subsystem-match=input` after the two commands,
+with no button held, then restart Steam and AntiMicroX, which had the pad open.
+InputPlumber, when it runs, reads the corrected codes too; that combination is untested.
+
+To undo, remove the file, update the database and reboot. The kernel keeps the codes it
+was given until the pad is created again, so the original codes return after the reboot:
+
+```bash
+sudo rm /etc/udev/hwdb.d/61-rog-xbox-ally-gamepad.hwdb
+sudo systemd-hwdb update
+```
+
+Remove the entry as well once your kernel has ASUS's Ally HID driver.
+
+**The small buttons.** The Armoury Crate (small, top left) and Library (small, top
+right) buttons are not part of the gamepad. A press test on one RC73YA saw the Armoury
+Crate button as `KEY_F16`, a back paddle as `KEY_F15` and the Library button as
+`KEY_F22`, on two keyboard interfaces of the same USB device. Only root can read those
+nodes, so Game Mode does not see them, but your compositor has them open and can bind
+them. On Omarchy with Hyprland, bind by key code, which is the evdev code plus 8
+(`KEY_F22` is 192, so 200), in `~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("code:200", "Gaming Home (Library button)", "omarchy-game-mode show")
+```
+
+That opens Gaming Home over whatever has the focus, a game included. Omarchy already
+binds `XF86TouchpadOn`, the name the US layout gives that key; the Ally has no touchpad,
+so its handler finds nothing to enable and does nothing.
+
+How far this has been checked:
+
+- **Verified by automated tests:** the fingerprint, and that another vendor, product or
+  name, a pad with `BTN_THUMBR`, `GAMEMODE_NO_BUTTON_QUIRKS=1` and InputPlumber's
+  virtual gamepad each leave a pad untranslated; every translation, for presses and for
+  buttons held when the pad is opened; that the three unknown buttons are dropped; that
+  the Xbox button no longer counts as View and View + Menu forms the Home hold; that an
+  open pad's codes are judged on the open device before each batch of input, so that a
+  correction is noticed before udev reports anything, input read or queued across it is
+  dropped rather than misread, also around dropped events, and a node name that already
+  belongs to another device changes nothing for the pad still open; that the hwdb entry
+  and Game Mode's table agree.
+- **Verified live on an ASUS ROG Xbox Ally (RC73YA), without physical input:** the
+  fingerprint matches the built-in pad's capabilities as the kernel reports them in
+  sysfs, and does not match InputPlumber's virtual gamepad. The hwdb entry compiles with
+  `systemd-hwdb` in a scratch root, where this machine's lookup key for the gamepad
+  interface returns its 12 entries and the keys of the other N-KEY interfaces return
+  none.
+- **Verified by a guided press test on that unit (Linux 7.2):** with the pad untouched,
+  A, B, X, Y, LB, RB, View, Menu, L3, R3 and the Xbox button each sent the code in the
+  table (`BTN_SOUTH`, `BTN_EAST`, `BTN_C`, `BTN_NORTH`, `BTN_WEST`, `BTN_Z`, `BTN_TL`,
+  `BTN_TR`, `BTN_TL2`, `BTN_TR2`, `BTN_SELECT`), and the triggers and sticks arrived on
+  the usual axes (`ABS_Z`, `ABS_RZ`, `ABS_X`, `ABS_Y`, `ABS_RX`, `ABS_RY`). With the entry
+  installed and applied to the running pad, with no button held, the kernel then reported
+  the standard layout: `BTN_THUMBR` and the eleven standard buttons, and the three
+  buttons of unknown meaning on `BTN_TRIGGER_HAPPY1` to `3`. A second press test, with
+  the entry in place, sent A, B, X, Y, LB, RB, View, Menu, L3, R3 and the Xbox button as
+  `BTN_SOUTH`, `BTN_EAST`, `BTN_NORTH`, `BTN_WEST`, `BTN_TL`, `BTN_TR`, `BTN_SELECT`,
+  `BTN_START`, `BTN_THUMBL`, `BTN_THUMBR` and `BTN_MODE`, and the triggers and sticks on
+  the same axes as before.
+- **Pending physical validation:** presses of the three buttons of unknown meaning (none
+  sent anything on the gamepad node in the press tests); how Steam, SDL games and
+  browsers handle the pad with the entry applied; that the entry is applied again at
+  the next boot; whether applying the entry to a running pad is safe on other units (it
+  was applied once, with no button held); a physical press of the Library button
+  against the binding shown under "The small buttons" (it was tested with a virtual key
+  only); anything on the Xbox Ally X.
 
 ## Controller modes
 
@@ -109,6 +254,84 @@ If AntiMicroX is running but Game Mode isn't allowed to switch it, Game Mode lea
 alone. It also stops reading controller buttons for its own menus, so no button acts
 twice. The header says the controller is paused; keyboard and touch keep working. Game
 Mode also uses the controller directly when AntiMicroX isn't running.
+
+### InputPlumber (read-only)
+
+[InputPlumber](https://github.com/ShadowBlip/InputPlumber) is a system daemon for
+handhelds. While it runs, it hides the physical controller nodes from your user and
+re-emits the controller through virtual devices. Game Mode does not need it, does not
+install or start it, and never changes it: it loads no profile, sets no property and
+sends no event. It only reads InputPlumber's state over D-Bus, so that
+
+- its own menus are navigated with InputPlumber's virtual gamepad instead of the
+  hidden physical one, and
+- Settings and `omarchy-game-mode status` (section `inputplumber`) describe what
+  InputPlumber manages: device name, profile name, target types, number of sources,
+  whether any source is hidraw, and notes such as `evdev-only` or `no-r3`. No serial
+  or persistent identifier is read into that report. Its `state` tells an InputPlumber
+  that manages no controller (`empty`) from one that could not be read (`failed`) and
+  from one that has not answered yet (`pending`). Settings says which of the first two
+  it is and shows nothing for the third.
+
+**How the virtual gamepad is recognized.** This is a heuristic, not proof of origin:
+InputPlumber does not say which event node belongs to which target. A virtual node is
+used only when all of this holds:
+
+- InputPlumber owns its bus name, and one of its composite devices lists a gamepad
+  target of a known type (`xb360`, `gamepad`, `xbox-elite`, `xbox-series`);
+- the node is a uinput device (`/devices/virtual/input`);
+- its name, bus type, vendor and product are the ones InputPlumber gives that type,
+  for example `Microsoft X-Box One Elite 2 pad`, `045e:0b00`.
+
+If more such nodes exist than InputPlumber announces, none of them is used. After a
+virtual gamepad went away, the next one is used only once InputPlumber's state has
+been read again; if that read fails, none is. Other target types (Steam Deck,
+DualSense and so on) are reported as unrecognized rather than guessed, and every
+other virtual device (AntiMicroX, Steam Input) stays skipped. A physical node that
+InputPlumber hides is not reported as a permission problem. If no virtual gamepad can
+be used either, the header says the controller is not readable and the tooltip says
+why; keyboard and touch keep working.
+
+**Should you run it?** Not for Game Mode's sake, and it is not a mapping upgrade by
+itself. On the ASUS ROG Xbox Ally (RC73YA) with a kernel that lacks the Ally HID
+driver, InputPlumber 0.82.0 rejects its hidraw sources ("Device is not using the
+asus_rog_ally driver") and runs on evdev sources only. In that state:
+
+- the virtual Elite pad does advertise a right stick click (`BTN_THUMBR`), but nothing
+  feeds it: the capabilities InputPlumber reports for its sources include no right
+  stick button. HHD's and InputPlumber's own former Ally X maps for this USB ID list
+  R3 as `BTN_TR2` on the raw pad, a code InputPlumber's stock configuration does not
+  turn into a stick click. Whether a physical R3 press arrives anywhere has not been
+  checked (see below for what is and is not verified on the RC73YA);
+- all of the controller's hidraw nodes become root-only, so tools that read the vendor
+  buttons from hidraw stop working;
+- going by InputPlumber's own device configuration, stock profile and target code, the
+  Armoury button is sent as a Guide + X chord, Library as Guide + A, a long Library
+  press as Screenshot, and the back paddles as paddle buttons of the virtual Elite pad.
+  A desktop mapper such as AntiMicroX sees the X or A of such a chord and acts on it.
+
+It only becomes worthwhile there once the kernel has the Ally HID driver; a fuller
+upstream driver series has been posted for kernels after 7.2. On the virtual gamepad,
+Game Mode ignores what is pressed while Guide is held, so these chords select nothing
+in Gaming Home.
+AntiMicroX set switching (above) is unchanged and remains the only desktop-pointer
+route, with or without InputPlumber.
+
+The commands below try InputPlumber and go back; Game Mode runs none of them. On a
+board InputPlumber knows, a udev rule of its package starts the daemon when the package
+is installed and again at every boot, so disabling the unit does not keep it off: mask
+it.
+
+```bash
+omarchy pkg add inputplumber
+sudo systemctl enable --now inputplumber.service inputplumber-suspend.service
+
+sudo systemctl disable --now inputplumber.service inputplumber-suspend.service
+sudo systemctl mask inputplumber.service        # undo with: systemctl unmask
+```
+
+Other programs that had the controller open, such as Steam or AntiMicroX, may need a
+restart after either change.
 
 ## Touch keyboard
 
@@ -221,9 +444,214 @@ the autostart file Game Mode created.
 
 `omarchy-game-mode mapper on|off|status` turns AntiMicroX set switching on or off.
 
+`omarchy-game-mode status` reports what Game Mode sees, including the controllers it
+reads and, under `inputplumber`, what a running InputPlumber manages. Review it before
+posting: window titles can contain private information.
+
+`omarchy-game-mode doctor` is described in the next section. It always answers in the
+terminal you ran it from, even while Game Mode is running.
+
 ### Upgrading from an earlier preview
 
 Quit the old running version with `omarchy-game-mode quit` before installing this update: its application ID changed to `io.github.brianbaldock.OmarchyGameMode`, so a new instance cannot quit the old one. Reinstall at the same prefix; old launcher/icon filenames are removed. A login entry owned by Game Mode remains recognized and is migrated by `autostart on` or removed by `autostart off`. Unowned legacy entries are left alone. Update any custom window rules or favorites that refer to the old ID.
+
+## Doctor
+
+`omarchy-game-mode doctor` checks what Xbox Remote Play, Xbox Cloud Gaming and your
+controller need on this device. Every result says what it proves and what it does not.
+
+```
+omarchy-game-mode doctor                  Everything below
+omarchy-game-mode doctor streaming        Network, Wi-Fi, firewall, clients, video decode
+omarchy-game-mode doctor input            Controllers and input daemons
+omarchy-game-mode doctor system           Device, system and GPU facts only
+omarchy-game-mode doctor --console-ip 192.168.1.50   Also probe your console's address
+omarchy-game-mode doctor --markdown       Redacted report to paste into an issue
+omarchy-game-mode doctor --json           The same report for tools
+omarchy-game-mode doctor --timeout 3      No check gets more than 3 seconds
+omarchy-game-mode doctor buttons          Guided button test (see below)
+```
+
+What it checks:
+
+- **Network path:** default route, IPv6 consistency, VPN or proxy in the way, which DNS
+  resolver answers, the Microsoft and Xbox service names, TLS to them, the clock, MTU.
+- **Streaming transport:** UDP to Microsoft's relay and two public STUN servers, the
+  relay's TURN challenge, and how your router maps one connection to several servers.
+- **Wi-Fi:** band, channel width, radar-shared (DFS) spectrum, signal, power saving,
+  roams and disconnects in the last 10 minutes, loss between the device and the router.
+- **Firewall:** which firewall is active and, for ufw, what its saved policy and rules
+  would do to outbound UDP, for IPv4 and IPv6 separately. Saved rules are not the live
+  ones, which only root can read.
+- **Clients and video:** browsers, Greenlight, browser flag files, hardware H.264 decode.
+- **Controller:** which control codes each gamepad lists (read without a handheld daemon,
+  the ROG Xbox Ally's built-in pad lists generically numbered buttons and no standard
+  right-stick click), InputPlumber, Handheld Daemon and AntiMicroX, and controller
+  interfaces that another daemon has hidden.
+- **Vibration:** whether the kernel offers games rumble (`FF_RUMBLE`) on each controller
+  and, for a physical controller, whether its HID report descriptor declares a haptics
+  output report. On Linux 7.2 the ROG Xbox Ally's built-in pad declares one (report 0x0D,
+  laid out like the Xbox One controller's) but the kernel offers no force feedback for
+  it, so games cannot make it vibrate through evdev. The doctor verifies these two facts,
+  both read from sysfs, and not that any program can make the controller vibrate. A
+  direct test on one RC73YA, writing to that report outside the doctor, made the left
+  and right grip motors vibrate through the third and fourth magnitudes; the first two,
+  which the Xbox One layout gives to the triggers, produced nothing.
+
+What it never does:
+
+- **No root.** It never runs `sudo`. Where only root can answer, it prints the command
+  for you to run and marks the result "cannot verify without root".
+- **No changes.** Nothing is written (not even Python bytecode caches), installed,
+  enabled, started or stopped. No controller is grabbed and no input is injected. Advice
+  is text you can act on or ignore.
+- **No account access.** It does not sign in and never reads tokens, cookies, browser
+  profiles or keyrings. Greenlight is never started.
+- **No discovery.** Nothing is broadcast and no network is scanned. Your console is
+  contacted only when you pass `--console-ip` with its private address, and then with an
+  anonymous STUN request on UDP 9002 and one connection attempt on TCP 3074.
+
+What it sends, only while you run it: DNS lookups for the names below, and TLS handshakes
+(no request, no credentials) with `login.live.com`, `user.auth.xboxlive.com`,
+`xsts.auth.xboxlive.com`, `www.xbox.com`, `xhome.gssv-play-prod.xboxlive.com` and
+`gssv-play-prod.xboxlive.com`; anonymous STUN to `relay.communication.microsoft.com`,
+`stun.cloudflare.com` and `stun.l.google.com`; one unauthenticated TURN request to
+Microsoft's relay (its answer, usually a redirect to a regional relay, is reported; the
+regional relay is never contacted); one time query to `time.cloudflare.com`; and a few
+pings to your router and to `stun.cloudflare.com`. Names are looked up as absolute names,
+so no search domain is ever appended, and only probed at public unicast addresses, whatever
+the resolver answers. The tools it runs get no display, D-Bus address, proxy or resolver
+setting from your environment, and hardware video decode is read from the local GPU render
+node (`vainfo --display drm`). With `--console-ip`, the console probes described above go
+to that one address.
+
+Reading the result:
+
+```
+Streaming transport (UDP)
+  [PASS] UDP and STUN: All 3 STUN servers answered (Microsoft relay 80 ms, Cloudflare 4 ms,
+         Google 10 ms); public address <public-ip-1>.
+         proves: Outbound UDP works and replies come back. Not: That the ports a real stream
+                 negotiates are open, or that the console is reachable.
+...
+Not verifiable from this device
+  [SKIP] Live firewall rules: cannot verify without root — run: sudo ufw status numbered verbose
+
+Result: INCONCLUSIVE: no failures in what was tested, 2 warnings. Not verified: Live firewall
+        rules, Console settings and account, Live failed attempt.
+```
+
+`[PASS]`, `[WARN]`, `[FAIL]`, `[SKIP]` and `[INFO]` mark each check. A streaming report
+ends with **INCONCLUSIVE** even when every check passes, because three things cannot be
+seen from this device: the live firewall rules, the console's own settings, and what
+happens during a real connection attempt. A clean report rules causes out; it is not a
+promise that a stream connects. The exit status is 0 when no check failed, 1 when at
+least one failed and 2 for a usage error. Ctrl-C, SIGTERM and SIGHUP stop it with 128 plus
+the signal number (130 for Ctrl-C), and only after every tool it started has been ended.
+
+Microsoft's supported-browser list for `xbox.com/play` and `xbox.com/remoteplay` does
+not include desktop Linux, so the doctor always warns that the web client can fail here
+whatever the network looks like. Greenlight is the client to compare against.
+
+**Privacy.** Reports are redacted before they are printed. Public IP addresses become
+tokens such as `<public-ip-1>` (the same address gets the same token within one report),
+private addresses keep only their first two numbers (`192.168.x.x`), and the Wi-Fi network
+name, access-point and device MAC addresses, host name, user name, home directory, DNS
+search domains and serial numbers are never included. A controller or key device is
+named only when its name is a model name the doctor knows (such as `Microsoft X-Box One
+Elite 2 pad` or `ASUSTeK Computer Inc. N-KEY Device`); any other name was chosen by the
+firmware or by whoever paired it, and is shown as `<controller>` or `<device>`. Network
+interfaces keep generic names such as `wlp3s0`, `wg0` or `tailscale0`; a name someone chose
+(`wg-office`) becomes an alias such as `vpn-1`, the same within one report. Values
+are scrubbed wherever they appear, not only in known fields: serial-like tokens and
+joined hex groups (`AB12-CD34-EF56`) show up as `<id>`, MAC addresses as `<mac>`, and a
+private path as `<home-path>`. `--no-redact` shows IP addresses in full for your own
+debugging; it cannot be combined with `--markdown`.
+
+**Sharing a report.** Run `omarchy-game-mode doctor --markdown`, read it once, and paste
+it into the "Optional redacted evidence" field of the
+[hardware-validation issue form](https://github.com/brianbaldock/omarchy-game-mode/issues/new?template=hardware-validation.yml).
+
+The doctor's output is English only by design, so reports read the same for everyone who
+helps with them; it adds no strings to the translated interface.
+
+### Hardware button test
+
+`omarchy-game-mode doctor buttons` asks you to press each control once and shows the code
+that really arrives for it: the Xbox button, View, Menu, A, B, X, Y, the bumpers and
+triggers, both stick clicks, the D-pad, both sticks, the back paddles, the Armoury Crate
+button (small, top left) and the Library button (small, top right). Run it in a terminal;
+Enter skips a control and `q` stops the test.
+
+```
+omarchy-game-mode doctor buttons                        Test the controller games see
+omarchy-game-mode doctor buttons --markdown > buttons.md   Prompts stay on the terminal
+omarchy-game-mode doctor buttons --raw                  Also watch the raw HID report
+omarchy-game-mode doctor buttons --device /dev/input/event21   Read only this device
+```
+
+It is read-only. Controllers are read non-exclusively from evdev and never grabbed;
+nothing is remapped and no input is sent. Every press, the Xbox (Guide) button
+included, therefore still reaches Steam, your games and other apps while the test runs,
+so leave nothing open that a stray press could affect. It tests the controller that
+games see: the virtual controller of a handheld daemon such as InputPlumber when one is
+running, otherwise the built-in one. Devices it is not allowed to read are listed with
+the reason.
+
+On the ROG Xbox Ally the small buttons (Armoury Crate, top left; Library, top right) and
+the back paddles arrive as keyboard keys on a node only root can read, so without a
+handheld daemon the test may see nothing for them. On one RC73YA a press test run as
+root saw the Armoury Crate button as `KEY_F16` and a back paddle as `KEY_F15` on one
+interface, and the Library button as `KEY_F22` on another. The test marks them not
+tested instead of failed and prints the command that shows them, `sudo evtest` with
+each such node it found (for example `sudo evtest /dev/input/event5`); it never runs it.
+
+Nothing about your controller is assumed. At the end the test lists where it differs
+from an Xbox-style pad on Linux, for example an Xbox button that sends the View code (so
+Steam does not open its menu), a right-stick click that never arrives, paddles that
+arrive as keyboard keys, or two buttons that send the same code. It also prints an SDL
+mapping line built only from the presses it saw and names the controls it left out.
+
+`--raw` additionally reads the controller's raw HID report, when your user is allowed
+to, and tells you when a press changes bits the controller never declared. That is how a
+button that exists in the hardware but is invisible to the kernel shows up. Only a raw
+interface of the same physical device as the controller under test (the same USB device
+in sysfs) is ever read, never another controller's. When there is no such interface, or
+the controller under test is a daemon's virtual one, the test says `raw report
+unavailable` and why, and goes on without it; with `--device` it does not start.
+
+To share a result, run it with `--markdown` and paste the file into the
+hardware-validation issue form. It holds the device model, kernel and input-stack
+versions and one row per control (pass, fail or not tested). Serial numbers and device
+addresses are never read.
+
+## Xbox Remote Play: before you troubleshoot
+
+Remote Play streams from your own console, so most of what decides whether it connects
+is set on the console. Check these there first; none of them can be seen from the handheld.
+
+1. **Update and restart** the console, and make sure nobody else is in a remote session.
+2. **Remote features:** press the Xbox button, then go to *Profile & system > Settings >
+   Devices & connections > Remote features*. Tick **Enable remote features**. Under
+   **Power options** choose **Sleep**; a console set to *Shutdown (energy saving)* cannot
+   be woken remotely.
+3. **Same profile:** sign in to Greenlight with the Xbox profile that is signed in on the
+   console. If *Remote features* shows **Xbox app preferences**, allow connections there.
+4. **Test remote play:** on the *Remote features* page, run **Test remote play** and note
+   what it reports. Away from home, Microsoft asks for at least 4.75 Mbps upload (9 Mbps
+   recommended) and less than 150 ms latency.
+5. **Network:** in *Profile & system > Settings > General > Network settings* run **Test
+   network connection** and **Test NAT type**. *Open* or *Moderate* is fine.
+6. **If the NAT type is Strict:** turn on UPnP on your router, or forward UDP port 9002
+   to the console (never to the handheld), and remove a second router in between if there
+   is one. Then test again.
+7. **Same network:** for a first test put the console and the handheld on the same
+   trusted network, not a guest network, and wire the console if you can. The console's
+   address is under *Network settings > Advanced settings*; pass it to
+   `omarchy-game-mode doctor --console-ip` to check that the handheld can reach it.
+
+None of this applies to Xbox Cloud Gaming, which runs on Microsoft's servers: there the
+things to check are the account, the region and the subscription.
 
 ## Uninstall
 
@@ -241,7 +669,39 @@ them gone. Game Mode never edits AntiMicroX profiles or any other app's configur
 - Needs Hyprland for window tracking and handoff. Without it, the app still opens and
   shows the IPC status.
 - Firmware "hold" gestures and hidraw-only buttons are not supported.
-- Virtual controllers are currently skipped. HHD and InputPlumber configurations may hide or exclusively own the physical controller, leaving Game Mode without native navigation. Compatibility with those input stacks is unverified; do not disable hardware protections to work around it.
+- Virtual controllers are skipped, except the gamepad a running InputPlumber announces. HHD configurations may hide or exclusively own the physical controller, leaving Game Mode without native navigation; compatibility with HHD is unverified. Do not disable hardware protections to work around it.
+- InputPlumber support is read-only recognition, and how far it has been checked differs by level:
+  - **Verified by automated tests:** the D-Bus client against a fake InputPlumber on a
+    private bus (owner changes, renumbered devices, targets removed and added again,
+    signal floods, late replies, and proof that nothing but reads is ever sent);
+    recognition and rejection of virtual gamepads against a mocked sysfs; that buttons
+    and directions pressed while Guide is held do nothing on the virtual gamepad and
+    still act on every other controller. The Settings text was also rendered headless
+    with GTK Broadway in English and Arabic, which is a manual smoke script.
+  - **Verified live on an ASUS ROG Xbox Ally (RC73YA), without physical input:**
+    InputPlumber 0.82.0 active; Game Mode's client and controller reader run against
+    it read-only: its state read, the virtual `Microsoft X-Box One Elite 2 pad`
+    (`045e:0b00`) recognized and opened, the hidden physical node not reported as an
+    error. That pad's key capabilities include `BTN_THUMBR`, while the source
+    capabilities of InputPlumber's composite device list no right stick button. The
+    controller's hidraw nodes were root-only. No button was pressed.
+  - **Pending physical validation, and known limits:** presses of the Xbox, View, Menu,
+    Library and Armoury buttons; Guide behavior in Steam; suspend and resume; a real
+    game session. On the raw pad the Xbox button has been seen as `BTN_SELECT` (314).
+    HHD's Ally X button map and InputPlumber's former Ally X fallback map, both for the
+    same USB id (`0b05:1b4c`), describe the pad's buttons as arriving in XInput order
+    but with the kernel's generic codes: X as `BTN_C`, Y as `BTN_NORTH`, LB as
+    `BTN_WEST`, RB as `BTN_Z`, View as `BTN_TL`, Menu as `BTN_TR`, L3 as `BTN_TL2` and
+    R3 as `BTN_TR2`. Only HHD's map also lists the Xbox button, as `BTN_SELECT`, which
+    fits the reading above. A guided press test on an RC73YA has since confirmed the
+    table: each of the eleven buttons from A to Xbox sent the code listed. What no test
+    has covered there is the View + Menu chord in Game Mode on that pad. Game Mode's
+    translation of the raw pad and the optional udev entry rest on that table; see
+    [ASUS ROG Xbox Ally controller layout](#asus-rog-xbox-ally-controller-layout).
+- Recognizing InputPlumber's virtual gamepad stays a heuristic, because InputPlumber does
+  not say which event node is its own. If another program creates a virtual pad with the
+  same name and IDs while InputPlumber announces one that does not exist, Game Mode
+  reads that pad instead.
 - Game recognition is a heuristic. A windowed game that wasn't started by a supported
   launcher counts as desktop until you choose **Game input** for it.
 - Nothing in the automated tests can show that the physical Guide button still reaches
@@ -254,7 +714,8 @@ them gone. Game Mode never edits AntiMicroX profiles or any other app's configur
 All code, CSS and SVG icons in this repository were written for this project and are
 MIT licensed. Nothing was copied from other projects, icon sets (such as Font Awesome
 or Material) or fonts, and no font files are bundled. The UI uses your system font
-through GTK.
+through GTK. The only material taken from another project is a set of D-Bus interface
+descriptions used as test fixtures, noted below.
 
 The service icons are simple original glyphs that only suggest each service. Steam,
 Xbox, GeForce NOW, Moonlight, RetroArch, Heroic, Lutris, Battle.net, Minecraft and
@@ -271,18 +732,27 @@ Built on, but not bundling:
   exists.
 - [Hyprland](https://hyprland.org) IPC sockets, and the optional
   [AntiMicroX](https://github.com/AntiMicroX/antimicrox) D-Bus interface.
+- The D-Bus interface of [InputPlumber](https://github.com/ShadowBlip/InputPlumber),
+  read-only and only when it is running. The interface descriptions in
+  `tests/fixtures/inputplumber` were captured from a running InputPlumber 0.82.0
+  (GPL-3.0) with `busctl introspect`, and their documentation comments were removed.
+  They are used only by tests; none of its code, profiles or schemas are included.
 
 Translations come from `data/locales` and were drafted for this project.
 
 ## Related projects
 
 These are references and inspiration only. No code is copied from them, and Game Mode
-does not integrate with them (not even HHD or InputPlumber):
+does not integrate with them. The one exception is reading InputPlumber's state, as
+described under [InputPlumber](#inputplumber-read-only):
 
 - [OpenGamepadUI](https://github.com/ShadowBlip/OpenGamepadUI): Godot controller-native
   launcher and overlay.
 - [Handheld Daemon (hhd)](https://github.com/hhd-dev/hhd): handheld controller,
-  gyro and TDP support. Not yet validated together: Game Mode currently skips virtual controllers, so some HHD configurations may not provide navigation to this app.
+  gyro and TDP support. Not yet validated together: Game Mode skips HHD's virtual controllers, so some HHD configurations may not provide navigation to this app.
+- [InputPlumber](https://github.com/ShadowBlip/InputPlumber): input routing daemon
+  that turns handheld controls into virtual controllers. Game Mode reads it, never
+  changes it.
 - [omarchy-rog-ally-codex-plugin](https://github.com/richelle-belle/omarchy-rog-ally-codex-plugin):
   ROG Ally setup automation.
 - [omarchy-launcher](https://github.com/headband42/omarchy-launcher): Quickshell

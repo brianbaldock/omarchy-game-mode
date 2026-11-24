@@ -1,10 +1,11 @@
 import json
 import shutil
+import time
 import unittest
 from pathlib import Path
 
 from gaminghome import APP_ID, core, settings
-from gaminghome.catalog import CatalogError, load_catalog, parse_entry
+from gaminghome.catalog import CatalogError, load_catalog, parse_catalog, parse_entry
 from gaminghome.core import (ACTIVATE, BTN_EAST, BTN_SELECT, BTN_SOUTH, BTN_START, DESKTOP, DOWN, EV_ABS, EV_KEY,
                              EV_SYN, GAME, HOME, MENU, SYN_DROPPED, SYN_REPORT, Window)
 from gaminghome.i18n import Translator
@@ -322,6 +323,274 @@ class ControllerTest(unittest.TestCase):
         self.key(core.BTN_MODE, 0)
         self.assertEqual(self.actions, [])
 
+    def test_ordinary_pad_still_acts_on_what_is_pressed_while_guide_is_held(self):
+        # Only Guide itself is ignored; what Steam makes of a Guide chord is its own business.
+        self.key(core.BTN_MODE, 1)
+        self.key(BTN_SOUTH, 1)
+        self.key(BTN_START, 1)
+        self.key(BTN_START, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.assertEqual(self.actions, [ACTIVATE, MENU, HOME, core.RIGHT])
+
+    def test_buttons_pressed_while_guide_is_held_never_act_on_a_pad_that_sends_guide_chords(self):
+        # InputPlumber's Xbox target sends a handheld's vendor button as Guide + A.
+        self.ci.add_device("d", guide_chords=True)
+        self.key(core.BTN_MODE, 1)
+        self.key(BTN_SOUTH, 1)
+        self.key(BTN_SOUTH, 0)
+        self.key(BTN_START, 1)
+        self.key(BTN_START, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.key(BTN_START, 0)
+        self.key(BTN_SELECT, 0)
+        self.key(core.BTN_MODE, 0)
+        self.assertEqual(self.actions, [])
+        self.key(BTN_SOUTH, 1)
+        self.assertEqual(self.actions, [ACTIVATE])
+
+    def test_guide_pressed_during_a_hold_cancels_menu_and_home_on_such_a_pad(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(BTN_START, 1)
+        self.key(core.BTN_MODE, 1)
+        self.key(BTN_START, 0)
+        self.key(core.BTN_MODE, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.key(core.BTN_MODE, 1)
+        self.key(core.BTN_MODE, 0)             # a vendor button tapped during the hold
+        self.clock.fire_all()
+        self.key(BTN_START, 0)
+        self.assertEqual(self.actions, [])
+        self.key(BTN_SELECT, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [HOME])
+
+    def test_button_of_a_guide_chord_stays_ignored_until_it_is_released(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(core.BTN_MODE, 1)
+        self.key(BTN_SELECT, 1)
+        self.key(core.BTN_MODE, 0)
+        self.key(BTN_START, 1)                 # View is still down, but it was pressed for the Guide chord
+        self.assertEqual(self.clock.timers, {})
+        self.key(BTN_START, 0)
+        self.assertEqual(self.actions, [MENU])
+        self.key(BTN_SELECT, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [MENU, HOME])
+
+    def test_direction_taken_while_guide_is_held_is_ignored_until_it_is_released(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(core.BTN_MODE, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_Y, 32767)
+        self.key(core.BTN_MODE, 0)
+        self.assertEqual((self.actions, self.clock.timers), ([], {}))
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 1)   # a direction pushed after Guide counts, as a button does
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 0)
+        self.assertEqual((self.actions, self.clock.timers), ([DOWN], {}))
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)   # let go and pushed again; the stick is still held
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.assertEqual((self.actions, self.clock.timers), ([DOWN, core.RIGHT], {}))
+        self.ci.feed("d", EV_ABS, core.ABS_Y, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_Y, 32767)
+        self.assertEqual(self.actions, [DOWN, core.RIGHT, DOWN])
+
+    def test_chord_direction_stays_ignored_when_the_direction_held_before_guide_on_its_axis_is_let_go(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, -1)  # held before Guide
+        self.key(core.BTN_MODE, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)   # the other way on the stick, hidden by the D-pad
+        self.key(core.BTN_MODE, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.assertEqual((self.actions, self.clock.timers), ([core.LEFT], {}))
+        self.ci.feed("d", EV_ABS, core.ABS_X, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)
+        self.assertEqual(self.actions, [core.LEFT, core.RIGHT])
+
+    def test_chord_direction_stays_ignored_when_the_other_d_pad_axis_is_let_go(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 1)   # held before Guide
+        self.key(core.BTN_MODE, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)   # down-right: down wins, right is the chord's
+        self.key(core.BTN_MODE, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 0)
+        self.assertEqual((self.actions, self.clock.timers), ([DOWN], {}))
+
+    def test_ordinary_pad_follows_any_direction_held_with_guide(self):
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, -1)
+        self.key(core.BTN_MODE, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)
+        self.key(core.BTN_MODE, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 1)
+        self.key(core.BTN_MODE, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.key(core.BTN_MODE, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0Y, 0)
+        self.assertEqual(self.actions, [core.LEFT, core.RIGHT, DOWN, core.RIGHT])
+
+    def test_direction_held_before_guide_goes_on_and_a_new_one_does_not(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.key(core.BTN_MODE, 1)
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [core.RIGHT, core.RIGHT])
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, -1)
+        self.assertEqual((self.actions, self.clock.timers), ([core.RIGHT, core.RIGHT], {}))
+
+    def test_what_is_held_together_with_guide_when_state_is_adopted_counts_as_its_chord(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.ci.on_resync = lambda dev: self.ci.sync_state(dev, {core.BTN_MODE, BTN_SELECT}, {core.ABS_HAT0X: 1})
+        self.ci.feed("d", EV_SYN, SYN_DROPPED, 0)
+        self.ci.feed("d", EV_SYN, SYN_REPORT, 0)  # read while Guide, View and a direction are down
+        self.assertEqual(self.clock.timers, {})
+        self.key(BTN_SOUTH, 1)                  # pressed later, Guide still down
+        self.key(core.BTN_MODE, 0)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [])
+
+    def test_what_belongs_to_a_guide_chord_stays_ignored_when_the_state_is_read_again(self):
+        # The state is read again after dropped events, not when Home is focused; only a release ends the chord.
+        self.ci.add_device("d", guide_chords=True)
+        self.key(core.BTN_MODE, 1)
+        self.key(BTN_SELECT, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.key(core.BTN_MODE, 0)
+        self.ci.on_resync = lambda dev: self.ci.sync_state(dev, {BTN_SELECT}, {core.ABS_HAT0X: 1})
+        self.ci.feed("d", EV_SYN, SYN_DROPPED, 0)
+        self.ci.feed("d", EV_SYN, SYN_REPORT, 0)
+        self.ci.set_nav_enabled(False)
+        self.ci.set_nav_enabled(True)          # focused again while View and right are still held: no read
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.key(BTN_START, 0)
+        self.assertEqual(self.actions, [MENU])
+        self.key(BTN_SELECT, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.assertEqual(self.actions, [MENU, HOME, core.RIGHT])
+
+    def test_guide_chord_ends_when_the_state_read_again_shows_it_released(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(core.BTN_MODE, 1)
+        self.key(BTN_SELECT, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)
+        self.key(core.BTN_MODE, 0)
+        self.ci.on_resync = lambda dev: self.ci.sync_state(dev, set(), {core.ABS_X: 0})
+        self.ci.feed("d", EV_SYN, SYN_DROPPED, 0)  # both were let go among the dropped events
+        self.ci.feed("d", EV_SYN, SYN_REPORT, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)
+        self.assertEqual(self.actions, [HOME, core.RIGHT])
+
+    def test_ordinary_pad_keeps_a_button_held_with_guide_when_the_state_is_read_again(self):
+        self.key(core.BTN_MODE, 1)
+        self.key(BTN_SELECT, 1)
+        self.key(core.BTN_MODE, 0)
+        self.ci.on_resync = lambda dev: self.ci.sync_state(dev, {BTN_SELECT}, {})
+        self.ci.set_nav_enabled(False)
+        self.ci.set_nav_enabled(True)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [HOME])
+
+    def test_whatever_a_read_finds_held_waits_for_its_release(self):
+        # A read, on connect or after dropped events, drops the key events still queued: Guide down, View
+        # down and Guide up, or the Guide around a D-pad press, may never be seen, even after a plain hold.
+        self.ci.add_device("d", guide_chords=True)
+        self.key(BTN_SELECT, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.ci.sync_state("d", {BTN_SELECT}, {core.ABS_HAT0X: 1})
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.key(BTN_START, 0)
+        self.assertEqual(self.actions, [core.RIGHT, MENU])
+        self.key(BTN_SELECT, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.key(BTN_SELECT, 1)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.assertEqual(self.actions, [core.RIGHT, MENU, HOME, core.RIGHT])
+
+    def test_hold_seen_without_guide_still_counts_across_a_focus_change(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(BTN_SELECT, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.ci.set_nav_enabled(False)
+        self.ci.set_nav_enabled(True)          # focus went away and came back while View and right stayed down
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [core.RIGHT, core.RIGHT, HOME])
+
+    def test_chord_stick_direction_eased_into_the_hysteresis_band_is_not_released_by_a_resync(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(core.BTN_MODE, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)
+        self.key(core.BTN_MODE, 0)
+        self.ci.on_resync = lambda dev: self.ci.sync_state(dev, set(), {core.ABS_X: 15000})
+        self.ci.feed("d", EV_SYN, SYN_DROPPED, 0)
+        self.ci.feed("d", EV_SYN, SYN_REPORT, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)   # pushed further, never let go
+        self.assertEqual((self.actions, self.clock.timers), ([], {}))
+        self.ci.feed("d", EV_ABS, core.ABS_X, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)
+        self.assertEqual(self.actions, [core.RIGHT])
+
+    def test_ordinary_pad_adopts_what_a_resync_finds_held_as_before(self):
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)
+        self.ci.on_resync = lambda dev: self.ci.sync_state(dev, {BTN_SELECT}, {core.ABS_X: 15000, core.ABS_HAT0X: 1})
+        self.ci.set_nav_enabled(False)
+        self.ci.set_nav_enabled(True)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.ci.feed("d", EV_ABS, core.ABS_X, 32767)   # the band released the stick: this is a new push
+        self.assertEqual(self.actions, [core.RIGHT, core.RIGHT, HOME, core.RIGHT])
+
+    def test_focus_reads_an_ordinary_pad_but_not_one_that_sends_guide_chords(self):
+        # That pad is followed event by event: reading it would drop the Guide edges still queued for it.
+        self.ci.add_device("g", guide_chords=True)
+        self.ci.add_device("o")
+        self.ci.feed("g", EV_ABS, core.ABS_HAT0X, 1)
+        self.ci.set_nav_enabled(False)
+        self.ci.set_nav_enabled(True)
+        self.assertEqual(self.resyncs, ["o"])
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [core.RIGHT, core.RIGHT])   # the held direction repeats again
+
+    def test_guide_chords_made_while_home_is_not_focused_count_by_their_events(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(BTN_SELECT, 1)                # a plain View hold
+        self.ci.set_nav_enabled(False)
+        for code, value in ((BTN_SELECT, 0), (core.BTN_MODE, 1), (BTN_SELECT, 1), (core.BTN_MODE, 0),
+                            (core.BTN_MODE, 1), (BTN_SOUTH, 1)):
+            self.key(code, value)              # View pressed again for a Guide chord, then Guide + A held
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 0)
+        self.key(core.BTN_MODE, 0)
+        self.ci.set_nav_enabled(True)
+        self.key(BTN_SOUTH, 0)
+        self.key(BTN_START, 1)
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [])
+
     def test_reenabled_nav_resumes_held_direction_without_stale_press(self):
         held = {"d": ({BTN_SOUTH}, {core.ABS_HAT0X: 1})}
         self.ci.on_resync = lambda dev: self.ci.sync_state(dev, *held[dev])
@@ -345,6 +614,75 @@ class ControllerTest(unittest.TestCase):
         self.ci.set_nav_enabled(True)
         self.assertEqual(self.clock.timers, {})
 
+    def test_reset_keeps_what_it_cannot_know_about_a_pad_that_sends_guide_chords(self):
+        # Guide is still down after a reset, so a press made then still belongs to its chord.
+        self.ci.add_device("d", guide_chords=True)
+        self.key(core.BTN_MODE, 1)
+        self.ci.reset()
+        self.key(BTN_SOUTH, 1)
+        self.key(core.BTN_MODE, 0)
+        self.key(BTN_SOUTH, 0)
+        self.key(BTN_SOUTH, 1)
+        self.assertEqual(self.actions, [ACTIVATE])
+        self.ci.feed("d", EV_SYN, SYN_DROPPED, 0)
+        self.ci.reset()
+        self.ci.feed("d", EV_SYN, SYN_REPORT, 0)   # the state still has to be read again
+        self.assertEqual(self.resyncs, ["d"])
+
+    def test_reset_forgets_everything_else_as_before(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.ci.add_device("o")
+        self.key(BTN_SELECT, 1, "d")               # held without Guide
+        for code in (core.BTN_MODE, BTN_SELECT):
+            self.key(code, 1, "o")
+        self.ci.feed("o", EV_SYN, SYN_DROPPED, 0)
+        self.ci.reset()
+        self.assertFalse(self.ci.held())
+        self.ci.feed("o", EV_SYN, SYN_REPORT, 0)
+        for dev in ("d", "o"):
+            self.key(BTN_START, 1, dev)
+            self.key(BTN_START, 0, dev)            # View is forgotten: a plain Menu tap
+        self.assertEqual((self.actions, self.resyncs), ([MENU, MENU], []))
+
+    def test_device_whose_state_could_not_be_read_waits_for_its_next_report_to_be_read_again(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.key(core.BTN_MODE, 1)
+        self.ci.distrust("d")
+        self.ci.feed("d", EV_KEY, BTN_SOUTH, 1)
+        self.assertEqual((self.actions, self.resyncs, self.ci.held()), ([], [], False))
+        self.ci.feed("d", EV_SYN, SYN_REPORT, 0)
+        self.assertEqual(self.resyncs, ["d"])
+
+    def test_direction_still_held_when_the_state_is_read_again_keeps_repeating(self):
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
+        self.ci.feed("d", EV_SYN, SYN_DROPPED, 0)
+        self.ci.feed("d", EV_SYN, SYN_REPORT, 0)
+        self.ci.sync_state("d", set(), {core.ABS_HAT0X: 1})   # read again while right is still held
+        self.assertEqual(self.actions, [core.RIGHT])         # adopting it is no new press
+        self.clock.fire_all()
+        self.clock.fire_all()
+        self.assertEqual(self.actions, [core.RIGHT] * 3)
+        self.ci.set_nav_enabled(False)
+        self.ci.sync_state("d", set(), {core.ABS_HAT0X: 1})
+        self.assertEqual(self.clock.timers, {})              # no repeat while Game Mode is not navigated
+
+    def test_direction_a_read_finds_held_on_a_pad_that_sends_guide_chords_does_not_repeat(self):
+        self.ci.add_device("d", guide_chords=True)
+        self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)              # right, repeating
+        self.ci.sync_state("d", set(), {core.ABS_HAT0X: 1})       # read after a gap: it waits for its release
+        self.clock.fire_all()
+        self.assertEqual((self.actions, self.clock.timers), ([core.RIGHT], {}))
+
+    def test_no_repeat_survives_a_distrust_or_a_reset(self):
+        self.ci.add_device("g", guide_chords=True)
+        for dev in ("g", "o"):
+            self.ci.feed(dev, EV_ABS, core.ABS_HAT0X, 1)          # right, repeating on both
+        self.ci.distrust("o")
+        self.assertEqual(len(self.clock.timers), 1)
+        self.ci.reset()
+        self.clock.fire_all()
+        self.assertEqual((self.actions, self.clock.timers), ([core.RIGHT, core.RIGHT], {}))
+
     def test_unplug_clears_held_state(self):
         self.ci.feed("d", EV_ABS, core.ABS_HAT0X, 1)
         self.key(BTN_SELECT, 1)
@@ -366,6 +704,74 @@ class CatalogTest(unittest.TestCase):
         catalog = load_catalog(DATA / "catalog.json")
         self.assertEqual(catalog.errors, [])
         self.assertEqual(catalog.source, str(DATA / "catalog.json"))
+
+    def test_xbox_cloud_web_app_is_a_game_in_any_locale_and_other_xbox_pages_are_not(self):
+        # While a stream runs, the window title is the game's name: only the class tells what it is.
+        model = core.HomeModel(core.Classifier(load_catalog(DATA / "catalog.json")))
+        model.ipc_restored()
+        for cls in ("chrome-www.xbox.com__en-US_play-Default", "chrome-www.xbox.com__fr-FR_play-Default",
+                    "msedge-www.xbox.com__de-DE_play-Default", "chromium-www.xbox.com__ja-JP_play-Profile_1",
+                    "chrome-www.xbox.com__zh-Hans-CN_play-Default", "chrome-www.xbox.com__play-Default",
+                    "msedge-www.xbox.com__play-Profile_1", "CHROMIUM-WWW.XBOX.COM__ES-419_PLAY-DEFAULT"):
+            window = W("0x71", cls, "Forza Horizon 5")
+            self.assertEqual(model.service(window), "cloud", cls)
+            model.update_windows([window], window)
+            self.assertEqual(model.desired_mode(), GAME, cls)
+        for cls in ("chrome-support.xbox.com__en-US_help_play-Default", "chrome-support.xbox.com__en-US_play-Default",
+                    "msedge-support.xbox.com__play-Default", "chrome-www.xbox.com__en-US_playground-Default",
+                    "chrome-www.xbox.com__en-US_remoteplay-Default",
+                    "chrome-www.xbox.com__en-US_consoles_remote-play-Default",      # a product page
+                    "chrome-www.xbox.com__en-US_games_xbox-play-anywhere-Default",
+                    "chrome-www.xbox.com__en-US_play-anywhere-Default",   # a page whose last path part starts with play-
+                    "chrome-www.xbox.com__en-US_xbox-game-pass-Default", "chrome-www.xbox.com__-Default",
+                    "chrome-www.xbox.com__en-US_playlists-Default", "chrome-www.xbox.com_play-Default",
+                    "notchrome-www.xbox.com__en-US_play-Default", "brave-www.xbox.com__en-US_play-Default",
+                    "chrome-www.xbox.com.example.org__en-US_play-Default",
+                    "chrome-www.example.com__en-US_play-Default",
+                    "chrome-evil.example__www.xbox.com__en-US_play-Default"):
+            window = W("0x72", cls, "Forza Horizon 5")
+            self.assertIsNone(model.service(window), cls)
+            model.update_windows([window], window)
+            self.assertEqual(model.desired_mode(), DESKTOP, cls)
+
+    def test_class_glob_finds_its_literal_parts_in_order_in_any_case(self):
+        entry = parse_entry({**self.BASE, "match": {"globs": ["example-app_*_play-*", "example-tool*-end",
+                                                               "Straße-App*", "EXAMPLE-\u0130-APP-*"]}})
+        for cls in ("example-app__play-", "EXAMPLE-APP_en_play-Profile_1", "example-app_a_play_b_play-c",
+                    "example-tool-end", "Example-Tool-x-END", "STRASSE-APP-1", "example-\u0130-app-2"):
+            self.assertTrue(entry.matches(cls, "", ""), cls)
+            self.assertTrue(entry.matches("", cls, ""), cls)
+        for cls in ("my-example-app__play-", "example-app_play-", "example-app__playground-x",
+                    "example-tool-end-2", "example-tool", "example-i-app-3", "example_app__play-"):
+            self.assertFalse(entry.matches(cls, "", ""), cls)
+
+    def test_invalid_class_glob_is_ignored_with_one_warning_and_the_entry_kept(self):
+        for glob in (7, ["list"], "", "short*", "*example-app", "example-app" + "*x" * 5,
+                     "example-app-" + "x" * 120):
+            with self.subTest(glob=glob):
+                catalog = parse_catalog({"schemaVersion": 1, "apps": [
+                    {**self.BASE, "match": {"classes": ["x-app"], "globs": [glob, "example-app-*"]}}]})
+                self.assertEqual(catalog.ids, ["x"])
+                self.assertEqual(len(catalog.errors), 1, catalog.errors)
+                self.assertTrue(catalog.errors[0].startswith("x: globs[0] ignored: "), catalog.errors)
+                for cls in ("x-app", "EXAMPLE-APP-7"):
+                    self.assertIs(catalog.match_window(cls, "", ""), catalog.get("x"), cls)
+        for globs, warning in (("example-app-*", "x: globs ignored: "), (["example-app-*"] * 9, "x: globs[8:] ignored: ")):
+            catalog = parse_catalog({"schemaVersion": 1, "apps": [{**self.BASE, "match": {"globs": globs}}]})
+            self.assertEqual((catalog.ids, len(catalog.errors)), (["x"], 1))
+            self.assertTrue(catalog.errors[0].startswith(warning), catalog.errors)
+        catalog = parse_catalog({"schemaVersion": 1, "apps": [
+            {**self.BASE, "match": {"globs": ["abcdefgh*", "abcdefgh*a*b**", "a" * 120]}}]})
+        self.assertEqual(catalog.errors, [])
+
+    def test_class_globs_match_long_classes_in_linear_time(self):
+        entry = parse_entry({**self.BASE, "match": {"globs": ["chrome-www.xbox.com_*_play-*",
+                                                               "example-app_*_a_*_b_*_c_*-end"]}})
+        started = time.perf_counter()
+        for cls in ("chrome-www.xbox.com_" + "_" * 100_000, "chrome-www.xbox.com_" + "_pla" * 25_000 + "y",
+                    "example-app_" + "_a_b_c" * 17_000 + "-en", "example-app_" + "_a_" * 33_000 + "-end"):
+            self.assertFalse(entry.matches(cls, "", ""))
+        self.assertLess(time.perf_counter() - started, 0.25)
 
 
 class FakeBus:

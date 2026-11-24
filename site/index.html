@@ -513,7 +513,7 @@
               <li>Platforms install only when you choose Install in Discover.</li>
               <li>Login start stays off until you turn it on in Settings.</li>
               <li>The repository is the source of truth for setup, packaging and removal.</li>
-              <li>Hit a problem? <a href="https://github.com/brianbaldock/omarchy-game-mode/issues/new?template=hardware-validation.yml">Open a hardware report</a> with your device and what happened. Virtual-controller stacks such as HHD/InputPlumber are not yet validated.</li>
+              <li>Hit a problem? <a href="https://github.com/brianbaldock/omarchy-game-mode/issues/new?template=hardware-validation.yml">Open a hardware report</a> with your device and what happened. InputPlumber’s virtual gamepad is recognized read-only and still awaits physical validation; HHD is not yet validated.</li>
             </ul>
           </div>
         </div>
@@ -525,7 +525,7 @@
         <div class="section-head">
           <div>
             <h2 id="related-title">In good company.</h2>
-            <p class="lede">Handheld Linux already has excellent open-source projects. Game Mode is a separate, smaller effort. These are related work we admire, not components it uses.</p>
+            <p class="lede">Handheld Linux already has excellent open-source projects. Game Mode is a separate, smaller effort. These are related work we admire, not components it needs.</p>
           </div>
         </div>
         <ul class="rules">
@@ -536,7 +536,7 @@
           </li>
           <li>
             <h3>InputPlumber</h3>
-            <p>An input routing daemon that combines devices and translates them into virtual controllers.</p>
+            <p>An input routing daemon that combines devices and translates them into virtual controllers. When it is running, Game Mode reads its state and its virtual gamepad, and never changes it.</p>
             <p class="rule-link"><a href="https://github.com/ShadowBlip/InputPlumber">ShadowBlip/InputPlumber<svg class="icon" aria-hidden="true" focusable="false"><use href="#i-external"/></svg></a></p>
           </li>
           <li>
@@ -545,7 +545,7 @@
             <p class="rule-link"><a href="https://github.com/ShadowBlip/OpenGamepadUI">ShadowBlip/OpenGamepadUI<svg class="icon" aria-hidden="true" focusable="false"><use href="#i-external"/></svg></a></p>
           </li>
         </ul>
-        <p class="builds-on">What Game Mode actually builds on: GTK 4 and PyGObject, Hyprland’s IPC, read-only Linux evdev, Omarchy’s own install commands, Steam’s controller interface and, if you have it, AntiMicroX.</p>
+        <p class="builds-on">What Game Mode actually builds on: GTK 4 and PyGObject, Hyprland’s IPC, read-only Linux evdev, Omarchy’s own install commands, Steam’s controller interface and, if you run them, AntiMicroX and InputPlumber’s read-only state.</p>
       </div>
     </section>
 

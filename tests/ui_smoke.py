@@ -2,7 +2,10 @@
 
 Usage (headless, touches no live desktop state):
   gtk4-broadwayd :7 &
-  GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 python3 tests/ui_smoke.py OUTDIR [lang] [WxH]
+  GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 python3 tests/ui_smoke.py OUTDIR [lang] [WxH] [inputplumber]
+
+The optional last word renders a handheld where InputPlumber owns the
+controller: Game Mode reads its virtual gamepad and Settings says so.
 """
 
 import os
@@ -20,6 +23,7 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 from gaminghome import application, core, settings as settings_mod  # noqa: E402
 from gaminghome.catalog import Availability, load_catalog, machine_arch  # noqa: E402
 from gaminghome.i18n import Translator  # noqa: E402
+from gaminghome.inputplumber import Composite, InputPlumberClient  # noqa: E402
 
 
 class Stub:
@@ -38,8 +42,25 @@ class Stub:
         return lambda *a, **k: None
 
 
+class VirtualPadStub(Stub):
+    def status(self):
+        return {"devices": [{"path": "/dev/input/event21", "name": "Microsoft X-Box One Elite 2 pad", "virtual": True}],
+                "errors": [], "ambiguous": []}
+
+
+def demo_inputplumber():
+    """The client as it looks on a ROG Xbox Ally with evdev sources only; it is never started."""
+    client = InputPlumberClient(lambda: None)
+    client.owner, client.version, client.serial = ":demo", "0.82.0", 1
+    client.composites = (Composite(
+        path="/org/shadowblip/InputPlumber/CompositeDevice0", name="ASUS ROG Xbox Ally", profile="Default",
+        targets=("mouse", "xbox-elite", "keyboard"), dbus_targets=1, sources=5, hidraw_sources=False,
+        event_nodes=frozenset(), right_stick_button=False),)
+    return client
+
+
 class FakeRuntime(application.Runtime):
-    def __init__(self, app, language):
+    def __init__(self, app, language, inputplumber=False):
         self.app = app
         self.settings = settings_mod.Settings(Path(os.devnull))
         self.settings.save = lambda: None
@@ -57,6 +78,9 @@ class FakeRuntime(application.Runtime):
         self._ui_dirty = None
         self._launch_timer = None
         self.interpreter = self.input = self.hypr = self.mapper = Stub()
+        self.inputplumber = InputPlumberClient(lambda: None)
+        if inputplumber:
+            self.inputplumber, self.input = demo_inputplumber(), VirtualPadStub()
 
     def autostart_enabled(self):
         return False
@@ -67,6 +91,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     language = sys.argv[2] if len(sys.argv) > 2 else "en"
     width, height = (int(v) for v in (sys.argv[3] if len(sys.argv) > 3 else "1280x720").split("x"))
+    inputplumber = len(sys.argv) > 4 and sys.argv[4] == "inputplumber"
+    suffix = "-inputplumber" if inputplumber else ""
     app = Gtk.Application(application_id="io.github.brianbaldock.OmarchyGameModeSmoke")
 
     def shoot(window, name):
@@ -88,7 +114,7 @@ def main():
         Gtk.IconTheme.get_for_display(display).add_search_path(str(application.DATA_DIR / "icons"))
         from gaminghome.ui import HomeWindow, load_css
         load_css(display, settings_mod.theme_colors())
-        runtime = FakeRuntime(app, language)
+        runtime = FakeRuntime(app, language, inputplumber)
         runtime._apply_direction()
         window = HomeWindow(app, runtime)
         runtime.window = window
@@ -103,7 +129,7 @@ def main():
 
         def run(index=0):
             if index > 0:
-                shoot(window, f"{language}-{width}x{height}-{steps[index - 1][0]}")
+                shoot(window, f"{language}-{width}x{height}-{steps[index - 1][0]}{suffix}")
             if index == len(steps):
                 app.quit()
                 return False

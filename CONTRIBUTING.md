@@ -46,7 +46,7 @@ where accidental input could lose progress.
 
 For isolated preferences, create a temporary directory with `mktemp -d` and launch with `XDG_CONFIG_HOME=/path/to/that/directory python3 omarchy-game-mode.py show`. Quit any existing instance first: otherwise the single-instance command reaches that resident process. This isolates preferences, not device access or applications. Keep mapper management and autostart off.
 
-HHD/InputPlumber compatibility is not established. Game Mode currently ignores virtual controllers; a stack that hides or owns the physical device may leave native navigation unavailable. Report the input stack as part of your setup; do not disable its protections or change permissions to make a test pass.
+InputPlumber compatibility is read-only: Game Mode reads its D-Bus state and uses the virtual gamepad it announces, and never changes it. This is tested against a fake service (those tests start a private `dbus-daemon`, never touch your session or system bus, and are skipped when `dbus-daemon` is not installed) and was checked on one device, an ASUS ROG Xbox Ally with InputPlumber 0.82.0, without physical button presses. HHD compatibility is not established: its virtual controllers are still ignored, so a stack that hides or owns the physical device may leave native navigation unavailable. Report the input stack as part of your setup; do not disable its protections or change permissions to make a test pass. Changes that would write to InputPlumber (profiles, target devices, events) are input ownership changes: discuss them first.
 
 ## Report hardware results
 
@@ -57,9 +57,14 @@ each case pass/fail/not tested rather than treating an untested device as suppor
 Useful cases: Home navigation; native Guide in Steam Big Picture; a brief View/Menu
 press versus the deliberate hold; game -> desktop -> game focus changes; opening
 Home and resuming; controller disconnect/reconnect; normal quit and SIGTERM restoring
-the initial mapper set. Test fullscreen and windowed games separately.
+the initial mapper set. Test fullscreen and windowed games separately. With InputPlumber:
+whether its virtual gamepad navigates Home, what the vendor buttons do there (nothing
+should be selected), and suspend and resume.
 
-`omarchy-game-mode status` helps, but review it before posting: window titles can
+Attach `omarchy-game-mode doctor --markdown` as the report: it lists the device,
+versions, input stack and network checks, and it is redacted before it is printed (no
+addresses in full, no network or host names, no serial numbers). Read it once before
+posting. `omarchy-game-mode status` helps too, but review it first: window titles can
 contain private information. Never post credentials, full process environments,
 account details, controller serial numbers or unredacted desktop recordings.
 Do not grant extra device permissions or bypass a lock screen for a report.

@@ -1,0 +1,802 @@
+"""Network path checks: routes, IPv6 state, VPN/proxy, DNS, TLS, clock, MTU and gateway loss.
+
+Everything is read from /proc and /sys or asked of a tool with a timeout; the only
+packets sent are DNS lookups, TCP+TLS handshakes to Microsoft's public service names
+(no HTTP request, no credentials), one SNTP query and ICMP echo to the default
+gateway and to the Cloudflare STUN server the UDP checks already contact. Nothing
+here needs root. A name's answers are only ever probed when they are public unicast
+addresses (`public_unicast`), so a resolver cannot point a probe into the local
+network or at a multicast group.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import os
+import re
+import socket
+import ssl
+import struct
+import sys
+import threading
+from dataclasses import dataclass
+from typing import Any
+
+from .context import Context
+from .model import Outcome, fail, info, ok, skip, warn
+from .runner import check_cancelled, time_left
+
+RTF_UP, RTF_REJECT = 0x0001, 0x0200
+IFF_UP = 0x1
+IFA_F_DADFAILED, IFA_F_TENTATIVE = 0x08, 0x40
+ULA = ipaddress.IPv6Network("fc00::/7")
+ARPHRD_ETHER = 1
+INTERFACE_NAME = re.compile(r"^[A-Za-z0-9_.:@-]{1,15}$")
+# VPN and tunnel interface names: WireGuard, OpenVPN, Tailscale, ZeroTier, PPP and common vendor clients.
+TUNNEL_NAME = re.compile(r"^(tun|tap|wg|tailscale|zt|ppp|nordlynx|proton|pvpn|mullvad|ipsec|vti|vpn|cscotun|gpd)", re.I)
+MAC_NAMED = re.compile(r"^((?:wl|en|ww)x)[0-9A-Fa-f]{12}$")
+# Names that the kernel, udev's predictable naming or a VPN client give an interface by themselves:
+# they describe a driver, a slot or a client, never a person. Any other name was chosen by someone.
+GENERIC_INTERFACE = re.compile(
+    r"(?:eth|wlan|wwan|usb|lo|docker|virbr|br|tun|tap|wg|ppp|tailscale|proton|ipsec|vti|cscotun|gpd)\d{0,4}|nordlynx"
+    r"|(?:en|wl|ww|ib|sl)(?:o\d{1,4}(?:d\d{1,3})?|s\d{1,4}(?:f\d{1,2})?(?:d\d{1,3})?|v\d{1,4}|x<mac>"
+    r"|(?:P\d{1,4})?p\d{1,4}s\d{1,4}(?:f\d{1,2})?(?:d\d{1,3})?(?:u\d{1,3})*(?:c\d{1,3})?(?:i\d{1,3})?)")
+PROXY_VARIABLES = ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy")
+STANDARD_RULES = {(0, "local"), (32766, "main"), (32767, "default")}
+TABLE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+
+NTP_HOST = "time.cloudflare.com"
+NTP_EPOCH_OFFSET = 2208988800
+TIME_SERVICES = ("systemd-timesyncd", "chronyd", "ntpd")
+# The upstream servers systemd-resolved knows, as it writes them for programs that read resolv.conf.
+RESOLVED_UPLINKS = "/run/systemd/resolve/resolv.conf"
+TIMESYNC_FLAG = "/run/systemd/timesync/synchronized"
+# One of the STUN servers the UDP checks contact anyway (see `udp.STUN_SERVERS`), so the
+# path MTU probe adds no destination of its own.
+PMTU_HOST = "stun.cloudflare.com"
+CGNAT = ipaddress.IPv4Network("100.64.0.0/10")
+
+
+def public_unicast(address: str) -> bool:
+    """True for a globally routable unicast address, the only kind the doctor sends probes to.
+
+    `ipaddress.is_global` alone also admits multicast groups (and site-local IPv6), so every
+    other category is ruled out explicitly: private, carrier-grade NAT, loopback, link-local,
+    multicast, reserved, unspecified and broadcast.
+    """
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if isinstance(parsed, ipaddress.IPv6Address) and (parsed.ipv4_mapped is not None or parsed.is_site_local):
+        return False
+    if isinstance(parsed, ipaddress.IPv4Address) and parsed in CGNAT:
+        return False
+    return parsed.is_global and not (parsed.is_private or parsed.is_loopback or parsed.is_link_local
+                                     or parsed.is_multicast or parsed.is_reserved or parsed.is_unspecified)
+
+
+@dataclass(frozen=True)
+class ServiceHost:
+    name: str
+    role: str
+    https: bool = True
+
+
+# Names the Xbox web client and Greenlight use before a stream starts. Regional
+# streaming hosts are chosen at sign-in and are deliberately not guessed here.
+REQUIRED_HOSTS = (
+    ServiceHost("login.live.com", "sign-in"),
+    ServiceHost("user.auth.xboxlive.com", "xbox-auth"),
+    ServiceHost("xsts.auth.xboxlive.com", "xbox-auth"),
+    ServiceHost("www.xbox.com", "web-client"),
+    ServiceHost("xhome.gssv-play-prod.xboxlive.com", "streaming-service"),
+    ServiceHost("gssv-play-prod.xboxlive.com", "streaming-service"),
+    ServiceHost("relay.communication.microsoft.com", "relay", https=False),
+)
+
+# Public resolvers that filter content. A filter can sinkhole a gaming or streaming name,
+# so the doctor names it; it is a heuristic lookup of well-known addresses, nothing more.
+# Sources: Cloudflare "1.1.1.1 for Families" docs; AdGuard's public DNS provider list.
+FILTERING_RESOLVERS = {
+    "1.1.1.2": "Cloudflare for Families (malware filter)",
+    "1.0.0.2": "Cloudflare for Families (malware filter)",
+    "2606:4700:4700::1112": "Cloudflare for Families (malware filter)",
+    "2606:4700:4700::1002": "Cloudflare for Families (malware filter)",
+    "1.1.1.3": "Cloudflare for Families (malware and adult-content filter)",
+    "1.0.0.3": "Cloudflare for Families (malware and adult-content filter)",
+    "2606:4700:4700::1113": "Cloudflare for Families (malware and adult-content filter)",
+    "2606:4700:4700::1003": "Cloudflare for Families (malware and adult-content filter)",
+    "208.67.222.123": "OpenDNS FamilyShield",
+    "208.67.220.123": "OpenDNS FamilyShield",
+    "185.228.168.168": "CleanBrowsing Family filter",
+    "185.228.169.168": "CleanBrowsing Family filter",
+    "185.228.168.10": "CleanBrowsing Adult filter",
+    "185.228.169.11": "CleanBrowsing Adult filter",
+    "94.140.14.14": "AdGuard DNS (ads and trackers filter)",
+    "94.140.15.15": "AdGuard DNS (ads and trackers filter)",
+    "94.140.14.15": "AdGuard DNS Family Protection",
+    "94.140.15.16": "AdGuard DNS Family Protection",
+}
+KNOWN_RESOLVERS = {
+    "1.1.1.1": "Cloudflare", "1.0.0.1": "Cloudflare", "8.8.8.8": "Google", "8.8.4.4": "Google",
+    "9.9.9.9": "Quad9", "149.112.112.112": "Quad9", "208.67.222.222": "OpenDNS", "208.67.220.220": "OpenDNS",
+}
+
+
+def display_interface(name: str) -> str:
+    """Interface name safe to print: adapters named after their MAC lose the MAC."""
+    return MAC_NAMED.sub(r"\1<mac>", name)
+
+
+def shown_interface(ctx: Context, name: str) -> str:
+    """An interface name fit for a report.
+
+    A generic name (`wlp0s20f3`, `wg0`, `tailscale0`) names a slot, a driver or a client and is
+    shown, vouched for so that it is not masked as a serial number. Any other name was chosen by
+    someone (`wg-office`) and is replaced by an alias, `vpn-1` for a tunnel and `if-1` otherwise,
+    the same for the same name throughout one report.
+    """
+    shown = display_interface(name)
+    if GENERIC_INTERFACE.fullmatch(shown):
+        return ctx.trust(shown)
+    return ctx.redactor.alias(name, "vpn" if interface_kind(ctx, name) == "tunnel" else "if")
+
+
+# ---- routes -------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Route:
+    interface: str
+    destination: int
+    mask: int
+    gateway: int
+    metric: int
+
+    @property
+    def prefix(self) -> int:
+        return bin(self.mask).count("1")
+
+    @property
+    def gateway_address(self) -> str:
+        return str(ipaddress.IPv4Address(self.gateway)) if self.gateway else ""
+
+
+def _kernel_ipv4(text: str) -> int:
+    """/proc/net/route prints the raw 32-bit value, so the byte order is the host's."""
+    return int.from_bytes(bytes.fromhex(text), sys.byteorder)
+
+
+def ipv4_routes(ctx: Context) -> list[Route]:
+    routes = []
+    for line in (ctx.fs.read("/proc/net/route") or "").splitlines()[1:]:
+        fields = line.split()
+        if len(fields) < 8:
+            continue
+        try:
+            if not int(fields[3], 16) & RTF_UP:
+                continue
+            routes.append(Route(fields[0], _kernel_ipv4(fields[1]), _kernel_ipv4(fields[7]), _kernel_ipv4(fields[2]),
+                                int(fields[6])))
+        except ValueError:
+            continue
+    return routes
+
+
+def default_routes(ctx: Context) -> list[Route]:
+    return sorted((route for route in ipv4_routes(ctx) if route.mask == 0 and route.destination == 0),
+                  key=lambda route: route.metric)
+
+
+def route_for(routes: list[Route], address: str) -> Route | None:
+    """Longest-prefix match, then lowest metric: what the kernel would pick from the main table."""
+    target = int(ipaddress.IPv4Address(address))
+    matches = [route for route in routes if target & route.mask == route.destination]
+    return min(matches, key=lambda route: (-route.prefix, route.metric)) if matches else None
+
+
+def interface_kind(ctx: Context, name: str) -> str:
+    if ctx.fs.exists(f"/sys/class/net/{name}/wireless"):
+        return "wifi"
+    if name.startswith(("wwan", "rmnet")):
+        return "cellular"
+    if TUNNEL_NAME.match(name):
+        return "tunnel"
+    kind = ctx.fs.line(f"/sys/class/net/{name}/type")
+    if kind and kind != str(ARPHRD_ETHER):
+        return "tunnel"
+    return "ethernet"
+
+
+def local_ipv4(ctx: Context, destination: str) -> str:
+    """Source address the kernel would use towards `destination`; connecting a UDP socket sends nothing."""
+    try:
+        sock = ctx.udp_socket()
+    except OSError:
+        return ""
+    try:
+        sock.connect((destination, 9))
+        return str(sock.getsockname()[0])
+    except OSError:
+        return ""
+    finally:
+        sock.close()
+
+
+def check_default_route(ctx: Context) -> Outcome:
+    defaults = default_routes(ctx)
+    if not defaults:
+        return fail("No IPv4 default route: this device has no IPv4 path to the internet.",
+                    "Reconnect Wi-Fi or Ethernet, then run the doctor again.", default_routes=0)
+    best = defaults[0]
+    kind = interface_kind(ctx, best.interface)
+    source = local_ipv4(ctx, best.gateway_address) if best.gateway else ""
+    detail = f"via {shown_interface(ctx, best.interface)} ({kind})"
+    if best.gateway:
+        detail += f", gateway {best.gateway_address}"
+    if source:
+        detail += f", this device {source}"
+    if len(defaults) > 1:
+        detail += f"; {len(defaults)} default routes, the lowest metric wins"
+    return ok(detail, interface=shown_interface(ctx, best.interface), interface_type=kind,
+              gateway=best.gateway_address, source=source, default_routes=len(defaults))
+
+
+# ---- IPv6 ---------------------------------------------------------------------
+
+def ipv6_state(ctx: Context) -> dict[str, Any]:
+    global_count = local_count = 0
+    for line in (ctx.fs.read("/proc/net/if_inet6") or "").splitlines():
+        fields = line.split()
+        if len(fields) < 6 or fields[5] == "lo":
+            continue
+        try:
+            address, flags = ipaddress.IPv6Address(int(fields[0], 16)), int(fields[4], 16)
+        except ValueError:
+            continue
+        if flags & (IFA_F_TENTATIVE | IFA_F_DADFAILED):
+            continue
+        if address.is_global:
+            global_count += 1
+        elif address in ULA:
+            local_count += 1
+    default_route = False
+    for line in (ctx.fs.read("/proc/net/ipv6_route") or "").splitlines():
+        fields = line.split()
+        if len(fields) < 10 or fields[9] == "lo":
+            continue
+        try:
+            flags, is_default = int(fields[8], 16), int(fields[0], 16) == 0 and int(fields[1], 16) == 0
+        except ValueError:
+            continue
+        if is_default and flags & RTF_UP and not flags & RTF_REJECT:
+            default_route = True
+    if global_count and default_route:
+        # Without an IPv4 way out, a host with working IPv6 is IPv6-only, not dual-stack.
+        state = "dual-stack" if default_routes(ctx) else "ipv6-only"
+    elif not global_count and not default_route:
+        state = "local-only" if local_count else "absent"
+    else:
+        state = "half-configured"
+    return {"ipv6_state": state, "global_addresses": global_count, "local_addresses": local_count,
+            "default_route": default_route}
+
+
+def check_ipv6(ctx: Context) -> Outcome:
+    state = ipv6_state(ctx)
+    name = state["ipv6_state"]
+    if name == "dual-stack":
+        return ok("Dual-stack: a global IPv6 address and an IPv6 default route are both present.", **state)
+    if name == "ipv6-only":
+        return ok("IPv6-only: a global IPv6 address and an IPv6 default route, but no IPv4 default route (see the "
+                  "IPv4 default route check).", **state)
+    if name == "absent":
+        return ok("IPv4-only: no global IPv6 address and no IPv6 default route, which is a consistent setup.", **state)
+    if name == "local-only":
+        return ok("IPv4-only for the internet: IPv6 has local (ULA) addresses but no global address and no "
+                  "default route, which is consistent.", **state)
+    half = ("a global IPv6 address but no IPv6 default route" if state["global_addresses"]
+            else "an IPv6 default route but no global IPv6 address")
+    return warn(f"Half-configured IPv6: {half}. Apps may try IPv6 first and stall before falling back to IPv4.",
+                "Fix IPv6 on the router (router advertisements or DHCPv6), or turn IPv6 off for this connection "
+                "consistently: `nmcli connection modify '<connection name>' ipv6.method disabled`", **state)
+
+
+# ---- VPN, policy routing, proxy -------------------------------------------------
+
+def _tunnel_interfaces(ctx: Context) -> list[str]:
+    names = []
+    for line in (ctx.fs.read("/proc/net/dev") or "").splitlines()[2:]:
+        name = line.split(":", 1)[0].strip()
+        if not INTERFACE_NAME.match(name) or name == "lo" or interface_kind(ctx, name) != "tunnel":
+            continue
+        try:
+            up = int(ctx.fs.line(f"/sys/class/net/{name}/flags") or "0x1", 16) & IFF_UP
+        except ValueError:
+            up = True
+        if up:
+            names.append(name)
+    return names
+
+
+def parse_ip_rules(text: str) -> list[tuple[int, str]]:
+    """(priority, table) for every `ip rule` line; selectors are not kept (they can hold addresses)."""
+    rules = []
+    for line in text.splitlines():
+        match = re.match(r"\s*(\d+):.*\blookup\s+(\S+)", line)
+        if match:
+            rules.append((int(match.group(1)), match.group(2)))
+    return rules
+
+
+def _policy_routing(ctx: Context) -> tuple[int | None, list[str]]:
+    """Number of non-standard routing rules, and the extra tables that carry a default route."""
+    listed = ctx.command(["ip", "-4", "rule", "show"], 3)
+    if not listed.ok:
+        return None, []
+    extra = [rule for rule in parse_ip_rules(listed.stdout) if rule not in STANDARD_RULES]
+    tables = list(dict.fromkeys(table for _priority, table in extra
+                                if table not in ("local", "main", "default") and TABLE_NAME.match(table)))
+    full = []
+    for table in tables[:4]:
+        routes = ctx.command(["ip", "-4", "route", "show", "table", table], 3)
+        if routes.ok and re.search(r"(?m)^(default|0\.0\.0\.0/1)\b", routes.stdout):
+            full.append(table)
+    return len(extra), full
+
+
+def check_vpn_proxy(ctx: Context) -> Outcome:
+    tunnels = [shown_interface(ctx, name) for name in _tunnel_interfaces(ctx)]
+    defaults = default_routes(ctx)
+    via_tunnel = bool(defaults) and interface_kind(ctx, defaults[0].interface) == "tunnel"
+    rules, full_tables = _policy_routing(ctx)
+    proxies = sorted(name for name in (*PROXY_VARIABLES, *(v.upper() for v in PROXY_VARIABLES)) if ctx.env.get(name))
+    evidence = dict(tunnel_interfaces=tunnels, default_route_via_tunnel=via_tunnel, policy_rules=rules,
+                    policy_tables_with_default_route=full_tables, proxy_variables=proxies)
+    problems = []
+    if via_tunnel or full_tables:
+        problems.append("internet traffic is routed through a VPN or tunnel"
+                        + (f" ({', '.join(tunnels)})" if tunnels else ""))
+    elif tunnels and rules is None:
+        problems.append(f"a VPN or tunnel interface is up ({', '.join(tunnels)}) and policy routing could not be "
+                        "read, so it may carry internet traffic")
+    if proxies:
+        problems.append(f"proxy variables are set ({', '.join(proxies)}; values not shown)")
+    if problems:
+        summary = "; ".join(problems)
+        return warn(summary[0].upper() + summary[1:] + ". A VPN changes latency, MTU and NAT behaviour, and "
+                    "stream media usually cannot use an HTTP proxy.",
+                    "Retry once with the VPN disconnected and the proxy variables unset, to see whether the "
+                    "result changes.", **evidence)
+    note = f" ({', '.join(tunnels)} is up but does not carry internet traffic)" if tunnels else ""
+    return ok(f"No VPN, tunnel or proxy in the default path{note}.", **evidence)
+
+
+# ---- DNS ----------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Resolution:
+    host: str
+    addresses: tuple[str, ...] = ()
+    error: str = ""
+    milliseconds: int = 0
+
+    @property
+    def usable(self) -> tuple[str, ...]:
+        """Public unicast answers only: a sinkhole (0.0.0.0, loopback, private) is not a working lookup,
+        and nothing outside the public internet is ever probed because a resolver said so."""
+        return tuple(address for address in self.addresses if public_unicast(address))
+
+
+def resolve(ctx: Context, host: str, family: int = socket.AF_INET, timeout: float = 2.0) -> Resolution:
+    """Look a name up with a deadline. getaddrinfo has none, so it runs on an abandonable thread.
+
+    The name is asked for as an absolute name (`www.xbox.com.`): a failed lookup must not be
+    retried with the search domains appended, which would send other names to the resolver.
+    """
+    box: list[Any] = []
+    started = ctx.monotonic()
+    absolute = host if host.endswith(".") else f"{host}."
+
+    def lookup() -> None:
+        try:
+            infos = ctx.getaddrinfo(absolute, None, family, socket.SOCK_DGRAM)
+            box.append(tuple(dict.fromkeys(str(entry[4][0]) for entry in infos)))
+        except socket.gaierror as exc:
+            box.append("not-found" if exc.errno in (socket.EAI_NONAME, getattr(socket, "EAI_NODATA", -5)) else "failed")
+        except OSError:
+            box.append("failed")
+
+    check_cancelled()
+    thread = threading.Thread(target=lookup, name="doctor-dns", daemon=True)
+    thread.start()
+    thread.join(time_left(timeout))
+    # Lookups are shared between checks: one that was given up on mid-way is not an answer to keep.
+    check_cancelled()
+    elapsed = round((ctx.monotonic() - started) * 1000)
+    if not box:
+        return Resolution(host, error="timeout", milliseconds=elapsed)
+    if isinstance(box[0], str):
+        return Resolution(host, error=box[0], milliseconds=elapsed)
+    return Resolution(host, box[0], milliseconds=elapsed)
+
+
+def resolve_cached(ctx: Context, host: str, family: int = socket.AF_INET) -> Resolution:
+    return ctx.once(f"dns:{family}:{host}", lambda: resolve(ctx, host, family))
+
+
+def parse_resolv_conf(text: str) -> tuple[list[str], list[str]]:
+    servers, domains = [], []
+    for line in text.splitlines():
+        fields = line.split("#", 1)[0].split()
+        if len(fields) >= 2 and fields[0] == "nameserver":
+            servers.append(fields[1].split("%", 1)[0])
+        elif len(fields) >= 2 and fields[0] in ("search", "domain"):
+            domains.extend(fields[1:])
+    return servers, domains
+
+
+def classify_resolver(address: str) -> tuple[str, str]:
+    """(kind, provider) for one resolver address; kind is filtering, public, lan or local."""
+    if address in FILTERING_RESOLVERS:
+        return "filtering", FILTERING_RESOLVERS[address]
+    parsed = ipaddress.ip_address(address)
+    if parsed.is_loopback:
+        return "local", "a resolver on this device"
+    if not parsed.is_global:
+        return "lan", "the router or a resolver on the local network"
+    return "public", KNOWN_RESOLVERS.get(address, "a public resolver")
+
+
+def check_resolver(ctx: Context) -> Outcome:
+    """Which servers answer this device's lookups, from the files the system keeps them in.
+
+    Behind systemd-resolved's stub (127.0.0.53) the upstream servers are read from the copy it
+    writes to RESOLVED_UPLINKS. `resolvectl` is never asked: it talks to systemd-resolved over
+    D-Bus, which could start the service again, and the fallback servers or which server is in
+    use right now are only known that way, so they are not reported.
+    """
+    servers, domains = parse_resolv_conf(ctx.fs.read("/etc/resolv.conf") or "")
+    mode = "direct"
+    if any(server.startswith("127.0.0.5") for server in servers):
+        mode = "systemd-resolved"
+        servers, uplink_domains = parse_resolv_conf(ctx.fs.read(RESOLVED_UPLINKS) or "")
+        domains += uplink_domains
+        for domain in domains:
+            ctx.secret(domain)
+        state = ctx.command(["systemctl", "is-active", "systemd-resolved.service"], 3).stdout.strip()
+        if state in ("inactive", "failed"):
+            return warn("DNS goes to systemd-resolved's local stub (127.0.0.53), but systemd-resolved is not "
+                        "running, so lookups through it fail.",
+                        "Start it again: `sudo systemctl start systemd-resolved.service`", mode=mode, servers=[],
+                        filtering=False)
+    for domain in domains:
+        ctx.secret(domain)
+    rows = []
+    for raw in servers:
+        try:
+            address = ipaddress.ip_address(raw).compressed
+        except ValueError:
+            continue
+        kind, provider = classify_resolver(address)
+        if all(row["address"] != address for row in rows):
+            rows.append({"address": address, "kind": kind, "provider": provider})
+    if not rows:
+        if mode == "systemd-resolved":
+            return skip("DNS goes through systemd-resolved, which lists no upstream server in "
+                        f"{RESOLVED_UPLINKS}; the servers it falls back to cannot be verified here.",
+                        mode=mode, servers=[], filtering=False)
+        return skip("Could not identify the DNS resolver in use.", mode=mode, servers=[], filtering=False)
+    providers = ", ".join(dict.fromkeys(row["provider"] for row in rows))
+    filtering = [row for row in rows if row["kind"] == "filtering"]
+    evidence = dict(mode=mode, servers=rows, filtering=bool(filtering))
+    if filtering:
+        return warn(f"DNS goes through a content-filtering resolver: {providers}. A filter can block or sinkhole "
+                    "a gaming or streaming name that this doctor does not test.",
+                    "Nothing to change while the service-name check passes. If a name fails, compare it with an "
+                    "unfiltered resolver before changing DNS.", **evidence)
+    if any(row["kind"] == "lan" for row in rows):
+        providers += " (its upstream and any filtering cannot be seen from here)"
+    return info(f"DNS resolver: {providers}.", **evidence)
+
+
+def check_dns_required(ctx: Context) -> Outcome:
+    def lookup(host: ServiceHost) -> dict[str, Any]:
+        ipv4 = resolve_cached(ctx, host.name, socket.AF_INET)
+        ipv6 = resolve_cached(ctx, host.name, socket.AF_INET6)
+        error = ipv4.error or ("" if ipv4.usable else "non-routable-answer")
+        return {"host": host.name, "role": host.role, "resolved": not error, "a_records": len(ipv4.addresses),
+                "aaaa_records": len(ipv6.addresses), "error": error, "milliseconds": ipv4.milliseconds}
+
+    rows = ctx.parallel(lookup, REQUIRED_HOSTS)
+    failed = [row for row in rows if not row["resolved"]]
+    evidence = dict(hosts=rows, resolved=len(rows) - len(failed), total=len(rows))
+    if not failed:
+        return ok(f"All {len(rows)} Xbox and Microsoft service names resolve.", **evidence)
+    names = ", ".join(f"{row['host']} ({row['error']})" for row in failed)
+    blocked = any(row["error"] == "non-routable-answer" for row in failed)
+    hint = ("A non-routable answer means the resolver or a captive portal is blocking the name. " if blocked else "")
+    remedy = (hint + "Check the connection and the resolver; compare with: `resolvectl query www.xbox.com`")
+    streaming = [row for row in rows if row["role"] == "streaming-service"]
+    if len(failed) == len(rows):
+        return fail("No Xbox or Microsoft service name resolves: DNS is not working.", remedy, **evidence)
+    if all(not row["resolved"] for row in streaming) or len({row["role"] for row in failed}) >= 3:
+        return fail(f"{len(failed)} of {len(rows)} service names do not resolve: {names}.", remedy, **evidence)
+    return warn(f"{len(failed)} of {len(rows)} service names do not resolve: {names}.", remedy, **evidence)
+
+
+# ---- TLS ----------------------------------------------------------------------
+
+# OpenSSL's X509_V_ERR_* codes that explain a failed verification in plain words.
+CERTIFICATE_REASONS = {
+    9: "certificate is not valid yet", 10: "certificate has expired", 18: "self-signed certificate",
+    19: "self-signed certificate in the chain", 20: "certificate issuer is not trusted",
+    21: "certificate issuer is not trusted", 23: "certificate was revoked",
+    62: "certificate is for another host name", 64: "certificate is for another address",
+}
+
+
+def describe_os_error(exc: BaseException) -> str:
+    """Short reason for a socket or TLS failure, built from its type and codes.
+
+    The exception's own text is never used: it can quote an address, a host name or a path.
+    """
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return "timeout"
+    if isinstance(exc, ConnectionRefusedError):
+        return "refused"
+    if isinstance(exc, ConnectionResetError):
+        return "reset"
+    if isinstance(exc, ssl.SSLError):
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, str) and re.fullmatch(r"[A-Z0-9_]{3,60}", reason):
+            return reason.lower().replace("_", " ")
+        return type(exc).__name__
+    number = getattr(exc, "errno", None)
+    return os.strerror(number).lower() if isinstance(number, int) and number > 0 else type(exc).__name__
+
+
+def certificate_reason(exc: ssl.SSLCertVerificationError) -> str:
+    code = getattr(exc, "verify_code", None)
+    return CERTIFICATE_REASONS.get(code) or f"certificate verification failed (code {code})"
+
+
+def tls_probe(ctx: Context, host: str, address: str, port: int = 443, timeout: float = 4.0) -> dict[str, Any]:
+    """TCP connect then a verified TLS handshake for `host`; no request is sent."""
+    row: dict[str, Any] = {"host": host, "ok": False, "stage": "connect", "error": "", "connect_ms": None,
+                           "handshake_ms": None, "tls_version": ""}
+    check_cancelled()
+    timeout = time_left(timeout)
+    started = ctx.monotonic()
+    try:
+        sock = ctx.tcp_connect((address, port), timeout)
+    except OSError as exc:
+        check_cancelled()
+        row["error"] = describe_os_error(exc)
+        return row
+    connected = ctx.monotonic()
+    row["connect_ms"] = round((connected - started) * 1000)
+    try:
+        sock.settimeout(max(0.5, timeout - (connected - started)))
+        secure = ctx.tls_context().wrap_socket(sock, server_hostname=host)
+    except ssl.SSLCertVerificationError as exc:
+        sock.close()
+        row.update(stage="certificate", error=certificate_reason(exc))
+        return row
+    except (ssl.SSLError, OSError) as exc:
+        sock.close()
+        check_cancelled()
+        row.update(stage="tls", error=describe_os_error(exc))
+        return row
+    try:
+        row.update(ok=True, stage="", handshake_ms=round((ctx.monotonic() - connected) * 1000),
+                   tls_version=str(secure.version() or ""))
+    finally:
+        secure.close()
+    return row
+
+
+def check_tls(ctx: Context) -> Outcome:
+    def probe(host: ServiceHost) -> dict[str, Any]:
+        resolution = resolve_cached(ctx, host.name, socket.AF_INET)
+        if not resolution.usable:
+            return {"host": host.name, "role": host.role, "ok": False, "stage": "dns", "error": "no address",
+                    "connect_ms": None, "handshake_ms": None, "tls_version": ""}
+        return {**tls_probe(ctx, host.name, resolution.usable[0]), "role": host.role}
+
+    rows = ctx.parallel(probe, [host for host in REQUIRED_HOSTS if host.https])
+    failed = [row for row in rows if not row["ok"]]
+    evidence = dict(hosts=rows, completed=len(rows) - len(failed), total=len(rows))
+    if not failed:
+        slowest = max((row["connect_ms"] or 0) + (row["handshake_ms"] or 0) for row in rows)
+        return ok(f"All {len(rows)} TLS handshakes with Xbox and Microsoft services completed "
+                  f"(slowest {slowest} ms).", **evidence)
+    names = ", ".join(f"{row['host']} ({row['stage']}: {row['error']})" for row in failed)
+    remedy = "Check for a captive portal, a filtering proxy or a firewall rule that blocks outbound TCP 443."
+    if any(row["stage"] == "certificate" for row in failed):
+        remedy = ("A certificate failure means something between this device and Microsoft is intercepting TLS "
+                  "(captive portal, filtering proxy, security appliance), or the clock is wrong. " + remedy)
+    streaming_down = all(not row["ok"] for row in rows if row["role"] == "streaming-service")
+    summary = f"{len(failed)} of {len(rows)} TLS handshakes failed: {names}."
+    return (fail if len(failed) == len(rows) or streaming_down else warn)(summary, remedy, **evidence)
+
+
+# ---- clock --------------------------------------------------------------------
+
+def _ntp_timestamp(seconds: float) -> bytes:
+    whole = int(seconds)
+    return struct.pack("!II", (whole + NTP_EPOCH_OFFSET) & 0xFFFFFFFF, int((seconds - whole) * 2 ** 32) & 0xFFFFFFFF)
+
+
+def _from_ntp(data: bytes) -> float:
+    whole, fraction = struct.unpack("!II", data)
+    if whole < 0x80000000:  # NTP era 1, after February 2036
+        whole += 2 ** 32
+    return whole - NTP_EPOCH_OFFSET + fraction / 2 ** 32
+
+
+def sntp_offset(ctx: Context, address: str, timeout: float = 2.0) -> float | None:
+    """Seconds this clock is behind (+) or ahead (-) of an NTP server, from one SNTP exchange."""
+    check_cancelled()
+    try:
+        sock = ctx.udp_socket()
+    except OSError:
+        return None
+    try:
+        sent = ctx.wall_time()
+        transmit = _ntp_timestamp(sent)
+        sock.settimeout(time_left(timeout))
+        sock.sendto(b"\x23" + bytes(39) + transmit, (address, 123))
+        data, _source = sock.recvfrom(512)
+        received = ctx.wall_time()
+    except OSError:
+        check_cancelled()
+        return None
+    finally:
+        sock.close()
+    # Mode 4 (server), a real stratum, and our own timestamp echoed back.
+    if len(data) < 48 or data[0] & 0x07 != 4 or data[1] == 0 or data[24:32] != transmit:
+        return None
+    return ((_from_ntp(data[32:40]) - sent) + (_from_ntp(data[40:48]) - received)) / 2
+
+
+def _time_sync_state(ctx: Context) -> dict[str, Any]:
+    """The running NTP client and, for systemd-timesyncd, whether it has synchronised the clock since boot.
+
+    `timedatectl` is not asked: it talks to systemd-timedated over D-Bus, which starts that service
+    when it is not running, and no check may start anything. `systemctl is-active` and the file
+    systemd-timesyncd touches after each synchronisation answer without side effects.
+    """
+    result = ctx.command(["systemctl", "is-active", *(f"{name}.service" for name in TIME_SERVICES)], 3)
+    states = result.stdout.split()
+    if result.error or len(states) != len(TIME_SERVICES):
+        return {}
+    running = [name for name, state in zip(TIME_SERVICES, states) if state == "active"]
+    synced = ctx.fs.exists(TIMESYNC_FLAG) if "systemd-timesyncd" in running else None
+    return {"enabled": bool(running), "client": running[0] if running else "", "synchronized": synced}
+
+
+def check_clock(ctx: Context) -> Outcome:
+    state = _time_sync_state(ctx)
+    resolution = resolve_cached(ctx, NTP_HOST, socket.AF_INET)
+    offset = sntp_offset(ctx, resolution.usable[0]) if resolution.usable else None
+    enabled, client, synced = state.get("enabled"), state.get("client", ""), state.get("synchronized")
+    evidence = dict(ntp_enabled=enabled, ntp_client=client, ntp_synchronized=synced,
+                    offset_ms=None if offset is None else round(offset * 1000), reference=NTP_HOST)
+    fix = "Turn on time synchronisation: `sudo timedatectl set-ntp true`"
+    if offset is None and enabled is None:
+        return skip("Could not read the time-sync state or reach an NTP server.", **evidence)
+    if offset is not None and abs(offset) > 30:
+        return fail(f"The system clock is off by about {abs(offset):.0f} s. Sign-in tokens and TLS certificates "
+                    "depend on the correct time.", fix, **evidence)
+    if offset is not None and abs(offset) > 5:
+        return warn(f"The system clock is off by about {abs(offset):.0f} s.", fix, **evidence)
+    measured = "not measured" if offset is None else f"within {max(abs(offset), 0.1):.1f} s of {NTP_HOST}"
+    if enabled is False:
+        return warn(f"No NTP client ({', '.join(TIME_SERVICES)}) is running, so nothing keeps the clock "
+                    f"synchronised (offset {measured}).", fix, **evidence)
+    if synced is False:
+        return warn(f"systemd-timesyncd is running but has not synchronised the clock since boot (offset "
+                    f"{measured}).", "Check that the network lets NTP through (UDP 123): "
+                    "`journalctl -u systemd-timesyncd`", **evidence)
+    keeper = (" and systemd-timesyncd has synchronised it since boot" if synced
+              else f" and {client} is running" if client else "")
+    if offset is None:
+        if not synced:
+            return skip(f"{client} is running, but whether it has synchronised the clock is unknown and the offset "
+                        "was not measured (no answer from the NTP server).", **evidence)
+        return ok("systemd-timesyncd has synchronised the clock since boot (the offset was not measured: no "
+                  "answer from the NTP server).", **evidence)
+    return ok(f"The clock is {measured}{keeper}.", **evidence)
+
+
+# ---- ping: gateway loss and path MTU --------------------------------------------
+
+def parse_ping(text: str) -> dict[str, Any] | None:
+    counts = re.search(r"(\d+) packets transmitted, (\d+)(?: packets)? received", text)
+    if not counts:
+        return None
+    sent, received = int(counts.group(1)), int(counts.group(2))
+    timing = re.search(r"(?:rtt|round-trip) min/avg/max(?:/mdev)? = ([\d.]+)/([\d.]+)/([\d.]+)", text)
+    return {"sent": sent, "received": received,
+            "loss_percent": round(100 * (sent - received) / sent, 1) if sent else 100.0,
+            "rtt_avg_ms": float(timing.group(2)) if timing else None,
+            "rtt_max_ms": float(timing.group(3)) if timing else None}
+
+
+def ping_seconds(longest: int) -> int:
+    """How long a ping may run (its `-w`): at most `longest` seconds, and short enough to print its
+    summary within what is left of the check's time (an explicit --timeout can leave only one second)."""
+    return max(1, min(longest, int(time_left(longest + 1.0) - 0.5)))
+
+
+def check_gateway_loss(ctx: Context) -> Outcome:
+    defaults = default_routes(ctx)
+    if not defaults or not defaults[0].gateway:
+        return skip("No default gateway to probe.")
+    seconds = ping_seconds(7)
+    result = ctx.command(["ping", "-4", "-n", "-q", "-c", str(min(20, 5 * seconds)), "-i", "0.2", "-W", "1",
+                          "-w", str(seconds), defaults[0].gateway_address], seconds + 2)
+    if result.error == "not-found":
+        return skip("The ping tool is not installed.")
+    stats = parse_ping(result.stdout)
+    if stats is None:
+        return skip("The gateway probe did not produce a result.")
+    if not stats["received"]:
+        return skip("The gateway does not answer ping, so local loss could not be measured.", **stats)
+    summary = (f"{stats['received']}/{stats['sent']} replies from the gateway, average {stats['rtt_avg_ms']} ms, "
+               f"worst {stats['rtt_max_ms']} ms")
+    slow = (stats["rtt_max_ms"] or 0) >= 100 or (stats["rtt_avg_ms"] or 0) >= 30
+    if stats["received"] < stats["sent"] or slow:
+        return warn(f"Unsteady local link: {summary}. Loss or spikes this close to the device show up as stutter "
+                    "and dropped streams.",
+                    "Move closer to the access point, prefer 5 GHz or 6 GHz, or use wired Ethernet.", **stats)
+    return ok(f"Steady local link: {summary}.", **stats)
+
+
+def check_mtu_interface(ctx: Context) -> Outcome:
+    defaults = default_routes(ctx)
+    if not defaults:
+        return skip("No default route, so there is no interface MTU to judge.")
+    name = defaults[0].interface
+    try:
+        mtu = int(ctx.fs.line(f"/sys/class/net/{name}/mtu"))
+    except ValueError:
+        return skip("Could not read the interface MTU.")
+    shown = shown_interface(ctx, name)
+    if mtu < 1400:
+        return warn(f"MTU on {shown} is {mtu}, unusually low. Large stream packets may be fragmented or dropped.",
+                    "A low MTU usually comes from a VPN or tunnel. Fix it there instead of lowering it further.",
+                    interface=shown, mtu=mtu)
+    return ok(f"MTU on {shown} is {mtu}.", interface=shown, mtu=mtu)
+
+
+def _ping_size(ctx: Context, address: str, size: int) -> bool | None:
+    """Whether `size`-byte pings got through unfragmented; None when the probe produced no result."""
+    seconds = ping_seconds(3)
+    result = ctx.command(["ping", "-4", "-n", "-q", "-c", "2", "-i", "0.2", "-W", "1", "-w", str(seconds), "-M", "do",
+                          "-s", str(size), address], seconds + 2)
+    stats = None if result.error else parse_ping(result.stdout)
+    return None if stats is None else bool(stats["received"])
+
+
+def check_pmtu(ctx: Context) -> Outcome:
+    resolution = resolve_cached(ctx, PMTU_HOST, socket.AF_INET)
+    if not resolution.usable:
+        return skip(f"{PMTU_HOST} did not resolve to a public address, so the path MTU could not be probed.")
+    address = resolution.usable[0]
+    small = _ping_size(ctx, address, 1200)
+    if small is None:
+        return skip("The ping tool is not installed or did not run.")
+    if not small:
+        return skip(f"{PMTU_HOST} does not answer ping from here, so the path MTU could not be probed.")
+    large = _ping_size(ctx, address, 1472)
+    if large is None:
+        return skip("The full-size probe did not produce a result, so the path MTU could not be judged.",
+                    passes_1228=True)
+    if large:
+        return ok("Full-size 1500-byte packets pass without fragmentation.", passes_1228=True, passes_1500=True)
+    return warn("1228-byte packets pass but full-size 1500-byte packets do not: something on the path has a "
+                "smaller MTU and may silently drop large stream packets.",
+                "This usually points at a VPN, a tunnel or PPPoE. Fix the MTU on that link; do not lower the "
+                "Wi-Fi MTU by guesswork.", passes_1228=True, passes_1500=False)

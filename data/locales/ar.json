@@ -92,5 +92,15 @@
   "app.battlenet.description": "ألعاب ⁦Battle.net⁩ عبر مشغّل ⁦Omarchy⁩، من دون ⁦Steam.⁩",
   "app.minecraft.description": "مشغّل ⁦Minecraft⁩ الرسمي على سطح المكتب هذا.",
   "app.moonlight.installHelp": "يأتي ⁦Moonlight⁩ مع ⁦Omarchy⁩، لذلك لا يوجد مثبّت منفصل هنا. إذا كان أمر ⁦moonlight⁩ مفقودًا، فأعد تثبيت حزمة ⁦moonlight-qt⁩ من مجموعة ⁦Omarchy⁩ الأساسية.",
-  "app.remote.installHelp": "اختيار تثبيت هو التأكيد. يضيف ⁦Omarchy⁩ بعد ذلك الحزمة المتحقَّق منها ⁦greenlight-bin⁩ ولا يسأل مرة أخرى في الطرفية."
+  "app.remote.installHelp": "اختيار تثبيت هو التأكيد. يضيف ⁦Omarchy⁩ بعد ذلك الحزمة المتحقَّق منها ⁦greenlight-bin⁩ ولا يسأل مرة أخرى في الطرفية.",
+  "inputplumber.device": "يدير ⁦InputPlumber {version}⁩ الجهاز ⁦{name}⁩ بملف التعريف ⁦{profile}⁩.",
+  "inputplumber.reading": "يقرأ ⁦Omarchy Game Mode⁩ وحدة التحكم الافتراضية الخاصة به ولا يغيّر شيئًا في ⁦InputPlumber⁩.",
+  "inputplumber.noDevice": "يعمل ⁦InputPlumber⁩ لكنه لا يدير أي وحدة تحكم.",
+  "inputplumber.readFailed": "يعمل ⁦InputPlumber⁩ لكن ⁦Omarchy Game Mode⁩ لم يتمكن من قراءة حالته.",
+  "inputplumber.unrecognized": "لا يتعرّف ⁦Omarchy Game Mode⁩ على نوع وحدة التحكم الافتراضية الخاصة به (⁦{kinds}⁩). استخدم لوحة المفاتيح أو اللمس هنا.",
+  "inputplumber.ambiguous": "عدة وحدات تحكم افتراضية تشبه التي يعلن عنها ⁦InputPlumber⁩، لذلك لا يستخدم ⁦Omarchy Game Mode⁩ أيًّا منها. استخدم لوحة المفاتيح أو اللمس هنا.",
+  "inputplumber.hidden": "الجهاز ⁦{name}⁩ موجود، لكن ⁦InputPlumber⁩ يخفيه ولا يستطيع ⁦Omarchy Game Mode⁩ قراءته.",
+  "inputplumber.evdevOnly": "يقرأ وحدة التحكم هذه عبر ⁦evdev⁩ فقط.",
+  "inputplumber.noR3": "لا يبلّغ عن نقرة العصا اليمنى (⁦R3⁩).",
+  "inputplumber.padName": "⁦{name}⁩ (⁦InputPlumber⁩)"
 }

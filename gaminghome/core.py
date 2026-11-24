@@ -23,6 +23,8 @@ BTN_SOUTH, BTN_EAST = 304, 305
 BTN_TL, BTN_TR = 310, 311
 BTN_SELECT, BTN_START, BTN_MODE = 314, 315, 316
 ABS_X, ABS_Y, ABS_HAT0X, ABS_HAT0Y = 0, 1, 16, 17
+DIRECTION_AXES = (ABS_X, ABS_Y, ABS_HAT0X, ABS_HAT0Y)
+NAV_BUTTONS = frozenset({BTN_SOUTH, BTN_EAST, BTN_TL, BTN_TR, BTN_SELECT, BTN_START, BTN_MODE})
 
 GAME, DESKTOP, AUTO = "game", "desktop", "auto"
 MODES = (AUTO, GAME, DESKTOP)
@@ -511,11 +513,21 @@ class ControllerInterpreter:
 
     * Navigation (D-pad / left stick) emits on the edge and repeats only
       while a direction is actively held; timers exist only during a hold.
+      A direction still held when the state is adopted again goes on
+      repeating, without a new edge.
     * A/B/LB/RB fire on press, Menu fires on release when not part of a chord.
     * View+Menu held together for ``chord_ms`` emits HOME once per hold.
     * Guide (BTN_MODE) is ignored entirely.
+    * A device added with ``guide_chords`` is the virtual gamepad of an input
+      stack that sends a handheld's vendor buttons as Guide chords. On it,
+      every button or direction pressed while Guide is held is ignored as
+      well, until it is let go, and Guide ends a pending Menu or Home hold.
+      It is followed by its events alone, so focus does not resync it. Its
+      state is adopted on connect and after dropped events only, and then
+      whatever is held other than Guide waits for its release.
     * SYN_DROPPED discards state until the next SYN_REPORT, after which the
-      caller resyncs held buttons without generating actions.
+      caller resyncs held buttons without generating actions. ``distrust``
+      does the same for a device whose state could not be read.
     """
 
     STICK_PRESS = 0.55
@@ -532,8 +544,8 @@ class ControllerInterpreter:
         self.nav_enabled = False
         self.devices: dict[str, _DeviceState] = {}
 
-    def add_device(self, device_id: str):
-        self.devices.setdefault(device_id, _DeviceState())
+    def add_device(self, device_id: str, guide_chords: bool = False):
+        self.devices.setdefault(device_id, _DeviceState()).guide_chords = guide_chords
 
     def remove_device(self, device_id: str):
         state = self.devices.pop(device_id, None)
@@ -542,7 +554,21 @@ class ControllerInterpreter:
 
     def reset(self):
         for state in self.devices.values():
+            guide, dropping = BTN_MODE in state.pressed, state.dropping
             self._clear(state)
+            if state.guide_chords:
+                # A reset tells nothing about such a pad: Guide is still down, so what is
+                # pressed with it still belongs to its chord, and a state that has to be
+                # read again still has to be.
+                if guide:
+                    state.pressed.add(BTN_MODE)
+                state.dropping = dropping
+
+    def distrust(self, device_id: str):
+        """Forget a device whose state could not be read, as SYN_DROPPED does: the next SYN_REPORT reads again."""
+        state = self.devices.setdefault(device_id, _DeviceState())
+        self._clear(state)
+        state.dropping = True
 
     def set_range(self, device_id: str, code: int, minimum: int, maximum: int, flat: int = 0):
         """Use the kernel's EVIOCGABS range: sticks may be 0..65535, not signed."""
@@ -560,13 +586,15 @@ class ControllerInterpreter:
                 continue
             # Adopt the physical state now (held buttons stay consumed, so a
             # stale A never activates); a direction still held resumes
-            # repeating after the normal delay instead of stalling.
-            if self.on_resync:
+            # repeating after the normal delay instead of stalling. A pad that
+            # sends Guide chords is followed event by event whether Home is
+            # focused or not: reading it would drop the Guide edges still
+            # queued for it, which nothing else records.
+            if self.on_resync and not state.guide_chords:
                 self.on_resync(device_id)
                 state = self.devices.get(device_id)
-            if state is not None and state.direction is not None:
-                direction = state.direction
-                state.repeat_token = self.schedule(self.repeat_delay_ms, lambda d=device_id, dr=direction: self._repeat(d, dr))
+            if state is not None and state.direction is not None and state.repeat_token is None:
+                self._repeat_later(device_id, state)
 
     def held(self) -> bool:
         return any(s.pressed or s.direction for s in self.devices.values())
@@ -574,12 +602,40 @@ class ControllerInterpreter:
     def sync_state(self, device_id: str, pressed: set[int], axes: dict[int, int]):
         """Adopt the kernel's current state without emitting actions."""
         state = self.devices.setdefault(device_id, _DeviceState())
+        if state.guide_chords:
+            self._sync_guide_chords(state, set(pressed), axes)
+        else:
+            self._clear(state)
+            state.pressed = set(pressed) & NAV_BUTTONS
+            for code, value in axes.items():
+                self._set_axis(state, code, value)
+            state.direction = self._direction(state)
+            state.chord_consumed = {BTN_SELECT, BTN_START} <= state.pressed
+        if state.direction is not None and self.nav_enabled:
+            # Still held, not pressed anew: no edge, but it goes on repeating.
+            self._repeat_later(device_id, state)
+
+    def _sync_guide_chords(self, state, keys, axes):
+        """Adopt the state of a pad that sends Guide chords after a gap in what was seen of it.
+
+        That is on connect and after dropped events. Reading the keys also
+        drops the key events still queued, Guide's among them, so nothing
+        tells whether what is held now was pressed for a Guide chord: after a
+        gap, whatever is held waits for its release. Guide itself is tracked.
+        A direction ignored before keeps its side while the stick is in its
+        hysteresis band or the axis is not read.
+        """
         self._clear(state)
-        state.pressed = set(pressed) & {BTN_SOUTH, BTN_EAST, BTN_TL, BTN_TR, BTN_SELECT, BTN_START, BTN_MODE}
-        state.chord_consumed = {BTN_SELECT, BTN_START} <= state.pressed
+        for code, sign in state.suppressed_directions:
+            values, index = self._slot(state, code)
+            values[index] = sign
         for code, value in axes.items():
             self._set_axis(state, code, value)
+        state.suppressed = keys - {BTN_MODE}
+        state.suppressed_directions = self._pushed_directions(state)
+        state.pressed = keys & {BTN_MODE}
         state.direction = self._direction(state)
+        state.chord_consumed = {BTN_SELECT, BTN_START} <= state.pressed
 
     def feed(self, device_id: str, etype: int, code: int, value: int):
         state = self.devices.setdefault(device_id, _DeviceState())
@@ -596,8 +652,11 @@ class ControllerInterpreter:
             return
         if etype == EV_KEY:
             self._key(device_id, state, code, value)
-        elif etype == EV_ABS and code in (ABS_X, ABS_Y, ABS_HAT0X, ABS_HAT0Y):
+        elif etype == EV_ABS and code in DIRECTION_AXES:
+            before = self._sign(state, code)
             self._set_axis(state, code, value)
+            if state.guide_chords:
+                self._guide_direction(state, code, before)
             self._update_direction(device_id, state)
 
     # ---- buttons --------------------------------------------------------
@@ -605,6 +664,8 @@ class ControllerInterpreter:
         if value == 2:
             return
         pressed = bool(value)
+        if state.guide_chords and self._in_guide_chord(state, code, pressed):
+            return
         if pressed:
             if code in state.pressed:
                 return
@@ -614,6 +675,12 @@ class ControllerInterpreter:
                 return
             state.pressed.discard(code)
         if code == BTN_MODE:
+            if pressed and state.guide_chords:
+                # Guide ends a Menu press or a Home hold that is under way.
+                state.menu_candidate = False
+                if state.chord_token is not None:
+                    self._cancel_chord(state)
+                    state.chord_consumed = True
             return
         if code in (BTN_SELECT, BTN_START):
             self._chord(device_id, state, pressed)
@@ -629,6 +696,18 @@ class ControllerInterpreter:
         action = {BTN_SOUTH: ACTIVATE, BTN_EAST: BACK, BTN_TL: PREV_TAB, BTN_TR: NEXT_TAB}.get(code)
         if action:
             self._nav(action)
+
+    @staticmethod
+    def _in_guide_chord(state, code, pressed) -> bool:
+        """A button pressed while Guide is held belongs to that chord until it is let go: it is not tracked."""
+        if code in state.suppressed:
+            if not pressed:
+                state.suppressed.discard(code)
+            return True
+        if pressed and code != BTN_MODE and BTN_MODE in state.pressed and code not in state.pressed:
+            state.suppressed.add(code)
+            return True
+        return False
 
     def _chord(self, device_id, state, pressed):
         both = {BTN_SELECT, BTN_START} <= state.pressed
@@ -674,11 +753,41 @@ class ControllerInterpreter:
                 state.stick[index] = 0
 
     @staticmethod
-    def _direction(state):
-        for x, y in (state.hat, state.stick):
-            if y:
+    def _slot(state, code):
+        """The list that holds one axis of the D-pad or stick, and the index of that axis in it."""
+        values = state.hat if code in (ABS_HAT0X, ABS_HAT0Y) else state.stick
+        return values, 0 if code in (ABS_HAT0X, ABS_X) else 1
+
+    @classmethod
+    def _sign(cls, state, code):
+        """Which way one axis of the D-pad or stick is pushed: -1, 0 or 1."""
+        values, index = cls._slot(state, code)
+        return values[index]
+
+    @classmethod
+    def _pushed_directions(cls, state):
+        pushed = ((code, cls._sign(state, code)) for code in DIRECTION_AXES)
+        return {(code, sign) for code, sign in pushed if sign}
+
+    @classmethod
+    def _guide_direction(cls, state, code, before):
+        """A direction pushed while Guide is held belongs to that chord until it is let go.
+
+        Each one is kept by axis and sign, so another direction that wins over
+        it while both are held cannot pass it on when that one is let go.
+        """
+        after = cls._sign(state, code)
+        state.suppressed_directions -= {(code, -1), (code, 1)} - {(code, after)}
+        if after and after != before and BTN_MODE in state.pressed:
+            state.suppressed_directions.add((code, after))
+
+    @classmethod
+    def _direction(cls, state):
+        for x_code, y_code in ((ABS_HAT0X, ABS_HAT0Y), (ABS_X, ABS_Y)):
+            x, y = cls._sign(state, x_code), cls._sign(state, y_code)
+            if y and (y_code, y) not in state.suppressed_directions:
                 return UP if y < 0 else DOWN
-            if x:
+            if x and (x_code, x) not in state.suppressed_directions:
                 return LEFT if x < 0 else RIGHT
         return None
 
@@ -691,6 +800,11 @@ class ControllerInterpreter:
         if direction is None or not self.nav_enabled:
             return
         self.emit(direction)
+        self._repeat_later(device_id, state)
+
+    def _repeat_later(self, device_id, state):
+        """Repeat the direction held now after the normal delay."""
+        direction = state.direction
         state.repeat_token = self.schedule(self.repeat_delay_ms, lambda: self._repeat(device_id, direction))
 
     def _repeat(self, device_id, direction):
@@ -713,6 +827,7 @@ class ControllerInterpreter:
             self.emit(action)
 
     def _clear(self, state):
+        # A Guide chord's buttons and directions stay ignored: only a release or a lost device ends them.
         self._cancel_chord(state)
         self._cancel_repeat(state)
         state.pressed.clear()
@@ -726,7 +841,10 @@ class ControllerInterpreter:
 
 class _DeviceState:
     def __init__(self):
+        self.guide_chords = False
         self.pressed: set[int] = set()
+        self.suppressed: set[int] = set()
+        self.suppressed_directions: set[tuple[int, int]] = set()
         self.dropping = False
         self.hat = [0, 0]
         self.stick = [0, 0]

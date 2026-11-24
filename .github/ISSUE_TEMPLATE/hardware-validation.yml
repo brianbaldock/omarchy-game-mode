@@ -27,7 +27,7 @@ body:
     id: input_stack
     attributes:
       label: Input stack
-      description: Choose the main stack. Mention combinations in the setup field; HHD/InputPlumber compatibility is unverified.
+      description: Choose the main stack. Mention combinations in the setup field. HHD compatibility is unverified; InputPlumber is only read, and its physical validation is pending.
       options:
         - None / direct physical controller
         - HHD
@@ -60,4 +60,4 @@ body:
     id: evidence
     attributes:
       label: Optional redacted evidence
-      description: Short logs or a recording showing only the relevant app. Review status output for private window titles first.
+      description: Paste the output of `omarchy-game-mode doctor --markdown` (redacted before it is printed), short logs or a recording showing only the relevant app. Review status output for private window titles first.

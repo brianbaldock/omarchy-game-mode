@@ -92,5 +92,15 @@
   "app.battlenet.description": "Steam を使わず、Omarchy のランチャーから Battle.net のゲームを開きます。",
   "app.minecraft.description": "このデスクトップ向けの公式 Minecraft Launcher です。",
   "app.moonlight.installHelp": "Moonlight は Omarchy に同梱されているため、ここには別のインストーラーがありません。moonlight コマンドがない場合は、Omarchy の基本セットから moonlight-qt パッケージを入れ直してください。",
-  "app.remote.installHelp": "インストールを選ぶことが確認です。その後 Omarchy は確認済みの greenlight-bin パッケージを追加し、ターミナルでは再度尋ねません。"
+  "app.remote.installHelp": "インストールを選ぶことが確認です。その後 Omarchy は確認済みの greenlight-bin パッケージを追加し、ターミナルでは再度尋ねません。",
+  "inputplumber.device": "InputPlumber {version} が {name} をプロファイル「{profile}」で管理しています。",
+  "inputplumber.reading": "Omarchy Game Mode はその仮想ゲームパッドを読み取るだけで、InputPlumber には何も変更を加えません。",
+  "inputplumber.noDevice": "InputPlumber は動作していますが、コントローラーを管理していません。",
+  "inputplumber.readFailed": "InputPlumber は動作していますが、Omarchy Game Mode はその状態を読み取れませんでした。",
+  "inputplumber.unrecognized": "Omarchy Game Mode はその仮想コントローラーの種類（{kinds}）を認識できません。ここではキーボードかタッチを使ってください。",
+  "inputplumber.ambiguous": "InputPlumber が通知したものと見分けのつかない仮想コントローラーが複数あるため、Omarchy Game Mode はどれも使いません。ここではキーボードかタッチを使ってください。",
+  "inputplumber.hidden": "{name} は接続されていますが、InputPlumber が隠しているため Omarchy Game Mode からは読み取れません。",
+  "inputplumber.evdevOnly": "このコントローラーは evdev 経由でのみ読み取られています。",
+  "inputplumber.noR3": "右スティックの押し込み（R3）は報告されていません。",
+  "inputplumber.padName": "{name}（InputPlumber）"
 }
