@@ -172,16 +172,18 @@ and the buttons keep their room.
   reconnects by itself whenever it is on and in range; Forget, which asks first, removes
   it and stops that.
 - **Controller, keyboard, mouse and touch.** The D-pad moves between the controls and A
-  presses one. B and Escape take back the Forget question, or give up a pairing that has
-  not paired the device yet (Cancel then reads "Canceling…" until Bluetooth lets go, which
-  can take up to ten seconds), and otherwise close the sheet; Menu closes it at once.
-  Closing the sheet, whichever way, ends the search and gives up such a pairing too; once
-  the device is paired, the pairing goes on to connect it, as Connect does. On the digit
-  pad the D-pad moves between the keys; a keyboard's digits and Backspace type and erase,
-  and Enter answers while the focus is on the pad (on Cancel or Close, Enter presses that
-  button). The pad and the numbers read left to right in every language.
+  presses one. B and Escape take back the Forget question, or give up a pairing while the
+  sheet says "Pairing with …" (Cancel then reads "Canceling…" until Bluetooth lets go,
+  which can take up to ten seconds), and otherwise close the sheet; Menu closes it at once.
+  Closing the sheet, whichever way, ends the search and gives up such a pairing too. If the
+  device had already paired when the pairing was given up, it stays in My devices and the
+  sheet says so, then or the next time it opens, and whether the device will reconnect by
+  itself. A pairing that has got as far as "Connecting to …" goes on, as Connect does. On
+  the digit pad the D-pad moves between the keys; a keyboard's digits and Backspace type
+  and erase, and Enter answers while the focus is on the pad (on Cancel or Close, Enter
+  presses that button). The pad and the numbers read left to right in every language.
 - **When it runs.** Only while Gaming Home is shown. Hiding Gaming Home closes the sheet,
-  ends the search, gives up a pairing that has not paired the device yet and stops looking
+  ends the search, gives up a pairing that is still at "Pairing with …" and stops looking
   at Bluetooth until Gaming Home is shown again. The sheet holds no timer of its own and
   nothing in it moves while nothing changes: "Searching…" is a static line.
 - **Not supported yet:** PINs with letters (the pad has digits only), devices that announce
@@ -193,14 +195,16 @@ How far this has been checked:
 - **Automated tests:** what the button and the sheet show for Bluetooth off, on, connected,
   unreadable and gone; the digit pad (length, leading zeros, Erase, Done); the words of
   every failure in the seven languages; where the focus goes after a change; and, against a
-  scripted Bluetooth stand-in that answers as the real one does (a moment later, with a
-  cancel that takes its time, forgetting everything when stopped), that B, Escape,
-  Close, Menu, another sheet, rebuilding the window and hiding it each end the search and
-  give up a pairing that has not paired the device yet, that one that has goes on
-  connecting, and that a click arriving after the sheet has closed does nothing. The sheet
-  was rendered headless with GTK Broadway in English, German, Japanese and Arabic, at
-  1280x720, 1920x1080 and 1280x600, by a script that fails when the sheet does the wrong
-  thing.
+  scripted Bluetooth stand-in, that B, Escape, Close, Menu, another sheet, rebuilding the
+  window and hiding it each end the search and give up a pairing still at "Pairing with …",
+  that one at "Connecting to …" goes on, that a device that had paired before its pairing
+  was given up is reported, also at the next visit, and that a click arriving after the
+  sheet has closed does nothing. The stand-in copies a few habits of the real service: it
+  reports a change a moment later, it can take its time over a cancel and report one that
+  came after the device had paired, and it forgets everything when stopped. Its timing and
+  its errors are scripted. The sheet was rendered headless with GTK Broadway in English,
+  German, Japanese and Arabic, at 1280x720, 1920x1080 and 1280x600, by a script that fails
+  when the sheet does the wrong thing.
 - **Not yet tested on real devices:** none of this has run against real Bluetooth hardware
   yet: connecting, pairing with each kind of question, the switch, a device that goes away,
   and how the D-pad and touch feel on a handheld.
@@ -214,7 +218,7 @@ How far this has been checked:
 | D-pad / left stick | Move selection (repeats only while held) |
 | LB / RB | Switch Home / Discover |
 | Menu (Start) | Settings, or close Settings or the Bluetooth sheet |
-| B in the Bluetooth sheet | Take back the Forget question or give up a pairing not yet paired, then close the sheet |
+| B in the Bluetooth sheet | Take back the Forget question or give up a pairing at "Pairing with …", then close the sheet |
 | **Hold View + Menu for 0.8 s** | Show Game Mode from anywhere |
 
 Keyboard (arrows, Enter, Escape), mouse and touch work everywhere.

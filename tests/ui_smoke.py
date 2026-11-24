@@ -23,12 +23,14 @@ these states, and checks what the sheet does, so a wrong behaviour stops the run
   btpin      a PIN half entered on the pad  btpasskey  a passkey half entered on the pad
   btpairing  a pairing that is connecting   btfail     a connection that failed
   btpaired   a device paired that did not connect
+  btcancelpaired  a pairing given up just after the device had paired: it stays, and the sheet says so
 
 Every ``bt`` word also checks that each way out of the sheet ends its search (Menu and B closing it, Settings taking
 its place, the window being built again and the window being hidden), and that a click GTK delivers after the sheet
 has closed does nothing (A then B on Search, A then Menu on Pair, Enter then Escape on Search). Giving up a pairing
 is checked once for each way: B in ``btcode``, the window built again in ``btconfirm``, hidden in ``btpin`` and Menu
-in ``btpasskey``; ``btpairing`` checks that a device paired already goes on connecting when the window is built again.
+in ``btpasskey``; ``btpairing`` checks that a device paired already goes on connecting when the window is built again,
+and ``btcancelpaired`` that a pairing given up after the device had paired is told about, then and at the next visit.
 """
 
 import datetime
@@ -63,10 +65,10 @@ BATTERIES = {
     "nobattery": None,
 }
 BLUETOOTH = ("bt", "btoff", "bterror", "btnone", "btscan", "btempty", "btmany", "btdupes", "btforget", "btconfirm",
-             "btcode", "btpin", "btpasskey", "btpairing", "btfail", "btpaired")
+             "btcode", "btpin", "btpasskey", "btpairing", "btfail", "btpaired", "btcancelpaired")
 SEARCHED = ("btscan", "btempty", "btmany", "btdupes", "btconfirm", "btcode", "btpin", "btpasskey", "btpairing",
-            "btpaired")
-PAIRING = ("btconfirm", "btcode", "btpin", "btpasskey", "btpairing", "btpaired")
+            "btpaired", "btcancelpaired")
+PAIRING = ("btconfirm", "btcode", "btpin", "btpasskey", "btpairing", "btpaired", "btcancelpaired")
 
 
 class Stub:
@@ -225,12 +227,17 @@ def play(word, window, source):
         elif word == "btpaired":
             source.stage(bt.STAGE_CONNECT)
             source.fail(bt.UNREACHABLE, paired=True)
+        elif word == "btcancelpaired":
+            window.handle_action(core.BACK)                         # given up while BlueZ still looks at the device,
+            settle()
+            source.finish_cancel(paired=True)                       # which had paired by then
     settle()
 
 
 FIRST_FOCUS = {"bt": sheet.SEARCH, "btoff": sheet.POWER, "bterror": sheet.RETRY, "btforget": f"{sheet.FORGET_NO}3",
                "btconfirm": sheet.NO, "btcode": sheet.CANCEL, "btpin": sheet.PAD_DONE, "btpasskey": sheet.PAD_DONE,
-               "btpairing": sheet.CLOSE, "btfail": f"{sheet.CONNECT}2", "btpaired": sheet.DISMISS}
+               "btpairing": sheet.CLOSE, "btfail": f"{sheet.CONNECT}2", "btpaired": sheet.DISMISS,
+               "btcancelpaired": sheet.DISMISS}
 
 
 def scroll_to_end(window):
@@ -251,6 +258,18 @@ def check_shown(word, window, source):
         check(window._bluetooth.entry.digits == "042", "the pad and the keyboard did not type 0, 4 and 2")
     if word == "btmany":
         check(source.snapshot.truncated, "the source lists every device, so nothing says that more were found")
+    if word == "btcancelpaired":
+        check_cancel_told(window, source)
+
+
+def check_cancel_told(window, source):
+    """A pairing given up after the device had paired leaves it paired: the sheet says so, and lists it."""
+    t, shown = window.runtime.t, texts_in(window._bt_content)
+    check(t("bluetooth.failed.canceledPaired", name="Travel Speaker") in shown
+          and t("bluetooth.failed.canceledPairedHint") in shown,
+          f"nothing says that the device had paired when the pairing was given up: {shown}")
+    speaker = next(device.id for device in source.snapshot.devices if device.name == "Travel Speaker")
+    check(f"{sheet.CONNECT}{speaker}" in window._bt_buttons, "the device that had paired is not in My devices")
 
 
 def middle(window, widget):
@@ -360,6 +379,13 @@ def check_behaviour(word, language, window, source):
         check(window._bluetooth.entry.digits == "", "the digits typed outlived the prompt")
         check(not any("042" in text for text in texts_in(window)), "the digits typed stay in a hidden label")
         window.set_visible(True)
+    elif word == "btcancelpaired":
+        press(window, sheet.CLOSE)
+        window.open_bluetooth()
+        settle()
+        check_cancel_told(window, source)                           # still told at the next visit
+        press(window, sheet.DISMISS)
+        check(sheet.DISMISS not in window._bt_buttons and source.snapshot.failure is None, "Dismiss left the failure")
     elif word == "btpasskey":
         window.handle_action(core.MENU)
         check(window.sheet is None and source.calls[-1] == ("cancel",), "Menu did not give up the pairing")

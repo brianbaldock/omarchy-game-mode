@@ -912,7 +912,7 @@ class HomeWindow(Gtk.ApplicationWindow):
     def _leave_bluetooth(self):
         """Every way the Bluetooth sheet goes away ends here: B, Close, Escape and Menu, another sheet taking its
         place, the window being built again and the window being hidden. Its search ends with it, and so does a
-        pairing that has not paired the device yet.
+        pairing still in its pairing step.
 
         Its widgets go as well. GTK clicks a button a moment after A or Enter and calls that off only when the
         button is unrealized, so a hidden sheet could still act; and nothing typed on the pad stays in a label.
