@@ -197,7 +197,10 @@ What it checks:
   output report. On Linux 7.2 the ROG Xbox Ally's built-in pad declares one (report 0x0D,
   laid out like the Xbox One controller's) but the kernel offers no force feedback for
   it, so games cannot make it vibrate through evdev. The doctor verifies these two facts,
-  both read from sysfs, and not that any program can make the controller vibrate.
+  both read from sysfs, and not that any program can make the controller vibrate. A
+  direct test on one RC73YA, writing to that report outside the doctor, made the left
+  and right grip motors vibrate through the third and fourth magnitudes; the first two,
+  which the Xbox One layout gives to the triggers, produced nothing.
 
 What it never does:
 
@@ -301,9 +304,11 @@ the reason.
 
 On the ROG Xbox Ally the small buttons (Armoury Crate, top left; Library, top right) and
 the back paddles arrive as keyboard keys on a node only root can read, so without a
-handheld daemon the test may see nothing for them. It then marks them not tested instead
-of failed and prints the command that shows them, `sudo evtest` with each such node it
-found (for example `sudo evtest /dev/input/event5`); it never runs it.
+handheld daemon the test may see nothing for them. On one RC73YA a press test run as
+root saw the Armoury Crate button as `KEY_F16` and a back paddle as `KEY_F15` on one
+interface, and the Library button as `KEY_F22` on another. The test marks them not
+tested instead of failed and prints the command that shows them, `sudo evtest` with
+each such node it found (for example `sudo evtest /dev/input/event5`); it never runs it.
 
 Nothing about your controller is assumed. At the end the test lists where it differs
 from an Xbox-style pad on Linux, for example an Xbox button that sends the View code (so
