@@ -584,15 +584,19 @@ class LifecycleTest(BusCase):
 
     def test_while_stopped_nothing_is_heard_asked_or_told(self):
         fake = self.fake()
+        fake.deny = True
         source = self.ready()
-        source.stop()
+        source.set_profile(BALANCED)
+        self.assertTrue(pump(lambda: source.snapshot.failure is not None))
+        source.stop()                                                  # the failure goes, and nobody is told
         told, calls = len(self.seen), len(fake.calls)
         fake.external(SAVER)
-        source.retry()
-        source.dismiss()
+        for operation in (source.retry, source.dismiss, lambda: source.set_profile(SAVER)):
+            operation()
         self.assertFalse(pump(timeout=0.08))
         self.assertEqual((len(self.seen), len(fake.calls), source.snapshot.active, source.owner),
                          (told, calls, PERFORMANCE, None))
+        self.assertEqual((source.snapshot.failure, source.snapshot.pending), (None, ""))
 
     def test_what_was_last_read_stays_across_stop_and_start_so_the_header_does_not_blink(self):
         fake = self.fake()
