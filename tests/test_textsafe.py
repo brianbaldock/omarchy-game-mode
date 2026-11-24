@@ -28,6 +28,21 @@ class CleanTextTest(unittest.TestCase):
         self.assertEqual(clean_text("می\u200cخواهم", 32), "می\u200cخواهم")
         self.assertEqual(clean_text("🎮", 32), "🎮")
         self.assertEqual(clean_text("ヘッドホン", 32), "ヘッドホン")
+        self.assertEqual(clean_text("👩\u200d💻", 32), "👩\u200d💻")
+
+    def test_every_other_format_character_is_removed(self):
+        hidden = ("\U000e0001\U000e0041\U000e007f"     # tags
+                  "\u00ad"                              # a soft hyphen
+                  "\ufff9\ufffa\ufffb"                  # an interlinear annotation
+                  "\u206a\u206b\u206c\u206d\u206e\u206f"
+                  "\u180e\u2061\u2064\u0600\U0001bca0")
+        self.assertEqual(clean_text("Pa" + hidden + "d", 32), "Pad")
+
+    def test_at_most_three_combining_marks_stay_in_a_row(self):
+        self.assertEqual(clean_text("e" + "\u0301" * 50 + "x", 32), "e\u0301\u0301\u0301x")
+        self.assertEqual(clean_text("a" + "\u20dd" * 5, 32), "a\u20dd\u20dd\u20dd")         # enclosing ones too
+        self.assertEqual(clean_text("Vie\u0302\u0323t", 32), "Vie\u0302\u0323t")            # written with two
+        self.assertEqual(clean_text("e\u0301\u0301\u0301\u200b\u0301 e\u0301", 32), "e\u0301\u0301\u0301 e\u0301")
 
     def test_anything_that_is_not_a_string_gives_nothing(self):
         for value in (None, 7, b"abc", ["a"]):
