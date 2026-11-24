@@ -13,3 +13,8 @@ For controller changes, distinguish automated checks from physical device testin
 
 Note changes to input ownership, mapper restoration, startup, permissions or
 dependencies. Identify borrowed code/assets and their license, if any.
+
+## Changelog
+
+Added a line under `## [Unreleased]` in CHANGELOG.md, or say why users will not see
+this change (documentation, tests, internal).

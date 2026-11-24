@@ -49,6 +49,7 @@
           <li><a href="#platforms">Platforms</a></li>
           <li><a href="#controls">Controls</a></li>
           <li><a href="#install">Install</a></li>
+          <li><a href="changelog.html">What’s new</a></li>
           <li><a href="#faq">FAQ</a></li>
         </ul>
       </nav>
@@ -82,6 +83,10 @@
           <a class="btn btn-primary" href="https://github.com/brianbaldock/omarchy-game-mode">View on GitHub<svg class="icon" aria-hidden="true" focusable="false"><use href="#i-arrow"/></svg></a>
           <a class="btn btn-secondary" href="#install">Try the preview</a>
         </div>
+
+        <!-- release:hero:start -->
+        <p class="hero-release"><span class="release-tag">v0.2.1</span><time datetime="2026-11-24">Nov 24, 2026</time><a href="changelog.html">What changed</a><a href="https://github.com/brianbaldock/omarchy-game-mode/releases/tag/v0.2.1">Release notes<svg class="icon" aria-hidden="true" focusable="false"><use href="#i-external"/></svg></a></p>
+        <!-- release:hero:end -->
 
         <ul class="hero-meta" aria-label="At a glance">
           <li>10 platforms</li>
@@ -483,7 +488,8 @@
             <li><span>Ten-platform catalog</span><span class="badge is-done">In the preview</span></li>
             <li><span>Seven draft languages, including Arabic</span><span class="badge is-progress">Native review welcome</span></li>
             <li><span>Validation on handheld hardware</span><span class="badge is-progress">In progress</span></li>
-            <li><span>Packaged release and stable version</span><span class="badge is-later">Not yet</span></li>
+            <li><span>Packaged releases: Arch package and source archive</span><span class="badge is-done">Since 0.2.0</span></li>
+            <li><span>Stable version (1.0)</span><span class="badge is-later">Not yet</span></li>
             <li><span>List of tested devices</span><span class="badge is-later">After validation</span></li>
           </ul>
           <p>Help with <a href="https://github.com/brianbaldock/omarchy-game-mode/issues?q=is%3Aissue%20is%3Aopen%20label%3A%22help%20wanted%22">one small testing or review task</a>. Read the <a href="https://github.com/brianbaldock/omarchy-game-mode/blob/main/CONTRIBUTING.md">contribution guide</a>; hardware is not required for every task.</p>
@@ -496,15 +502,24 @@
         <div class="section-head">
           <div>
             <h2 id="install-title">Try the preview.</h2>
-            <p class="lede">There’s no packaged release or stable version yet. The preview runs from source on Omarchy while hardware validation continues.</p>
+            <p class="lede">Releases are packaged for Arch and Omarchy. It is still a preview while hardware validation continues, so expect rough edges and read what changed before you update.</p>
           </div>
           <a class="head-link" href="https://github.com/brianbaldock/omarchy-game-mode">Setup details on GitHub<svg class="icon" aria-hidden="true" focusable="false"><use href="#i-arrow"/></svg></a>
         </div>
         <div class="install-grid">
-          <div class="card">
-            <h3>Run it from source</h3>
-            <pre class="code" tabindex="0"><code><span class="line">git clone https://github.com/brianbaldock/omarchy-game-mode.git</span><span class="line">cd omarchy-game-mode</span><span class="line">python3 omarchy-game-mode.py</span></code></pre>
-            <p class="note">Needs Python 3, PyGObject and GTK 4 (<code>python-gobject</code> and <code>gtk4</code> on Arch). Hyprland enables window tracking and game handoff; AntiMicroX is optional.</p>
+          <div class="install-stack">
+            <!-- release:install:start -->
+            <div class="card">
+              <h3>Install the latest release</h3>
+              <pre class="code" tabindex="0"><code><span class="line">curl -LO https://github.com/brianbaldock/omarchy-game-mode/releases/download/v0.2.1/omarchy-game-mode-0.2.1-1-any.pkg.tar.zst</span><span class="line">curl -LO https://github.com/brianbaldock/omarchy-game-mode/releases/download/v0.2.1/SHA256SUMS</span><span class="line">sha256sum -c --ignore-missing SHA256SUMS</span><span class="line">sudo pacman -U omarchy-game-mode-0.2.1-1-any.pkg.tar.zst</span></code></pre>
+              <p class="note">Releases are Arch packages built from a tagged source archive, with checksums. Run <code>omarchy-game-mode quit</code> afterwards so the new version starts, and read <a href="changelog.html">what changed</a> first.</p>
+            </div>
+            <!-- release:install:end -->
+            <div class="card">
+              <h3>Run it from source</h3>
+              <pre class="code" tabindex="0"><code><span class="line">git clone https://github.com/brianbaldock/omarchy-game-mode.git</span><span class="line">cd omarchy-game-mode</span><span class="line">python3 omarchy-game-mode.py</span></code></pre>
+              <p class="note">Needs Python 3, PyGObject and GTK 4 (<code>python-gobject</code> and <code>gtk4</code> on Arch). Hyprland enables window tracking and game handoff; AntiMicroX is optional.</p>
+            </div>
           </div>
           <div class="card">
             <h3>Good to know</h3>
@@ -519,6 +534,34 @@
         </div>
       </div>
     </section>
+
+    <!-- release:whatsnew:start -->
+    <section id="whats-new" class="section" aria-labelledby="whats-new-title">
+      <div class="container">
+        <div class="section-head">
+          <div>
+            <h2 id="whats-new-title">What’s new.</h2>
+            <p class="lede">Version 0.2.1 is the latest release. The changelog lists every version, newest first: what was added, changed and fixed.</p>
+          </div>
+          <a class="head-link" href="changelog.html">Full changelog<svg class="icon" aria-hidden="true" focusable="false"><use href="#i-arrow"/></svg></a>
+        </div>
+        <div class="card release-card">
+          <div class="release-card-head">
+            <h3>0.2.1</h3>
+            <time datetime="2026-11-24">Nov 24, 2026</time>
+            <span class="badge is-done">Latest</span>
+          </div>
+          <section class="change-group">
+            <h4>Fixed</h4>
+            <ul class="change-list">
+              <li>The doctor no longer tells a ROG Xbox Ally owner to install InputPlumber, or warns that apps get the raw controller, when the udev entry already gives the pad the standard button codes (<a href="https://github.com/brianbaldock/omarchy-game-mode/pull/16">#16</a>). On the Xbox Ally boards a pad that is still not standard is pointed to the udev entry; other handhelds keep the InputPlumber advice.</li>
+            </ul>
+          </section>
+          <p class="note"><a href="https://github.com/brianbaldock/omarchy-game-mode/releases/tag/v0.2.1">Release notes and downloads on GitHub</a></p>
+        </div>
+      </div>
+    </section>
+    <!-- release:whatsnew:end -->
 
     <section id="related" class="section" aria-labelledby="related-title">
       <div class="container">
@@ -595,6 +638,7 @@
       <nav class="footer-links" aria-label="Project links">
         <ul>
           <li><a href="https://github.com/brianbaldock/omarchy-game-mode">Source on GitHub</a></li>
+          <li><a href="changelog.html">What’s new</a></li>
           <li><a href="https://github.com/brianbaldock/omarchy-game-mode/issues">Issues</a></li>
           <li><a href="https://github.com/brianbaldock/omarchy-game-mode/blob/main/LICENSE">MIT License</a></li>
           <li><a href="https://github.com/brianbaldock/omarchy-game-mode/security/policy">Security policy</a></li>
