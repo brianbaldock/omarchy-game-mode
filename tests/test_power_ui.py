@@ -896,6 +896,15 @@ class WindowTest(unittest.TestCase):
         self.assertNotIn("set_sensitive", "".join(ast.get_source_segment(self.source_text, self.methods[name])
                                                   for name in self.methods if name.startswith("_pw_")))
 
+    def test_a_dimmed_choice_fades_its_content_and_never_its_focus_ring(self):
+        # The ring is the option's own border and shadow, so fading the option would fade the ring as well, and the
+        # D-pad still moves onto a dimmed option. The Bluetooth sheet has a rule of its own.
+        css = re.sub(r"/\*.*?\*/", "", self.ui.CSS.template, flags=re.S)
+        fading = [selector.strip() for selectors, body in re.findall(r"([^{}]+)\{([^}]*)\}", css)
+                  if "opacity" in body for selector in selectors.split(",")
+                  if "dimmed" in selector and ".gh-bt-sheet" not in selector]
+        self.assertEqual(fading, [".gh-pw-option.dimmed > box"])
+
     def test_the_power_button_sits_between_bluetooth_and_settings_in_the_header_row(self):
         rows = ast.get_source_segment(self.source_text, self.methods["nav_rows"])
         self.assertIn("self.bluetooth_button, self.power_button, self.settings_button]", rows)
