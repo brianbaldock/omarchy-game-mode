@@ -487,7 +487,11 @@ What it checks:
 - **Controller:** which control codes each gamepad lists (read without a handheld daemon,
   the ROG Xbox Ally's built-in pad lists generically numbered buttons and no standard
   right-stick click), InputPlumber, Handheld Daemon and AntiMicroX, and controller
-  interfaces that another daemon has hidden.
+  interfaces that another daemon has hidden. On the ROG Xbox Ally boards a pad that does
+  not list the standard controls is pointed to the udev entry Game Mode ships (see
+  [ASUS ROG Xbox Ally controller layout](#asus-rog-xbox-ally-controller-layout)), not to
+  InputPlumber, which is not a mapping upgrade there; a pad that already lists them is
+  reported as fine.
 - **Vibration:** whether the kernel offers games rumble (`FF_RUMBLE`) on each controller
   and, for a physical controller, whether its HID report descriptor declares a haptics
   output report. On Linux 7.2 the ROG Xbox Ally's built-in pad declares one (report 0x0D,

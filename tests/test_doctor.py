@@ -2352,6 +2352,8 @@ class InputStackTest(InputCase):
         self.assertIn("does not list R3 (BTN_THUMBR)", pads.detail)
         self.assertIn("numbered by a generic driver, so a press can arrive under another button's code", pads.detail)
         self.assertIn("`omarchy-game-mode doctor buttons` shows what each press really sends", pads.remediation)
+        self.assertIn("udev entry that has the kernel report the standard codes", pads.remediation)
+        self.assertNotIn("InputPlumber provides a controller", pads.remediation)
         self.assertEqual(pads.evidence["gamepads"], [{
             "name": "ASUSTeK Computer Inc. N-KEY Device", "node": "event6", "kind": "physical", "bus": "USB",
             "id": "0b05:1b4c", "access": "readable", "missing": ["R3 (BTN_THUMBR)"], "guide": True,
@@ -2360,8 +2362,9 @@ class InputStackTest(InputCase):
         self.assertEqual(verdict.status, Status.WARN)
         self.assertIn("ASUS ROG Xbox Ally: no handheld input daemon is running", verdict.detail)
         self.assertIn("does not list R3 (BTN_THUMBR)", verdict.detail)
-        self.assertIn("`omarchy pkg add inputplumber` then `sudo systemctl enable --now inputplumber.service "
-                      "inputplumber-suspend.service`", verdict.remediation)
+        self.assertIn("udev entry that has the kernel report the standard codes", verdict.remediation)
+        self.assertIn("under \"ASUS ROG Xbox Ally controller layout\"", verdict.remediation)
+        self.assertNotIn("inputplumber.service", verdict.remediation)
         stack = inputstack.check_input_stack(ctx)
         self.assertEqual((stack.status, stack.evidence["inputplumber"], stack.evidence["antimicrox"]),
                          (Status.INFO, False, True))
@@ -2404,11 +2407,13 @@ class InputStackTest(InputCase):
             return evdev.InputDevice("event1", "Pad", "USB", "0000:0000", virtual, frozenset(evdev.parse_bitmap(keys)),
                                      frozenset(evdev.parse_bitmap(PAD_AXES)), access)
         raw, hidden, full = pad(False, ALLY_RAW_KEYS), pad(False, ALLY_RAW_KEYS, "hidden"), pad(True, ELITE_PAD_KEYS)
+        fixed = pad(False, ELITE_PAD_KEYS)  # the built-in pad once a udev entry or a kernel driver numbers it properly
         plumber = inputstack.Stack(inputplumber=True, inputplumber_bus=True, suspend_hook="enabled")
         cases = [
             (None, [raw], inputstack.Stack(), Status.INFO, "not a handheld"),
             (ally, [raw], inputstack.Stack(), Status.WARN, "no handheld input daemon"),
             (ally, [], inputstack.Stack(antimicrox=True), Status.WARN, "no handheld input daemon"),
+            (ally, [fixed], inputstack.Stack(antimicrox=True), Status.INFO, "already lists the standard controls"),
             (ally, [hidden, full], plumber, Status.PASS, "complete virtual controller"),
             (ally, [hidden], plumber, Status.WARN, "no complete virtual controller"),
             (ally, [raw, full], plumber, Status.WARN, "still readable"),
@@ -2422,7 +2427,15 @@ class InputStackTest(InputCase):
             self.assertIn(phrase, outcome.detail)
         untested = inputstack.handheld_verdict(legion, [raw], inputstack.Stack())
         self.assertIn("this project has not tested it", untested.remediation)
-        self.assertNotIn("has not tested", inputstack.handheld_verdict(ally, [raw], inputstack.Stack()).remediation)
+        self.assertIn("inputplumber.service", untested.remediation)
+        self.assertNotIn("udev entry", untested.remediation)
+        shipped = inputstack.handheld_verdict(ally, [raw], inputstack.Stack())
+        self.assertIn("udev entry", shipped.remediation)
+        self.assertNotIn("has not tested", shipped.remediation)
+        self.assertNotIn("inputplumber.service", shipped.remediation)
+        ally_x = devices.known_handheld({"board_name": "RC73XA", "sys_vendor": "ASUSTeK COMPUTER INC."})
+        untested_entry = inputstack.handheld_verdict(ally_x, [raw], inputstack.Stack())
+        self.assertIn("has not tested the entry on this model", untested_entry.remediation)
 
     def test_two_handheld_daemons_conflict_and_no_or_unreadable_pads_are_reported(self):
         both = inputstack.check_input_stack(self.ally(inputplumber=True, hhd=True))
