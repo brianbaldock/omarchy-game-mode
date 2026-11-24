@@ -1,6 +1,7 @@
 """Tests for `omarchy-game-mode doctor`: no network, no devices, no root, no GTK."""
 
 import collections
+import gc
 import heapq
 import io
 import ipaddress
@@ -30,6 +31,23 @@ from gaminghome.doctor.runner import Check
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRATCH = Path(__file__).resolve().parent / "scratch" / "doctor"
+
+
+def open_descriptors() -> set[str]:
+    """The numbers of this process's open descriptors, without the one that listing them opens.
+
+    Garbage from other tests is collected first, so a descriptor it holds cannot be closed between two snapshots.
+    """
+    gc.collect()
+    found = set()
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            target = os.readlink(f"/proc/self/fd/{name}")
+        except OSError:
+            continue  # the listing's own descriptor, already closed
+        if target != f"/proc/{os.getpid()}/fd":
+            found.add(name)
+    return found
 
 # Canary values planted in fake inputs; none may ever reach any output.
 CANARY_SSID = "CanaryNet-5G"
@@ -4115,7 +4133,7 @@ class ButtonCommandTest(InputCase):
     def test_a_failure_while_reading_the_axes_closes_everything_and_restores_the_terminal(self):
         follower, raw_path = self.terminal()
         before, opened = termios.tcgetattr(follower), []
-        descriptors = set(os.listdir("/proc/self/fd"))
+        descriptors = open_descriptors()
 
         class Reader(buttonsio.EvdevReader):
             def __init__(self, _path):
@@ -4130,7 +4148,7 @@ class ButtonCommandTest(InputCase):
             buttonsio.LiveSource([pad], raw_path, follower)
         self.assertEqual(len(opened), 1)
         self.assertEqual(termios.tcgetattr(follower), before)
-        self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors)
+        self.assertEqual(open_descriptors(), descriptors)
 
     def test_event_reader_parses_kernel_events_and_survives_a_node_that_is_not_evdev(self):
         read_end, write_end = os.pipe()
