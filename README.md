@@ -478,11 +478,15 @@ are not accepted. `keyboardCommand` from older experiments is preserved but neve
 executed. With no `keyboardArgs`, Game Mode supplies only monitor-based `-H`/`-L`
 sizes.
 
-In a custom Omarchy Hyprland Lua bindings file, F13-F24 are unbound hardware-key
-candidates by default (unlike `SUPER + K`, which opens keybindings):
+With the default keyboard layouts, most keys that send F13 to F24 arrive under other names:
+F13 is `XF86Tools`, F14 to F18 are `XF86Launch5` to `XF86Launch9`, and F20 to F23 are the
+microphone and touchpad keys that Omarchy binds. So bind such a key by key code, the evdev
+code plus 8, as for the Library button above (`KEY_F13` is 183, so 191), in
+`~/.config/hypr/bindings.lua`; `omarchy menu keybindings --print` lists what is bound
+already:
 
 ```lua
-o.bind("F13", "Toggle touch keyboard", "omarchy-game-mode keyboard toggle")
+o.bind("code:191", "Toggle touch keyboard", "omarchy-game-mode keyboard toggle")
 ```
 
 Hardware-button routing is configured separately. Game Mode exposes
@@ -576,11 +580,11 @@ being recorded: Gaming Home cannot always tell whether Omarchy recorded the choi
 another program changed the profile at the same moment. The command needs no running Game
 Mode, waits for a change still running from an earlier press, and exits 1 with a one-line
 reason when a change fails (for example `denied` from an ssh session, which polkit
-refuses) and 2 on bad usage, so a key can run it. In a custom Omarchy Hyprland Lua
-bindings file:
+refuses) and 2 on bad usage, so a key can run it. For an F14 key (`KEY_F14` is 184, so 192;
+see the touch keyboard's binding above):
 
 ```lua
-o.bind("F14", "Cycle the power profile", "omarchy-game-mode power cycle")
+o.bind("code:192", "Cycle the power profile", "omarchy-game-mode power cycle")
 ```
 
 `omarchy-game-mode doctor` is described in the next section. It always answers in the
