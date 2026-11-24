@@ -136,7 +136,7 @@ class HeaderStatus:
         self.monitor.poll()
 
     def _paint(self, moment):
-        self._on_clock(clock.format_time(moment, self._style), clock.format_date(moment, self._style))
+        self._on_clock(clock.format_time(moment, self._style), clock.format_date(moment))
 
     def _battery_changed(self):
         self._on_battery(self.monitor.battery)

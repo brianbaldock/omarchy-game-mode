@@ -193,7 +193,7 @@ class HeaderStatusTest(unittest.TestCase):
 
     def test_showing_paints_the_time_now_and_arms_one_timer_for_the_next_minute(self):
         self.status.start()
-        self.assertEqual(self.clocks, [("9:41 PM", "Monday, November 23")])
+        self.assertEqual(self.clocks, [("9:41 PM", "Monday, 11/23/26")])
         self.assertEqual(self.timers.delays, [52_750 + SLACK_MS])
         self.assertEqual((len(self.timers.pending), self.monitor.starts, self.monitor.running), (1, 1, True))
 
@@ -233,7 +233,7 @@ class HeaderStatusTest(unittest.TestCase):
         self.wall.moment = datetime(2026, 11, 24, 6, 5, 40)           # after a night of suspend
         polls = self.monitor.polls
         self.status.refresh()
-        self.assertEqual(self.clocks[-1], ("6:05 AM", "Tuesday, November 24"))
+        self.assertEqual(self.clocks[-1], ("6:05 AM", "Tuesday, 11/24/26"))
         self.assertEqual((len(self.timers.pending), self.monitor.polls - polls), (1, 1))
         self.assertEqual(self.timers.delays[-1], 20_000 + SLACK_MS)
 
@@ -257,7 +257,7 @@ class HeaderStatusTest(unittest.TestCase):
         self.assertEqual((len(self.timers.pending), len(self.timers.delays), self.monitor.starts, self.monitor.stops),
                          (1, timers, starts, stops))
         self.assertEqual(self.batteries[-1], Battery(78, DISCHARGING, 28173))
-        self.assertEqual(self.clocks[-1], ("9:41 PM", "Monday, November 23"))
+        self.assertEqual(self.clocks[-1], ("9:41 PM", "Monday, 11/23/26"))
 
     def test_repainting_a_window_that_is_not_shown_starts_nothing(self):
         self.status.repaint()

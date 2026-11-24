@@ -9,21 +9,21 @@ import locale
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from fakes.clockwork import Timers, Wall, posix_time
 from gaminghome import clock
 from gaminghome.clock import (SLACK_MS, ClockStyle, MinuteTicker, conversions, format_date, format_time,
                               ms_until_next_minute, system_style, uses_twelve_hour)
 
-# What glibc says for these locales (locale -k LC_TIME): t_fmt, t_fmt_ampm, d_fmt, am, pm.
-EN_US = dict(time_format="%r", twelve_hour_format="%I:%M:%S %p", date_format="%m/%d/%Y", am="AM", pm="PM")
-EN_GB = dict(time_format="%T", twelve_hour_format="%I:%M:%S %p", date_format="%d/%m/%y", am="am", pm="pm")
-DE_DE = dict(time_format="%T", twelve_hour_format="", date_format="%d.%m.%Y", am="", pm="")
-JA_JP = dict(time_format="%H時%M分%S秒", twelve_hour_format="%p%I時%M分%S秒", date_format="%Y年%m月%d日", am="午前", pm="午後")
-KO_KR = dict(time_format="%p %I시 %M분 %S초", twelve_hour_format="%p %I시 %M분 %S초", date_format="%Y년 %m월 %d일", am="오전",
-             pm="오후")
-AR_SA = dict(time_format="%I:%M:%S %p", twelve_hour_format="%I:%M:%S %p", date_format="%d/%m/%Y", am="ص", pm="م")
-POSIX = dict(time_format="%H:%M:%S", twelve_hour_format="", date_format="%m/%d/%y", am="AM", pm="PM")
+# What glibc says for these locales (locale -k LC_TIME): t_fmt, t_fmt_ampm, am, pm.
+EN_US = dict(time_format="%r", twelve_hour_format="%I:%M:%S %p", am="AM", pm="PM")
+EN_GB = dict(time_format="%T", twelve_hour_format="%I:%M:%S %p", am="am", pm="pm")
+DE_DE = dict(time_format="%T", twelve_hour_format="", am="", pm="")
+JA_JP = dict(time_format="%H時%M分%S秒", twelve_hour_format="%p%I時%M分%S秒", am="午前", pm="午後")
+KO_KR = dict(time_format="%p %I시 %M분 %S초", twelve_hour_format="%p %I시 %M분 %S초", am="오전", pm="오후")
+AR_SA = dict(time_format="%I:%M:%S %p", twelve_hour_format="%I:%M:%S %p", am="ص", pm="م")
+POSIX = dict(time_format="%H:%M:%S", twelve_hour_format="", am="AM", pm="PM")
 
 
 def at(hour, minute=0, second=0, microsecond=0, **date):
@@ -56,7 +56,7 @@ class TwelveHourTest(unittest.TestCase):
     def test_nothing_in_the_input_can_make_it_raise(self):
         for junk in (None, "", "%", "%%", "%-", "%E", "plain text", "\u0000%I"):
             uses_twelve_hour(junk)
-            ClockStyle.from_formats(time_format=junk, date_format=junk, am=None, pm=None)
+            ClockStyle.from_formats(time_format=junk, am=None, pm=None)
 
 
 class StyleTest(unittest.TestCase):
@@ -68,14 +68,6 @@ class StyleTest(unittest.TestCase):
         self.assertTrue(ClockStyle.from_formats("%r", "%p %I:%M:%S").marker_first)
         self.assertFalse(ClockStyle.from_formats("%r", "").marker_first)
         self.assertFalse(ClockStyle.from_formats(**DE_DE).marker_first)         # 24 hours: no marker at all
-
-    def test_the_day_comes_before_the_month_where_the_locale_writes_it_so(self):
-        for formats, day_first in ((EN_US, False), (EN_GB, True), (DE_DE, True), (JA_JP, False), (KO_KR, False),
-                                   (AR_SA, True), (POSIX, False)):
-            self.assertEqual(ClockStyle.from_formats(**formats).day_first, day_first, formats["date_format"])
-        self.assertFalse(ClockStyle.from_formats(date_format="").day_first)
-        self.assertFalse(ClockStyle.from_formats(date_format="%Y").day_first)
-        self.assertTrue(ClockStyle.from_formats(date_format="%e %b %Y").day_first)
 
     def test_markers_that_the_locale_leaves_empty_fall_back_to_am_and_pm(self):
         style = ClockStyle.from_formats(time_format="%r", am="", pm="  ")
@@ -117,11 +109,29 @@ class FormatTest(unittest.TestCase):
         self.assertEqual(format_time(at(21, 41), ClockStyle.from_formats(**AR_SA)), "9:41 م")
         self.assertEqual(format_time(at(21, 41), ClockStyle(twelve_hour=True, am="a.m.", pm="p.m.")), "9:41 p.m.")
 
-    def test_the_date_is_weekday_month_and_day_in_the_locales_order(self):
+    def test_the_date_is_the_weekday_and_the_locales_own_date(self):
         with posix_time():
-            self.assertEqual(format_date(at(21, 41), ClockStyle()), "Monday, November 23")
-            self.assertEqual(format_date(at(21, 41), ClockStyle(day_first=True)), "Monday, 23 November")
-            self.assertEqual(format_date(at(0, 0, day=8, month=3), ClockStyle()), "Sunday, March 8")   # no zero padding
+            self.assertEqual(format_date(at(21, 41)), "Monday, 11/23/26")
+            self.assertEqual(format_date(at(0, 0, day=8, month=3)), "Sunday, 03/08/26")
+
+    def test_the_wording_and_the_order_are_the_locales_to_choose(self):
+        # What locales that are not installed here answer for the same two requests, in their own words and order.
+        class Locale:
+            def __init__(self, weekday, date):
+                self.answers = {"%A": weekday, "%x": date}
+
+            def strftime(self, pattern):
+                return self.answers[pattern]
+
+        for weekday, date, text in (("Montag", "23.11.2026", "Montag, 23.11.2026"),
+                                    ("lunes", "23/11/26", "lunes, 23/11/26"),
+                                    ("月曜日", "2026年11月23日", "月曜日, 2026年11月23日")):
+            self.assertEqual(format_date(Locale(weekday, date)), text)
+
+    def test_a_date_that_already_names_the_weekday_does_not_get_it_twice(self):
+        # glibc's ar_SA writes its date as "%A %d %B %Y".
+        arabic = "الإثنين 23 نوفمبر 2026"
+        self.assertEqual(format_date(SimpleNamespace(strftime={"%A": "الإثنين", "%x": arabic}.get)), arabic)
 
     def test_the_minute_is_never_rounded_up_by_the_seconds(self):
         style = ClockStyle(twelve_hour=True)

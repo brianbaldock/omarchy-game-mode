@@ -55,9 +55,10 @@ game.
 
 - **Clock.** Hour and minute, no seconds. It counts hours the way the system's locale does
   and there is no setting for it: `en_US` has a 12-hour clock (`9:41 PM`), `de_DE` a
-  24-hour one (`21:41`). The tooltip gives the date as weekday, month and day. The names
-  come from the system locale, not from the language chosen in Settings, and the day comes
-  before the month where the locale's short date writes it so.
+  24-hour one (`21:41`). The tooltip gives the weekday and the date as the system locale
+  writes them (`Monday, 11/23/2026` in `en_US`, `Montag, 23.11.2026` in `de_DE`). Those
+  words and their order come from the system locale, not from the language chosen in
+  Settings.
 - **Battery.** An icon filled to the charge, and the percentage (`78%`). A bolt and a
   green icon mean it is charging, a green icon alone that it is full. While the battery is
   in use the chip turns amber at 20 % or less and red at 10 % or less. The tooltip names

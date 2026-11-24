@@ -18,7 +18,6 @@ DEFAULT_TWELVE_HOUR_FORMAT = "%I:%M:%S %p"
 _CONVERSION = re.compile(r"%[-_0^#]*[0-9]*[EO]?([A-Za-z%])")
 _TWELVE_HOUR = frozenset("rIlpP")   # %r is the locale's own 12-hour time; the rest count to 12 or mark am/pm
 _HOUR_12, _MARKER = frozenset("Il"), frozenset("pP")
-_DAY, _MONTH = frozenset("de"), frozenset("mbBh")
 
 
 def conversions(pattern: str) -> list[str]:
@@ -43,20 +42,17 @@ class ClockStyle:
     am: str = "AM"
     pm: str = "PM"
     marker_first: bool = False   # am/pm comes before the time, as in Korean or Chinese
-    day_first: bool = False      # the day comes before the month, as in most of Europe
 
     @classmethod
-    def from_formats(cls, time_format="", twelve_hour_format="", date_format="", am="", pm="") -> "ClockStyle":
-        """Read the style off a locale's formats (``T_FMT``, ``T_FMT_AMPM``, ``D_FMT``) and am/pm markers."""
+    def from_formats(cls, time_format="", twelve_hour_format="", am="", pm="") -> "ClockStyle":
+        """Read the style off a locale's formats (``T_FMT``, ``T_FMT_AMPM``) and am/pm markers."""
         twelve = uses_twelve_hour(time_format)
         if "r" in conversions(time_format):
             time_format = twelve_hour_format or DEFAULT_TWELVE_HOUR_FORMAT
         order = conversions(time_format)
         marker, hour = _first(order, _MARKER), _first(order, _HOUR_12)
-        day, month = _first(conversions(date_format), _DAY), _first(conversions(date_format), _MONTH)
         return cls(twelve_hour=twelve, am=(am or "").strip() or "AM", pm=(pm or "").strip() or "PM",
-                   marker_first=twelve and marker is not None and hour is not None and marker < hour,
-                   day_first=day is not None and month is not None and day < month)
+                   marker_first=twelve and marker is not None and hour is not None and marker < hour)
 
 
 def system_style() -> ClockStyle:
@@ -65,8 +61,8 @@ def system_style() -> ClockStyle:
     if langinfo is None:
         return ClockStyle()
     try:
-        return ClockStyle.from_formats(langinfo(locale.T_FMT), langinfo(locale.T_FMT_AMPM), langinfo(locale.D_FMT),
-                                       langinfo(locale.AM_STR), langinfo(locale.PM_STR))
+        return ClockStyle.from_formats(langinfo(locale.T_FMT), langinfo(locale.T_FMT_AMPM), langinfo(locale.AM_STR),
+                                       langinfo(locale.PM_STR))
     except (AttributeError, ValueError, OSError):
         return ClockStyle()
 
@@ -80,12 +76,13 @@ def format_time(moment, style: ClockStyle) -> str:
     return f"{marker} {clock}" if style.marker_first else f"{clock} {marker}"
 
 
-def format_date(moment, style: ClockStyle) -> str:
-    """Weekday, month and day, with the names of the locale this process runs in."""
-    weekday, month = moment.strftime("%A"), moment.strftime("%B")
-    if style.day_first:
-        return f"{weekday}, {moment.day} {month}"
-    return f"{weekday}, {month} {moment.day}"
+def format_date(moment) -> str:
+    """The weekday and the date as the locale this process runs in writes them: ``Monday, 11/23/2026`` in en_US.
+
+    A locale whose own date already names the weekday (Arabic does) does not get it twice.
+    """
+    weekday, date = moment.strftime("%A"), moment.strftime("%x")
+    return date if weekday in date else f"{weekday}, {date}"
 
 
 def ms_until_next_minute(moment) -> int:
