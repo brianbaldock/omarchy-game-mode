@@ -430,6 +430,7 @@ class BluetoothSheet:
         elif (device := id_in(name, PAIR)) is not None:
             if idle:
                 self._cancelled = None
+                self.forgetting = 0             # the pairing's panel takes the place of the question
                 self.source.pair(device)
         return None
 

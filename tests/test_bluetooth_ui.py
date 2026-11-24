@@ -337,6 +337,16 @@ class ControlsTest(unittest.TestCase):
         visit.sync()
         self.assertEqual(visit.forgetting, 0)
 
+    def test_a_pairing_takes_the_place_of_a_forget_question_and_b_then_gives_up_the_pairing(self):
+        source = world()
+        visit = opened(source)
+        visit.press(sheet.SEARCH)
+        speaker = source.add_device("Speaker", "speaker")
+        visit.press(f"{sheet.FORGET}3")
+        visit.press(f"{sheet.PAIR}{speaker}")
+        self.assertEqual((visit.forgetting, visit.back()), (0, (True, None)))
+        self.assertEqual(source.calls[-1], ("cancel",))
+
     def test_b_gives_up_a_pairing_and_otherwise_lets_the_sheet_close(self):
         source = world()
         visit = opened(source)
