@@ -79,16 +79,18 @@ CONTROLS = (
     Control("rs_down", "Right stick down", "Right stick: pull fully down", "righty", ((AXIS, ABS_RY, 1),)),
     Control("paddle_left", "Left back paddle", "Left back paddle", "paddle2"),
     Control("paddle_right", "Right back paddle", "Right back paddle", "paddle1"),
-    Control("armoury", "Command Center button", "Left button under the screen (Command Center / Armoury Crate), "
-                                                 "short press"),
-    Control("library", "Library button", "Right button under the screen (Library), short press"),
-    Control("armoury_hold", "Command Center button, held", "Left button under the screen again, held for two "
-                                                           "seconds (optional)", hold=True, base="armoury"),
-    Control("library_hold", "Library button, held", "Right button under the screen again, held for two seconds "
-                                                    "(optional)", hold=True, base="library"),
+    Control("armoury", "Armoury Crate button (small, top left)", "Armoury Crate button (small, top left), short press"),
+    Control("library", "Library button (small, top right)", "Library button (small, top right), short press"),
+    Control("armoury_hold", "Armoury Crate button (small, top left), held",
+            "Armoury Crate button (small, top left) again, held for two seconds (optional)", hold=True, base="armoury"),
+    Control("library_hold", "Library button (small, top right), held",
+            "Library button (small, top right) again, held for two seconds (optional)", hold=True, base="library"),
 )
 EXTRA_BUTTONS = frozenset({"paddle_left", "paddle_right", "armoury", "library", "armoury_hold", "library_hold"})
 ASUS_VENDOR = 0x0B05
+# Where the extra buttons go when none of their presses reached a node this test could read.
+ALLY_KEY_NODES = "On the ROG Xbox Ally these buttons arrive as keyboard keys on a node only root can read"
+OTHER_KEY_NODES = "They may arrive as keyboard keys on a node of the same controller that this user may not read"
 
 
 @dataclass(frozen=True)
@@ -458,9 +460,31 @@ def _hid_order_verdict(results: Mapping[str, ControlResult]) -> Verdict | None:
                    "pressed.")
 
 
-def _silent_verdict(results: Sequence[ControlResult]) -> Verdict | None:
+def unseen_extras(results: Sequence[ControlResult], locked: Sequence[InputDevice]) -> list[ControlResult]:
+    """Paddles and vendor buttons that sent nothing while key nodes of the same controller could not be read.
+
+    Nothing about such a button is known: its presses may have arrived on one of those nodes.
+    """
+    if not locked:
+        return []
+    return [result for result in results if result.control.key in EXTRA_BUTTONS and outcome(result) == NO_EVENT]
+
+
+def _unreadable_verdict(results: Sequence[ControlResult], locked: Sequence[InputDevice]) -> Verdict | None:
+    unseen = unseen_extras(results, locked)
+    if not unseen:
+        return None
+    where = ALLY_KEY_NODES if any(device.vendor == ASUS_VENDOR for device in locked) else OTHER_KEY_NODES
+    commands = " or ".join(f"sudo evtest {device.path}" for device in locked)
+    return Verdict("unreadable_keys", "Buttons on a node this user cannot read", Status.SKIP,
+                   f"No press arrived on the nodes this user can read for: "
+                   f"{'; '.join(result.control.name for result in unseen)}. {where}; to see them run: {commands}.")
+
+
+def _silent_verdict(results: Sequence[ControlResult], explained: Iterable[str] = ()) -> Verdict | None:
+    skipped = {"guide", "r3", *explained}
     silent = [result.control.name for result in results
-              if result.control.key not in ("guide", "r3") and not result.control.hold and outcome(result) == NO_EVENT]
+              if result.control.key not in skipped and not result.control.hold and outcome(result) == NO_EVENT]
     if not silent:
         return None
     return Verdict("silent", "Controls that sent nothing", Status.WARN,
@@ -468,13 +492,17 @@ def _silent_verdict(results: Sequence[ControlResult]) -> Verdict | None:
                    "devices or were not pressed before the time limit.")
 
 
-def verdicts(results: Sequence[ControlResult], devices: Sequence[InputDevice],
-             primary: InputDevice | None) -> list[Verdict]:
-    """Compare what was observed with Xbox-style gamepad semantics on Linux."""
+def verdicts(results: Sequence[ControlResult], devices: Sequence[InputDevice], primary: InputDevice | None,
+             locked: Sequence[InputDevice] = ()) -> list[Verdict]:
+    """Compare what was observed with Xbox-style gamepad semantics on Linux.
+
+    `locked` are key nodes of the judged controller that this user may not read.
+    """
     by_key = _by_key(results)
+    unseen = [result.control.key for result in unseen_extras(results, locked)]
     found = [_hid_order_verdict(by_key), _guide_verdict(by_key), _r3_verdict(by_key, primary),
              _leak_verdict(by_key, devices), _duplicate_verdict(results), _mismatch_verdict(results),
-             _silent_verdict(results)]
+             _silent_verdict(results, unseen), _unreadable_verdict(results, locked)]
     return [verdict for verdict in found if verdict is not None]
 
 
@@ -525,7 +553,10 @@ def sdl_mapping(results: Sequence[ControlResult], device: InputDevice, index: in
 
 # ---- report -----------------------------------------------------------------------
 
-def control_rows(results: Sequence[ControlResult], devices: Sequence[InputDevice]) -> list[dict[str, Any]]:
+def control_rows(results: Sequence[ControlResult], devices: Sequence[InputDevice],
+                 locked: Sequence[InputDevice] = ()) -> list[dict[str, Any]]:
+    """One row per control. A button that may have arrived on a node this user cannot read was not tested."""
+    unseen = {result.control.key for result in unseen_extras(results, locked)}
     rows = []
     for result in results:
         # The key is `event_code`: a bare `code` is on the redactor's list of credential-looking keys.
@@ -535,7 +566,8 @@ def control_rows(results: Sequence[ControlResult], devices: Sequence[InputDevice
         observed += [{"node": "hidraw", "event": f"raw HID bit {bit.bit} of report 0x{bit.report_id:02x}",
                       "type": "raw", "event_code": bit.bit, "direction": 0} for bit in result.raw_bits]
         rows.append({"control": result.control.key, "label": result.control.name, "status": result.status,
-                     "result": outcome(result), "expected": expected_label(result.control), "observed": observed})
+                     "result": NOT_TESTED if result.control.key in unseen else outcome(result),
+                     "expected": expected_label(result.control), "observed": observed})
     return rows
 
 

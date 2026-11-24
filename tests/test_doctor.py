@@ -2252,9 +2252,10 @@ def pad(node="event6", name="ASUSTeK Computer Inc. N-KEY Device", keys=ALLY_RAW_
                              frozenset(evdev.parse_bitmap(PAD_AXES)), access, 3, 0x0110)
 
 
-def keyboard(node="event5", name="ASUSTeK Computer Inc. N-KEY Device", virtual=False, identity="0b05:1b4c"):
+def keyboard(node="event5", name="ASUSTeK Computer Inc. N-KEY Device", virtual=False, identity="0b05:1b4c",
+             access="readable"):
     return evdev.InputDevice(node, name, "USB", identity, virtual, frozenset(evdev.parse_bitmap(NKEY_KEYBOARD_KEYS)),
-                             frozenset(), "readable", 3, 0x0110)
+                             frozenset(), access, 3, 0x0110)
 
 
 RAW_PAD, ELITE_PAD = pad(), pad("event21", "Microsoft X-Box One Elite 2 pad", ELITE_PAD_KEYS, True, "045e:0b00")
@@ -3440,10 +3441,10 @@ class ButtonLimitTest(unittest.TestCase):
 
 
 class ButtonVerdictTest(unittest.TestCase):
-    def verdicts(self, script, devices=(RAW_PAD, NKEY_KEYS), primary=RAW_PAD, **kw):
+    def verdicts(self, script, devices=(RAW_PAD, NKEY_KEYS), primary=RAW_PAD, locked=(), **kw):
         results, _source, _recorder = run_session(script, **kw)
         ordered = [results[control.key] for control in kw.get("controls", buttons.CONTROLS)]
-        return {verdict.key: verdict for verdict in buttons.verdicts(ordered, list(devices), primary)}, ordered
+        return {verdict.key: verdict for verdict in buttons.verdicts(ordered, list(devices), primary, locked)}, ordered
 
     def test_xbox_button_reported_as_select_is_explained_with_a_text_only_suggestion(self):
         found, _results = self.verdicts({**STANDARD, "guide": key(evdev.BTN_SELECT), "view": typed("skip")})
@@ -3499,7 +3500,8 @@ class ButtonVerdictTest(unittest.TestCase):
         self.assertEqual(leak.status, Status.WARN)
         self.assertIn("the keys leak into applications; use InputPlumber", leak.detail)
         for expected in ("Left back paddle: KEY_F14 (184)", "Right back paddle: KEY_F15 (185)",
-                         "Command Center button: KEY_F16 (186)", "Library button: KEY_PROG1 (148)"):
+                         "Armoury Crate button (small, top left): KEY_F16 (186)",
+                         "Library button (small, top right): KEY_PROG1 (148)"):
             self.assertIn(expected, leak.detail)
         routed, _results = self.verdicts(script, devices=(ELITE_PAD, PLUMBER_KEYS), primary=ELITE_PAD)
         self.assertEqual(routed["extra_keys"].status, Status.INFO)
@@ -3513,7 +3515,7 @@ class ButtonVerdictTest(unittest.TestCase):
         found, _results = self.verdicts(script)
         self.assertEqual(found["duplicates"].status, Status.WARN)
         self.assertIn("Left back paddle and Right back paddle both report KEY_F14 (184)", found["duplicates"].detail)
-        self.assertNotIn("Command Center", found["duplicates"].detail)
+        self.assertNotIn("Armoury Crate", found["duplicates"].detail)
         same_code_other_device = {**STANDARD, "armoury": key(KEY_F16, device=1), "library": key(KEY_F16, device=0)}
         self.assertNotIn("duplicates", self.verdicts(same_code_other_device)[0])
 
@@ -3529,6 +3531,33 @@ class ButtonVerdictTest(unittest.TestCase):
         self.assertEqual((by_key["lb"], by_key["menu"], by_key["x"]), ("differs", "no event", "pass"))
         self.assertEqual(buttons.expected_label(buttons.CONTROLS[0]), "BTN_MODE (316)")
         self.assertEqual(buttons.expected_label(only("paddle_left")[0]), "no standard code")
+
+    def test_extra_buttons_that_may_arrive_on_a_node_this_user_cannot_read_are_explained_not_failed(self):
+        locked = [keyboard(access="no-permission"), keyboard("event4", access="hidden")]
+        script = {**STANDARD, "paddle_right": key(evdev.BTN_TRIGGER_HAPPY1)}
+        found, results = self.verdicts(script, devices=(RAW_PAD,), locked=locked)
+        self.assertEqual(found["unreadable_keys"].status, Status.SKIP)
+        self.assertEqual(found["unreadable_keys"].detail,
+                         "No press arrived on the nodes this user can read for: Left back paddle; Armoury Crate button "
+                         "(small, top left); Library button (small, top right); Armoury Crate button (small, top "
+                         "left), held; Library button (small, top right), held. On the ROG Xbox Ally these buttons "
+                         "arrive as keyboard keys on a node only root can read; to see them run: sudo evtest "
+                         "/dev/input/event5 or sudo evtest /dev/input/event4.")
+        self.assertNotIn("silent", found)
+        rows = {row["control"]: row["result"] for row in buttons.control_rows(results, [RAW_PAD], locked)}
+        self.assertEqual([rows[name] for name in ("a", "paddle_left", "paddle_right", "armoury", "library_hold")],
+                         ["pass", "not tested", "recorded", "not tested", "not tested"])
+        other, _results = self.verdicts(script, devices=(RAW_PAD,),
+                                        locked=[keyboard(identity="1234:0001", access="no-permission")])
+        self.assertTrue(other["unreadable_keys"].detail.endswith(
+            "held. They may arrive as keyboard keys on a node of the same controller that this user may not read; to "
+            "see them run: sudo evtest /dev/input/event5."))
+        readable, results = self.verdicts(script, devices=(RAW_PAD,))
+        self.assertNotIn("unreadable_keys", readable)
+        self.assertIn("No event arrived for: Left back paddle, Armoury Crate button (small, top left), Library button "
+                      "(small, top right).", readable["silent"].detail)
+        self.assertEqual({row["result"] for row in buttons.control_rows(results, [RAW_PAD])
+                          if row["control"] in ("paddle_left", "armoury")}, {"no event"})
 
     def test_buttons_numbered_in_hid_order_are_diagnosed_and_still_get_a_correct_sdl_line(self):
         order = ("a", "b", "x", "y", "lb", "rb", "view", "menu", "l3", "r3", "guide")
@@ -3745,7 +3774,7 @@ class ButtonCommandTest(InputCase):
         code, out, _err = self.run_buttons(ctx, {"paddle_left": key(KEY_F14)}, "--device", "/dev/input/event5")
         self.assertEqual(code, 0)
         self.assertIn("not a gamepad, so its codes are recorded but not judged", out)
-        self.assertIn("Left back paddle             no standard code  KEY_F14 (184) on event5", out)
+        self.assertIn(f"Left back paddle{' ' * 30}no standard code  KEY_F14 (184) on event5", out)
         self.assertNotIn("SDL mapping", out)
         hidden = self.device_ctx(inputplumber=True)
         with self.assertRaisesRegex(ValueError, "cannot be read: an input daemon hides it"):
@@ -3759,7 +3788,38 @@ class ButtonCommandTest(InputCase):
         self.assertEqual([item.node for item in selection.candidates], ["event6", "event5"])
         self.assertEqual(([item.node for item in selection.watched], selection.primary.node),
                          (["event6", "event5"], "event6"))
-        self.assertEqual(selection.notes, [])
+        self.assertEqual((selection.notes, selection.locked), ([], []))
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read every node")
+    def test_extra_buttons_that_may_arrive_on_a_key_node_only_root_can_read_are_not_failed(self):
+        ctx = self.device_ctx()
+        (SCRATCH / "dev/input/event5").chmod(0o200)  # write-only stands in for "root only": the test user owns it
+        # The same model's key node on another USB device is listed as well, but it is not this controller's.
+        add_input(SCRATCH, 7, "ASUSTeK Computer Inc. N-KEY Device", NKEY_KEYBOARD_KEYS, mode=0o200, usb="3-7",
+                  interface=2)
+        script = {name: events for name, events in STANDARD.items() if name != "menu"}
+        code, out, err = self.run_buttons(ctx, script, "--markdown", "--timeout", "2")
+        self.assertEqual(code, 0)
+        self.assertEqual([item.node for item in self.selection.watched], ["event6"])
+        self.assertEqual([item.path for item in self.selection.locked], ["/dev/input/event5"])
+        self.assertIn("[3/27] Press: Menu button (three lines)   [Enter = skip]\n       (nothing arrived within 2 s)\n",
+                      err)
+        self.assertIn("[24/27] Press: Armoury Crate button (small, top left), short press   [Enter = skip]\n"
+                      "       (nothing arrived within 2 s on the nodes this user can read)\n", err)
+        for row in ("| Menu | BTN_START (315) | - | fail (no event) |",
+                    "| Left back paddle | no standard code | - | not tested |",
+                    "| Armoury Crate button (small, top left) | no standard code | - | not tested |",
+                    "| Library button (small, top right), held | no standard code | - | not tested |"):
+            self.assertIn(row, out)
+        self.assertIn("- **Controls that sent nothing** (WARN): No event arrived for: Menu. They are", out)
+        self.assertIn("- **Buttons on a node this user cannot read** (SKIP): No press arrived on the nodes this user "
+                      "can read for: Left back paddle; Right back paddle; Armoury Crate button (small, top left); "
+                      "Library button (small, top right); Armoury Crate button (small, top left), held; Library "
+                      "button (small, top right), held. On the ROG Xbox Ally these buttons arrive as keyboard keys on "
+                      "a node only root can read; to see them run: sudo evtest /dev/input/event5.\n", out)
+        self.assertNotIn("sudo evtest /dev/input/event7", out + err)
+        for canary in (CANARY_SERIAL, CANARY_MAC, CANARY_USER, CANARY_HOME):
+            self.assertNotIn(canary, out + err)
 
     def test_with_inputplumber_the_virtual_pad_is_judged_and_hidden_nodes_are_named(self):
         selection = buttonsio.select_devices(self.device_ctx(inputplumber=True))
@@ -3770,6 +3830,7 @@ class ButtonCommandTest(InputCase):
             "daemon hides it (mode 000).",
             '/dev/input/event5 "ASUSTeK Computer Inc. N-KEY Device" (physical key device) cannot be read: an input '
             "daemon hides it (mode 000)."])
+        self.assertEqual(selection.locked, [])  # games see the daemon's virtual pad and keyboard instead
         self.assertNotIn("event1", [item.node for item in selection.candidates])
 
     def test_nothing_readable_ends_with_an_explanation(self):
@@ -3858,7 +3919,7 @@ class ButtonCommandTest(InputCase):
                      "| Xbox | BTN_MODE (316) | BTN_MODE (316) on event6 | pass |",
                      "| R3 | BTN_THUMBR (318) | raw HID bit 110 of report 0x0b on hidraw | fail (no event) |",
                      "| Left back paddle | no standard code | KEY_F14 (184) on event5 | pass (recorded) |",
-                     "| Library button | no standard code | - | fail (no event) |",
+                     "| Library button (small, top right) | no standard code | - | fail (no event) |",
                      "**SDL mapping from the presses that were seen**", "```",
                      "Not seen and left out: rightstick (R3), paddle2 (Left back paddle), paddle1 (Right back paddle).",
                      "Raw HID: report 0x0b declares 14 buttons; changed: bit 110 during R3"):
@@ -3936,7 +3997,11 @@ class ButtonCommandTest(InputCase):
                      "  Not seen and left out: rightstick (R3), paddle2 (Left back paddle), paddle1 (Right back",
                      "Read-only test: no device was grabbed and no input was sent."):
             self.assertIn(line, out)
-        self.assertIn("[26/27] Hold: Left button under the screen again, held for two seconds (optional)", out)
+        for prompt in ("[24/27] Press: Armoury Crate button (small, top left), short press   [Enter = skip]",
+                       "[25/27] Press: Library button (small, top right), short press   [Enter = skip]",
+                       "[26/27] Hold: Armoury Crate button (small, top left) again, held for two seconds (optional)",
+                       "[27/27] Hold: Library button (small, top right) again, held for two seconds (optional)"):
+            self.assertIn(prompt, out)
 
     def test_names_that_identify_the_user_are_scrubbed_from_the_report(self):
         ctx = self.device_ctx()

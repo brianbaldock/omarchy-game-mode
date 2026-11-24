@@ -130,6 +130,8 @@ class Selection:
     watched: list[InputDevice] = field(default_factory=list)
     primary: InputDevice | None = None
     notes: list[str] = field(default_factory=list)
+    # Key nodes of the judged controller's own physical device that this user may not read.
+    locked: list[InputDevice] = field(default_factory=list)
 
 
 def _related_keyboards(devices: Sequence[InputDevice], pads: Sequence[InputDevice]) -> list[InputDevice]:
@@ -137,6 +139,15 @@ def _related_keyboards(devices: Sequence[InputDevice], pads: Sequence[InputDevic
     identities = {pad.vendor_product for pad in pads if not pad.virtual}
     return [device for device in devices if device.is_keyboard
             and (device.vendor_product in identities and not device.virtual or device.daemon_keys)]
+
+
+def _locked_keys(ctx: Context, pad: InputDevice | None, keyboards: Sequence[InputDevice]) -> list[InputDevice]:
+    """Key nodes that sysfs puts on the same physical device as `pad` and that this user may not read."""
+    device = evdev.physical_device(ctx, f"/sys/class/input/{pad.node}/device") if pad and not pad.virtual else ""
+    if not device:
+        return []
+    return [item for item in keyboards if not item.virtual and item.access in ("no-permission", "hidden")
+            and evdev.physical_device(ctx, f"/sys/class/input/{item.node}/device") == device]
 
 
 def select_devices(ctx: Context, device: str = "") -> Selection:
@@ -161,6 +172,7 @@ def select_devices(ctx: Context, device: str = "") -> Selection:
     selection.primary = preferred[0] if preferred else None
     if selection.primary:
         selection.watched = [selection.primary, *(item for item in keyboards if item.access == "readable")]
+    selection.locked = _locked_keys(ctx, selection.primary, keyboards)
     for item in selection.candidates:
         if item.access != "readable":
             role = "controller" if item.is_gamepad else "key device"
@@ -375,8 +387,8 @@ class LiveSource:
 class Console(buttons.Listener):
     """Prints each prompt and, immediately, what arrived for it."""
 
-    def __init__(self, stream: IO[str], devices: Sequence[InputDevice], timeout: float):
-        self.stream, self.devices, self.timeout = stream, devices, timeout
+    def __init__(self, stream: IO[str], devices: Sequence[InputDevice], timeout: float, locked: bool = False):
+        self.stream, self.devices, self.timeout, self.locked = stream, devices, timeout, locked
 
     def _say(self, text: str) -> None:
         self.stream.write(text + "\n")
@@ -395,7 +407,10 @@ class Console(buttons.Listener):
 
     def finished(self, result: ControlResult) -> None:
         if result.status == buttons.TIMEOUT:
-            self._say(f"       (nothing arrived within {self.timeout:g} s)")
+            # A paddle or vendor button can arrive on a key node of the controller that this user cannot read.
+            locked = self.locked and result.control.key in buttons.EXTRA_BUTTONS
+            self._say(f"       (nothing arrived within {self.timeout:g} s"
+                      f"{' on the nodes this user can read' if locked else ''})")
         elif result.status == buttons.SKIPPED:
             self._say("       (skipped)")
 
@@ -405,7 +420,7 @@ class Console(buttons.Listener):
 def build_report(ctx: Context, selection: Selection, results: Sequence[ControlResult], raw: dict[str, Any],
                  started: float) -> Report:
     facts = run_checks([*SYSTEM, *(check for check in INPUT if check.id == "input.stack")], ctx, workers=4)
-    found = buttons.verdicts(results, selection.watched, selection.primary)
+    found = buttons.verdicts(results, selection.watched, selection.primary, selection.locked)
     mapping: dict[str, Any] = {"device": "", "line": "", "missing": []}
     if selection.primary is not None:
         # The GUID is built from the bus, vendor, product and version numbers: it names a model, not a unit.
@@ -413,7 +428,8 @@ def build_report(ctx: Context, selection: Selection, results: Sequence[ControlRe
         line, missing = buttons.sdl_mapping(results, selection.primary, selection.watched.index(selection.primary))
         mapping = {"device": selection.primary.node, "line": line, "missing": missing}
     sections = {"devices": buttons.device_rows(selection.candidates, selection.watched),
-                "controls": buttons.control_rows(results, selection.watched), "sdl_mapping": mapping, "raw": raw}
+                "controls": buttons.control_rows(results, selection.watched, selection.locked),
+                "sdl_mapping": mapping, "raw": raw}
     privacy = {"redacted": True, "root_used": False, "devices_grabbed": False, "events_injected": False,
                "serials_read": False, "raw_hid_read": raw.get("status") == "watched"}
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ctx.wall_time()))
@@ -569,7 +585,7 @@ def _run_session(selection: Selection, raw_node: RawNode | None, args: argparse.
         tracker = buttons.Tracker(source.keys_down(), source.axes())
         session = buttons.Session(source, tracker, source.clock, timeout=args.timeout,
                                   watcher=hid.RawWatcher(raw_node.fields) if raw_node else None,
-                                  listener=Console(prompts, selection.watched, args.timeout))
+                                  listener=Console(prompts, selection.watched, args.timeout, bool(selection.locked)))
         return session.run()
     finally:
         if source is not None:

@@ -274,8 +274,9 @@ helps with them; it adds no strings to the translated interface.
 
 `omarchy-game-mode doctor buttons` asks you to press each control once and shows the code
 that really arrives for it: the Xbox button, View, Menu, A, B, X, Y, the bumpers and
-triggers, both stick clicks, the D-pad, both sticks, the back paddles and the two buttons
-under the screen. Run it in a terminal; Enter skips a control and `q` stops the test.
+triggers, both stick clicks, the D-pad, both sticks, the back paddles, the Armoury Crate
+button (small, top left) and the Library button (small, top right). Run it in a terminal;
+Enter skips a control and `q` stops the test.
 
 ```
 omarchy-game-mode doctor buttons                        Test the controller games see
