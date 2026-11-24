@@ -10,6 +10,14 @@ step; see [Changelog and releases](CONTRIBUTING.md#changelog-and-releases).
 
 ## [Unreleased]
 
+### Added
+
+- **Clock and battery in the Gaming Home header** (#18). The clock counts its hours the way the Omarchy bar does
+  (12 or 24 hour), and the battery shows its percentage, whether it is charging and, when UPower knows, the time
+  left. It turns amber at 20 % and red at 10 % while discharging, and is hidden on a machine without a battery.
+  Both update only while Gaming Home is shown, so a hidden Gaming Home still wakes nothing. Battery data comes
+  from UPower, with `/sys/class/power_supply` as the fallback; peripheral batteries are not shown.
+
 ## [0.2.1] - 2026-11-24
 
 ### Fixed

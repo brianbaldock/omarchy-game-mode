@@ -12,6 +12,7 @@ optdepends=(
   'uwsm: launch apps in their own systemd units'
   'antimicrox: switch controller profiles between desktop and game input'
   'steam: Steam Big Picture'
+  'upower: battery time left in the Gaming Home header (sysfs is the fallback)'
 )
 # Built from a local tarball: run `make dist` in the source tree first.
 source=("$pkgname-$pkgver.tar.gz")

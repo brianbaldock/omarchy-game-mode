@@ -13,12 +13,14 @@ from string import Template
 from gi.repository import Gdk, GLib, Gtk, Pango
 
 from . import APP_ID
+from .battery import CHARGING, describe
 from .core import (ACTIVATE, AUTO, BACK, DESKTOP, DOWN, GAME, LEFT, MENU, NEXT_TAB, PREV_TAB, RIGHT, UP)
 
 CATEGORY_ICONS = {"native": "controller", "streaming": "cloud", "retro": "retro", "stores": "store"}
 WIDE_WIDTH = 1600
 WIDE_HEIGHT = 950
 COMPACT_HEIGHT = 800
+BATTERY_FILL_PX = 20   # the fill of a full battery: the width of the glyph's body inside its border and padding
 
 CSS = Template("""
 @define-color gh_bg $background;
@@ -71,6 +73,12 @@ window.gh-window {
   background: alpha(@gh_fg, 0.07); font-size: 13px; font-weight: 600; color: @gh_fg;
 }
 .gh-chip.warn { background: alpha(@gh_warning, 0.16); color: @gh_warning; }
+.gh-chip.bad { background: alpha(@gh_danger, 0.16); color: @gh_danger; }
+.gh-clock { font-feature-settings: "tnum"; }
+.gh-battery-body { min-width: 20px; min-height: 8px; padding: 1px; border: 2px solid currentColor; border-radius: 5px; }
+.gh-battery-level { min-width: 0; min-height: 8px; border-radius: 2px; background-color: currentColor; }
+.gh-battery-nub { min-width: 2px; min-height: 6px; border-radius: 0 2px 2px 0; background-color: currentColor; }
+.gh-battery.ok .gh-battery-glyph, .gh-battery.ok .gh-battery-bolt { color: @gh_success; }
 .gh-dot { min-width: 8px; min-height: 8px; border-radius: 4px; background: @gh_muted; }
 .gh-dot.ok { background: @gh_success; }
 .gh-dot.accent { background: @gh_accent; }
@@ -281,6 +289,12 @@ class HomeWindow(Gtk.ApplicationWindow):
         self._library_ids: list[str] = []
         self._library_cards: dict[str, Gtk.Button] = {}
         self._tiles: dict[str, Gtk.Button] = {}
+        # The clock and the battery run only while this window is mapped: nothing here wakes a hidden Gaming Home.
+        self._status = runtime.header_status(self._update_clock, self._update_battery)
+        self.connect("map", self._on_map)
+        self.connect("unmap", self._on_unmap)
+        self.connect("destroy", self._on_unmap)
+        self.connect("notify::is-active", self._on_active_changed)
         self.connect("notify::focus-widget", self._on_focus_changed)
         self.connect("close-request", self._on_close_request)
         keys = Gtk.EventControllerKey()
@@ -323,6 +337,7 @@ class HomeWindow(Gtk.ApplicationWindow):
         self.set_child(overlay)
         self.stack.set_visible_child_name(self.page)
         self.refresh()
+        self._status.repaint()
 
     def _build_header(self):
         header = hbox(16, valign=Gtk.Align.CENTER)
@@ -331,7 +346,8 @@ class HomeWindow(Gtk.ApplicationWindow):
         logo.set_pixel_size(44)
         brand.append(logo)
         titles = box(valign=Gtk.Align.CENTER)
-        titles.append(label(self.t("app.name"), "gh-brand-title"))
+        # The title can give way when the header is tight, so the chips and the settings button keep their room.
+        titles.append(label(self.t("app.name"), "gh-brand-title", ellipsize=True))
         brand.append(titles)
         header.append(brand)
 
@@ -356,6 +372,26 @@ class HomeWindow(Gtk.ApplicationWindow):
         self.mode_chip.append(self.mode_dot)
         self.mode_chip.append(self.mode_label)
         header.append(self.mode_chip)
+
+        # Display only: neither chip is focusable, and neither is in nav_rows.
+        self.battery_chip = hbox(8, "gh-chip gh-battery", valign=Gtk.Align.CENTER, visible=False)
+        self.battery_bolt = Gtk.Image(icon_name=icon_name(self.icons, "bolt"), pixel_size=14,
+                                      css_classes=["gh-battery-bolt"], visible=False)
+        glyph = hbox(1, "gh-battery-glyph", valign=Gtk.Align.CENTER)
+        body = box(css="gh-battery-body", valign=Gtk.Align.CENTER)
+        self.battery_level = box(css="gh-battery-level", halign=Gtk.Align.START)
+        for part in (glyph, body, self.battery_level):
+            part.set_direction(Gtk.TextDirection.LTR)  # a battery does not mirror: its fill grows from the left
+        body.append(self.battery_level)
+        glyph.append(body)
+        glyph.append(box(css="gh-battery-nub", valign=Gtk.Align.CENTER))
+        self.battery_label = label("")
+        for part in (self.battery_bolt, glyph, self.battery_label):
+            self.battery_chip.append(part)
+        header.append(self.battery_chip)
+
+        self.clock_label = label("", "gh-chip gh-clock", valign=Gtk.Align.CENTER)
+        header.append(self.clock_label)
 
         self.settings_button = Gtk.Button(css_classes=["gh-icon-button", "gh-nav"], valign=Gtk.Align.CENTER)
         self.settings_button.set_name("settings")
@@ -700,6 +736,42 @@ class HomeWindow(Gtk.ApplicationWindow):
         if pinned:
             return t("status.inLibrary"), "accent"
         return t("status.installed"), "ok"
+
+    # ---- clock and battery -----------------------------------------------
+    def _on_map(self, *_):
+        self._status.start()
+
+    def _on_unmap(self, *_):
+        self._status.stop()
+
+    def _on_active_changed(self, *_):
+        if self.is_active() and self.get_mapped():
+            self._status.refresh()
+
+    def stop_status(self):
+        self._status.stop()
+
+    def _update_clock(self, text, date):
+        """Show the time and, as its tooltip, the date. Only the clock label is touched, never the rest of the window."""
+        self.clock_label.set_text(text)
+        self.clock_label.set_tooltip_text(date)
+
+    def _update_battery(self, battery):
+        """Show the battery in its chip, or hide the chip when there is none.
+
+        Each setter does nothing when it is given what the widget already has, so UPower's reports every half
+        minute (mostly a new time estimate) change a tooltip and redraw nothing.
+        """
+        self.battery_chip.set_visible(battery is not None)
+        if battery is None:
+            return
+        self.battery_label.set_text(f"{battery.percent}%")
+        self.battery_bolt.set_visible(battery.state == CHARGING)
+        self.battery_level.set_visible(battery.percent > 0)
+        self.battery_level.set_size_request(max(2, round(battery.percent * BATTERY_FILL_PX / 100)), -1)
+        for tone in ("ok", "warn", "bad"):
+            (self.battery_chip.add_css_class if tone == battery.tone else self.battery_chip.remove_css_class)(tone)
+        self.battery_chip.set_tooltip_text(describe(battery, self.t))
 
     # ---- message / toast -----------------------------------------------
     def _refresh_message(self):

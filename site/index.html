@@ -255,7 +255,7 @@
           <li>
             <span class="rule-index" aria-hidden="true">01</span>
             <h3>Controller-first, full screen</h3>
-            <p>Home, Discover and Settings fill the screen with large, clearly focused targets. Controller, keyboard, mouse and touch all share one navigation model.</p>
+            <p>Home, Discover and Settings fill the screen with large, clearly focused targets. Controller, keyboard, mouse and touch all share one navigation model. The header shows the time and the battery, since the desktop bar is behind it.</p>
           </li>
           <li>
             <span class="rule-index" aria-hidden="true">02</span>
@@ -452,7 +452,7 @@
           </li>
           <li>
             <h3>Quiet when idle</h3>
-            <p>Window changes arrive over Hyprland’s event socket, and controllers wake the app only when they send input. Nothing polls in the background; repeat timers run only while a button is held.</p>
+            <p>Window changes arrive over Hyprland’s event socket, and controllers wake the app only when they send input. Nothing polls while Gaming Home is hidden. Repeat timers run only while a button is held, and while Gaming Home is shown one timer ticks the clock once a minute (without UPower, the same tick re-reads the battery from sysfs).</p>
           </li>
           <li>
             <h3>Fails safe</h3>

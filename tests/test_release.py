@@ -8,6 +8,7 @@ import contextlib
 import datetime
 import html.parser
 import io
+import re
 import shutil
 import sys
 import unittest
@@ -154,9 +155,11 @@ class ScratchCase(unittest.TestCase):
             shutil.copyfile(ROOT / rel, self.tree / rel)
         changelog = self.tree / "CHANGELOG.md"
         text = changelog.read_text(encoding="utf-8")
-        if unreleased and not release.parse(text).unreleased.count:
-            changelog.write_text(text.replace("## [Unreleased]\n\n", f"## [Unreleased]\n\n{unreleased}", 1),
-                                 encoding="utf-8")
+        # Whatever the real file lists as unreleased is replaced, so the tests do not depend on it.
+        text, replaced = re.subn(r"(?ms)^## \[Unreleased\]\n.*?(?=^## \[\d)", f"## [Unreleased]\n\n{unreleased}", text,
+                                 count=1)
+        self.assertEqual(replaced, 1)
+        changelog.write_text(text, encoding="utf-8")
         return release.Tree(self.tree)
 
     def snapshot(self):
