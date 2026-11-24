@@ -48,8 +48,9 @@ hidden) leaves it and takes its widgets out of the window, and that a click GTK 
 chooses nothing (A then B, A then Menu, Enter then Escape on another profile). ``pwpending`` checks that the focus
 stays on the option asked for, which stays sensitive, until the answer and after it; ``pwfail`` that a failure is
 not there at the next visit, also one that arrives after the sheet closed; ``pwerror`` that Try again reads the
-service; ``pw`` that a profile vanishing from the list does not leave the focus on a dead button; ``pwnone`` that
-there is no power button until a second profile is offered.
+service; ``pw`` that moving over the profiles with the pointer or the D-pad chooses none, and that a profile vanishing
+from the list does not leave the focus on a dead button; ``pwnone`` that there is no power button until a second
+profile is offered.
 """
 
 import datetime
@@ -199,6 +200,15 @@ def settle(milliseconds=60):
     while time.monotonic() < deadline:
         if not context.iteration(False):
             time.sleep(0.005)
+
+
+def hover(widget):
+    """The pointer coming over a widget, as GTK tells the widget's motion controllers."""
+    controllers = widget.observe_controllers()
+    for index in range(controllers.get_n_items()):
+        controller = controllers.get_item(index)
+        if isinstance(controller, Gtk.EventControllerMotion):
+            controller.emit("enter", 1.0, 1.0)
 
 
 def texts_in(widget):
@@ -646,6 +656,16 @@ def check_power_behaviour(word, language, window, source):
               f"Try again did not read the service, or the focus is on {window.selected_name()}")
         check(not window.power_button.has_css_class("warn"), "the power button still warns after a good reading")
     elif word == "pw":
+        before = len(source.calls)
+        for profile in (power.SAVER, power.BALANCED):
+            hover(window._pw_buttons[option(profile)])              # the pointer passing over a profile selects it
+            check(window.get_focus() is window._pw_buttons[option(profile)], f"hovering {profile} did not select it")
+        window.handle_action(core.DOWN)                             # and so does the D-pad
+        window.handle_action(core.UP)
+        settle()
+        chose = [call for call in source.calls[before:] if call[0] == "set_profile"]
+        check(not chose and source.snapshot.active == power.PERFORMANCE and not source.snapshot.pending,
+              f"moving over the profiles chose one: {chose}")
         check(window._focus_by_name(option(power.SAVER)), "power-saver cannot be selected")
         source.change(available=(power.BALANCED, power.PERFORMANCE))     # the service restarted without it
         settle()
