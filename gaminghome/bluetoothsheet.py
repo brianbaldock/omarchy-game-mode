@@ -2,8 +2,8 @@
 
 ``BluetoothSheet`` holds the window's Bluetooth source and what one visit to the sheet remembers: whether Search
 was pressed, which device asks to be forgotten, the digits typed on the pad. Every way out of the sheet ends in
-``leave``, which stops the search and gives up a pairing that asks something or has not paired the device yet, so
-neither outlives the sheet; a device paired already goes on to connect, as with Connect. ``blocks`` describes the
+``leave``, which stops the search and gives up a pairing still in its pairing step, so neither outlives the sheet;
+one that has gone on to trust and connect the device finishes, as Connect does. ``blocks`` describes the
 sheet from top to bottom as plain data; each block has a stable key and each control a stable name that carries
 the device's id, so the window can update what it shows in place and keep the focus where it was.
 
@@ -31,8 +31,9 @@ PAD_KEYS = (("1", "2", "3"), ("4", "5", "6"), ("7", "8", "9"), ("erase", "0", "d
 # the top into view, then to Search or Close; never to a control that forgets or pairs a device.
 SAFE_FOCUS = (DISMISS, SEARCH, CLOSE)
 DESTRUCTIVE = (FORGET, FORGET_YES, PAIR)
-# Where the focus starts when the sheet opens. None of them changes a connection: the power switch is first only
-# while Bluetooth is off, because while it is on, Search is there before it.
+# Where the focus starts when the sheet opens, unless something failed: then it starts on the failure's Dismiss,
+# which every part that appears asks for, so that the failure line at the top is in view. None of them changes a
+# connection: the power switch is first only while Bluetooth is off, because while it is on, Search is there before it.
 OPENING_FOCUS = (SEARCH, RETRY, POWER, CLOSE)
 
 KIND_ICONS = {"gamepad": "controller", "headphones": "headphones", "headset": "headset", "speaker": "speaker",
@@ -66,8 +67,10 @@ def pairing(snapshot: bt.Snapshot) -> bool:
 
 
 def abandonable(snapshot: bt.Snapshot) -> bool:
-    """The pairing can still be given up: it asks something, or the device is not paired yet. Once it is, the
-    pairing trusts and connects it as Connect does, and a Connect is never cut short when the sheet goes."""
+    """The pairing can still be given up: it asks something, or it is still in its pairing step. The device may
+    have paired already in that step, as BlueZ says so only when the step ends; then it stays paired and the failure
+    says so. Once the pairing trusts and connects the device, it goes on as Connect does, and a Connect is never cut
+    short when the sheet goes."""
     activity = snapshot.activity
     return snapshot.prompt is not None or (activity is not None and activity.kind == bt.PAIRING
                                            and activity.stage in ("", bt.STAGE_PAIR))
@@ -132,13 +135,22 @@ class FailureMessage:
     name: str = ""
 
     def text(self, t) -> str:
+        if not self.reason:
+            return t(self.action, name=self.name)
         return t("bluetooth.failure", action=t(self.action, name=self.name), reason=t(self.reason))
 
 
-def failure_message(failure: bt.Failure, name: str) -> FailureMessage:
+def failure_message(failure: bt.Failure, name: str, device: bt.Device | None = None) -> FailureMessage:
     """Words for a failure from the contract's codes alone: nothing that BlueZ said is shown, because none of it is
-    in the model. ``name`` is what to call the device."""
+    in the model. ``name`` is what to call the device; ``device`` is that device as it is now, when it is among the
+    remembered."""
     reason = f"bluetooth.reason.{failure.code}" if failure.code in bt.FAILURES else "bluetooth.reason.failed"
+    if failure.code == bt.CANCELED and failure.paired:
+        # The cancel came after the device had paired: it stays, and without the trust the pairing would have given
+        # it, it does not reconnect by itself. (A cancel that lands while the trust is being written leaves that.)
+        hint = "" if device is None else \
+            "bluetooth.failed.canceledTrustedHint" if device.trusted else "bluetooth.failed.canceledPairedHint"
+        return FailureMessage("bluetooth.failed.canceledPaired", "", hint, name)
     if failure.paired:
         return FailureMessage("bluetooth.failed.paired", reason, "bluetooth.failed.pairedHint", name)
     action = f"bluetooth.failed.{failure.action}" if failure.action in ACTIONS else "bluetooth.failed.other"
@@ -307,6 +319,7 @@ class BluetoothSheet:
         self.forgetting = 0          # the device whose Forget asks for confirmation
         self.entry = DigitEntry()
         self._search_seen = False    # a search was seen running during this visit, so "nothing found" can be said
+        self._listed = False         # a nearby device was listed since Search was pressed: something was found
         self._power_target = None    # what the power switch was last asked for, until that has run, sheet or not
         self._cancelled = None       # the device of the pairing given up, until the source says it has ended
 
@@ -347,11 +360,11 @@ class BluetoothSheet:
         if self.visiting:
             return
         self.visiting = True
-        self.searched = self._search_seen = False
+        self.searched = self._search_seen = self._listed = False
         self.forgetting = 0
         self.entry.clear()
         failure = self.source.snapshot.failure
-        if failure is not None and failure.code == bt.CANCELED:
+        if failure is not None and failure.code == bt.CANCELED and not failure.paired:
             self.source.dismiss()           # a pairing this sheet gave up, maybe after the user had left it
         self.sync()
 
@@ -361,7 +374,7 @@ class BluetoothSheet:
         if not self.visiting:
             return False
         self.visiting = False
-        self.searched = self._search_seen = False
+        self.searched = self._search_seen = self._listed = False
         self.forgetting = 0
         self.entry.clear()
         give_up = abandonable(self.source.snapshot) and not self.cancelling
@@ -384,6 +397,8 @@ class BluetoothSheet:
             self._search_seen = True
         elif snapshot.failure is not None and snapshot.failure.action == bt.SEARCHING:
             self._search_seen = False               # the source said it searched, and then that it could not start
+        if self.visiting and self.searched and bt.nearby(snapshot.devices):
+            self._listed = True                     # even if it is paired or gone by the time the search ends
         if not pairing(snapshot):
             self._cancelled = None
         if snapshot.activity is None or snapshot.activity.kind != bt.POWERING:
@@ -405,12 +420,15 @@ class BluetoothSheet:
             if snapshot.scanning:
                 self.source.scan(False)
             elif snapshot.state == bt.ON and idle:
-                self.searched = True
+                self.searched, self._listed = True, False
                 self.source.scan(True)
         elif name == RETRY:
             self.source.retry()
         elif name == DISMISS:
+            failure = snapshot.failure
             self.source.dismiss()
+            if failure is not None and any(d.id == failure.device for d in bt.remembered(snapshot.devices)):
+                return f"{CONNECT}{failure.device}"     # back to the device that the failure was about
         elif (number := id_in(name, YES)) is not None or (number := id_in(name, NO)) is not None:
             self.source.answer(number, name.startswith(YES))    # the prompt shown; the source ignores one replaced
         elif name == CANCEL:
@@ -499,10 +517,12 @@ class BluetoothSheet:
 
         blocks: list[Block] = [Text("title", text=t("bluetooth.title"), tone="title")]
         failure = snapshot.failure
-        if failure is not None and failure.code != bt.CANCELED:     # only this sheet cancels: nothing to tell
-            message = failure_message(failure, called(failure.device, failure.name))
-            blocks.append(Problem("failure", (Control(DISMISS, t("bluetooth.dismiss")),), text=message.text(t),
-                                  hint=t(message.hint) if message.hint else ""))
+        # Only this sheet cancels, so a pairing it gave up needs no words, unless the device had paired by then.
+        if failure is not None and (failure.code != bt.CANCELED or failure.paired):
+            device = next((d for d in bt.remembered(snapshot.devices) if d.id == failure.device), None)
+            message = failure_message(failure, called(failure.device, failure.name), device)
+            blocks.append(Problem("failure", (Control(DISMISS, t("bluetooth.dismiss")),), first=DISMISS,
+                                  text=message.text(t), hint=t(message.hint) if message.hint else ""))
         if not snapshot.visible:
             blocks.append(Text("unavailable", text=t("bluetooth.unavailable")))
         elif snapshot.state == bt.ERROR:
@@ -561,7 +581,7 @@ class BluetoothSheet:
             for device in found:
                 blocks.append(Row(f"nearby:{device.id}", (Control(f"{PAIR}{device.id}", t("bluetooth.pair"), idle),),
                                   icon=device_icon(device.kind), title=names[device.id]))
-            if not found and (searching or self._search_seen):
+            if not found and (searching or (self._search_seen and not self._listed)):
                 blocks.append(Text("nearby-empty", tone="muted",
                                    text=t("bluetooth.looking" if searching else "bluetooth.nothingFound")))
         if self.searched and snapshot.truncated:                   # about the nearby list, shown after Search

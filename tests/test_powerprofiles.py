@@ -55,7 +55,9 @@ def stand_in(directory: Path, mode="ok", gate=False, bus=None) -> Path:
     record.mkdir(parents=True)
     lines = ["#!/bin/sh", f'cd "{record}" || exit 3', 'printf "%s\\n" "$0" "$@" > argv',
              "cat /proc/$$/environ > environ", "cat > stdin", "cat /proc/$$/stat > stat",
-             "readlink /proc/$$/fd/0 /proc/$$/fd/1 /proc/$$/fd/2 > fds", "command -v python3 > python3"]
+             # dash makes a command's redirect in the shell itself, so its own fd 1 is read in a subshell
+             "streams=$(readlink /proc/$$/fd/0 /proc/$$/fd/1 /proc/$$/fd/2)", 'printf "%s\\n" "$streams" > fds',
+             "command -v python3 > python3"]
     if gate:
         os.mkfifo(directory / "gate")
         lines += [": > waiting", f'read line < "{directory}/gate"']

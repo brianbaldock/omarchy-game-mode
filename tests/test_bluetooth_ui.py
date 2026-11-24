@@ -1,6 +1,6 @@
 """The Bluetooth button and sheet without a display: what they show, what their controls do, and that every way out
-of the sheet ends its search and gives up a pairing that has not paired the device yet. The window's own methods run
-on stand-ins, as in test_headerstatus, because the real window needs a display; the source is always the scripted
+of the sheet ends its search and gives up a pairing still in its pairing step. The window's own methods run on
+stand-ins, as in test_headerstatus, because the real window needs a display; the source is always the scripted
 FakeBluetooth."""
 
 import ast
@@ -130,6 +130,16 @@ class FailureMessageTest(unittest.TestCase):
         self.assertIn("was paired but did not connect", message.text(ENGLISH))
         self.assertIn("Connect", ENGLISH(message.hint))
 
+    def test_a_cancel_that_came_after_the_device_paired_says_where_it_is_and_whether_it_reconnects(self):
+        failure = bt.Failure(bt.CANCELED, bt.PAIRING, bt.STAGE_PAIR, 5, "Speaker", paired=True)
+        untrusted, trusted = (bt.Device(5, "Speaker", paired=True, trusted=value) for value in (False, True))
+        message = failure_message(failure, "Speaker", untrusted)
+        self.assertEqual(message.text(ENGLISH), "Speaker had already paired when you canceled.")
+        self.assertEqual(ENGLISH(message.hint), "It's in My devices: choose Connect to use it, or Forget to remove "
+                                                "it. It won't reconnect by itself unless you forget it and add it again.")
+        self.assertNotIn("reconnect", ENGLISH(failure_message(failure, "Speaker", trusted).hint))
+        self.assertEqual(failure_message(failure, "Speaker").hint, "")      # it is no longer among the remembered
+
     def test_a_failure_the_window_does_not_know_still_says_something_plain(self):
         message = failure_message(bt.Failure("something-new", "something-else"), "Pad")
         self.assertEqual((message.action, message.reason), ("bluetooth.failed.other", "bluetooth.reason.failed"))
@@ -139,15 +149,21 @@ class FailureMessageTest(unittest.TestCase):
     def test_every_action_and_reason_has_words_in_every_language(self):
         keys = {f"bluetooth.reason.{code}" for code in bt.FAILURES} | {
             f"bluetooth.failed.{action}" for action in sheet.ACTIONS} | {
-            "bluetooth.failed.other", "bluetooth.failed.paired", "bluetooth.failed.pairedHint", "bluetooth.failure"}
+            "bluetooth.failed.other", "bluetooth.failed.paired", "bluetooth.failed.pairedHint", "bluetooth.failure",
+            "bluetooth.failed.canceledPaired", "bluetooth.failed.canceledPairedHint",
+            "bluetooth.failed.canceledTrustedHint"}
         for path in sorted(LOCALES.glob("*.json")):
             strings = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(keys - set(strings), set(), path.name)
             translator = Translator(LOCALES, path.stem)
             for code in bt.FAILURES:
                 for action in sheet.ACTIONS:
-                    text = failure_message(bt.Failure(code, action, name="Pad"), "Pad").text(translator)
-                    self.assertFalse(re.search(r"[{}]", text), f"{path.stem}: {text}")
+                    for paired in (False, True):
+                        failure = bt.Failure(code, action, name="Pad", paired=paired)
+                        message = failure_message(failure, "Pad", bt.Device(1, "Pad", paired=True))
+                        text = message.text(translator) + translator(message.hint) if message.hint else \
+                            message.text(translator)
+                        self.assertFalse(re.search(r"[{}]", text), f"{path.stem}: {text}")
 
     def test_no_word_of_the_plumbing_reaches_the_user(self):
         jargon = re.compile(r"bluez|rfkill|d-?bus|hci\d|adapter|address", re.I)
@@ -190,6 +206,18 @@ class FocusTest(unittest.TestCase):
         self.assertEqual(choose_focus("bt:pair:9", panel, first="bt:no"), "bt:no")
         self.assertEqual(choose_focus("bt:close", [("bt:pad:done", False), ("bt:close", True)], "bt:pad:done"),
                          "bt:close")
+
+    def test_a_failure_takes_the_focus_when_it_shows_and_dismissing_it_goes_back_to_its_device(self):
+        source = world()
+        visit = opened(source)
+        visit.press(f"{sheet.CONNECT}2")
+        source.fail(bt.UNREACHABLE)
+        blocks = visit.blocks(ENGLISH)
+        first = next(block.first for block in blocks if block.first)         # what the part that appeared asks for
+        self.assertEqual(choose_focus(f"{sheet.CONNECT}2", control_states(blocks), first), sheet.DISMISS)
+        self.assertEqual(visit.press(sheet.DISMISS), f"{sheet.CONNECT}2")
+        source.fail(bt.BLOCKED, bt.SEARCHING)
+        self.assertIsNone(visit.press(sheet.DISMISS))                         # a failure about no device
 
     def test_the_sheet_opens_on_a_control_that_changes_no_connection(self):
         self.assertEqual(opening_focus(self.CONTROLS), "bt:search")
@@ -498,6 +526,23 @@ class GivingUpTest(unittest.TestCase):
         self.assertNotIn(("dismiss",), self.source.calls)
         self.assertIn("failure", [block.key for block in self.visit.blocks(ENGLISH)])
 
+    def test_a_cancel_that_came_after_the_device_paired_is_told_now_and_at_the_next_visit(self):
+        for left_first in (False, True):
+            with self.subTest(left_first=left_first):
+                self.setUp()
+                if left_first:
+                    self.visit.leave()                                # BlueZ answers after the user left
+                else:
+                    self.visit.press(sheet.CANCEL)
+                self.source.finish_cancel(paired=True)
+                for when in ("now", "at the next visit"):
+                    self.visit.enter()                                # nothing to do while the sheet is open
+                    problem = next((b for b in self.visit.blocks(ENGLISH) if b.key == "failure"), None)
+                    self.assertEqual(problem and problem.text, "Speaker had already paired when you canceled.", when)
+                    self.assertIn("It won't reconnect by itself", problem.hint)
+                    self.visit.leave()
+                self.assertNotIn(("dismiss",), self.source.calls)
+
     def test_a_new_pairing_is_not_taken_for_the_one_given_up(self):
         self.visit.back()
         self.source.finish_cancel()
@@ -605,6 +650,21 @@ class BlocksTest(unittest.TestCase):
                 self.assertNotIn("Nothing found. Check that the device is in pairing mode.",
                                  texts(self.blocks(source, visit)))
                 visit.press(sheet.DISMISS)
+
+    def test_nothing_found_is_not_said_once_a_device_was_listed_and_is_said_again_after_a_new_search(self):
+        nothing = "Nothing found. Check that the device is in pairing mode."
+        for ending in ("paired", "given up after the bond"):
+            with self.subTest(ending):
+                source = world()
+                visit = opened(source)
+                visit.press(sheet.SEARCH)
+                speaker = source.add_device("Speaker", "speaker")
+                visit.press(f"{sheet.PAIR}{speaker}")                 # a pairing ends the search
+                source.finish() if ending == "paired" else source.finish_cancel(paired=True)
+                self.assertNotIn(nothing, texts(visit.blocks(ENGLISH)))
+                visit.press(sheet.SEARCH)
+                source.set_scanning(False)                            # a search of its own that found nothing
+                self.assertIn(nothing, texts(visit.blocks(ENGLISH)))
 
     def test_search_waits_while_something_runs_and_a_search_that_runs_can_always_stop(self):
         source = world()
@@ -895,6 +955,19 @@ class FakeBluetoothTest(unittest.TestCase):
         source.finish_cancel()
         self.assertEqual((source.snapshot.activity, source.snapshot.failure.code), (None, bt.CANCELED))
 
+    def test_a_cancel_that_lands_after_the_bond_leaves_the_device_paired_and_says_so(self):
+        for trusted in (False, True):
+            with self.subTest(trusted=trusted):
+                source = FakeBluetooth(cancel_waits=True)
+                speaker = source.add_device("Speaker", "speaker")
+                source.start()
+                source.pair(speaker)
+                source.cancel()
+                source.finish_cancel(paired=True, trusted=trusted)
+                device, failure = source.snapshot.devices[0], source.snapshot.failure
+                self.assertEqual((device.paired, device.trusted, failure.code, failure.paired),
+                                 (True, trusted, bt.CANCELED, True))
+
     def test_a_deferred_change_is_reported_later_once_for_a_burst_and_never_after_stop(self):
         later, reported = [], []
         source = FakeBluetooth(lambda: reported.append(source.snapshot), defer=later.append)
@@ -1006,6 +1079,20 @@ class WindowTest(unittest.TestCase):
         window.scrim.set_visible.assert_called_with(False)
         self.assert_left(source)
         self.assertEqual((source.running, source.calls[-1]), (False, ("stop",)))
+
+    def test_hiding_the_window_takes_the_focus_back_to_the_button_before_the_sheet_goes(self):
+        # GTK moves a focus left in removed widgets on to the next control at the first frame after the window is
+        # shown again, and a hidden window cannot call that off by taking the focus then.
+        for shown in (True, False):
+            with self.subTest(button_shown=shown):
+                window = self.stand_in(world())
+                window.bluetooth_button.get_visible.return_value = shown
+                window._on_unmap()
+                calls = [name for name, _args, _kwargs in window.mock_calls]
+                focused = calls.index("bluetooth_button.grab_focus" if shown else "_focus_default")
+                self.assertLess(focused, calls.index("scrim.set_visible"))
+                self.assertLess(focused, calls.index("_bt_content.get_ancestor().get_parent().remove"))
+                self.assertEqual("bluetooth_button.grab_focus" in calls, shown)
 
     def test_quitting_leaves_the_sheet_and_stops_bluetooth(self):
         source = self.pairing_world()

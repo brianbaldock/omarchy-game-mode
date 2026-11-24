@@ -17,6 +17,17 @@ step; see [Changelog and releases](CONTRIBUTING.md#changelog-and-releases).
   left. It turns amber at 20 % and red at 10 % while discharging, and is hidden on a machine without a battery.
   Both update only while Gaming Home is shown, so a hidden Gaming Home still wakes nothing. Battery data comes
   from UPower, with `/sys/class/power_supply` as the fallback; peripheral batteries are not shown.
+- **Bluetooth in the Gaming Home header** (#22). A button opens a sheet to switch Bluetooth on or off for the whole
+  computer, connect, disconnect or forget remembered devices, and add new ones: search, then pair by comparing a
+  number, typing a code on the device, or entering a PIN or passkey on an on-screen number pad. It works with the
+  D-pad, mouse and touch. A search or a pairing starts only when you ask and ends when you leave the sheet, and a
+  hidden Gaming Home still runs nothing. Below 1400 px the header shows the logo without the title to make room.
+  Not yet tested with real devices.
+- **`omarchy-game-mode power`** (#23). `power status` prints the power profile and the ones the machine offers,
+  `power set power-saver|balanced|performance` changes it, and `power cycle` steps to the next one, for example from
+  a key bind. It asks power-profiles-daemon, which applies the profile before it answers, never starts the daemon
+  and never asks for a password; a session the system does not allow is refused. It also tells Omarchy to keep the
+  choice for the current power source.
 
 ## [0.2.1] - 2026-11-24
 

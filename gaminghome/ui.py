@@ -235,7 +235,6 @@ window.gh-window {
 .gh-icon-button.off { color: @gh_muted; }
 .gh-icon-button.connected { color: @gh_accent; }
 .gh-icon-button.warn, .gh-icon-button.warn.selected { background: alpha(@gh_warning, 0.16); color: @gh_warning; }
-.gh-bt-sheet .gh-nav.dimmed { opacity: 0.45; }
 .gh-bt-sheet .gh-option { min-height: 56px; }
 .gh-pill.danger { background-color: @gh_danger; color: @gh_bg; }
 .gh-pill.danger.selected { background-color: mix(@gh_danger, @gh_fg, 0.15); border-color: @gh_fg; }
@@ -277,6 +276,11 @@ window.gh-window {
 .gh-pad-key.primary { background-color: @gh_accent; color: @gh_bg; }
 .gh-pad-key.selected { background-color: alpha(@gh_accent, 0.18); }
 .gh-pad-key.primary.selected { background-color: mix(@gh_accent, @gh_fg, 0.15); border-color: @gh_fg; }
+/* A control that would do nothing now: what it shows fades and a colored fill goes, but its border and shadow stay,
+   so the focus ring on it is as strong as on any other control. */
+.gh-bt-sheet .gh-nav.dimmed > * { opacity: 0.45; }
+.gh-bt-sheet .gh-pill.dimmed, .gh-bt-sheet .gh-pad-key.dimmed { background-color: alpha(@gh_fg, 0.07); color: @gh_fg; }
+.gh-bt-sheet .gh-pill.dimmed.selected, .gh-bt-sheet .gh-pad-key.dimmed.selected { border-color: @gh_accent; }
 .gh-compact .gh-bt-panel { padding: 14px 18px; }
 .gh-compact .gh-bt-digit { font-size: 36px; }
 
@@ -881,13 +885,19 @@ class HomeWindow(Gtk.ApplicationWindow):
 
     def _on_unmap(self, *_):
         self._status.stop()
+        if self.sheet in ("bluetooth", "power"):
+            # The sheet goes with the window, so no prompt or search of it greets the user after a game, and the focus
+            # goes back to the button that opened it, as when the sheet is closed. It goes there before the sheet's
+            # widgets do: GTK moves a focus left in removed widgets on to the next control at the first frame after
+            # the window is shown again, and a window already hidden cannot call that off by taking the focus.
+            button = self.bluetooth_button if self.sheet == "bluetooth" else self.power_button
+            self.sheet = None
+            self.root.set_sensitive(True)
+            if not (button.get_visible() and button.grab_focus()):
+                self._focus_default()
+            self.scrim.set_visible(False)
         self._leave_bluetooth()
         self._leave_power()
-        if self.sheet in ("bluetooth", "power"):
-            # The sheet goes with the window, so no prompt or search of it greets the user after a game.
-            self.sheet = None
-            self.scrim.set_visible(False)
-            self.root.set_sensitive(True)
         self._bluetooth.stop()
         self._power.stop()
 
@@ -967,7 +977,7 @@ class HomeWindow(Gtk.ApplicationWindow):
     def _leave_bluetooth(self):
         """Every way the Bluetooth sheet goes away ends here: B, Close, Escape and Menu, another sheet taking its
         place, the window being built again and the window being hidden. Its search ends with it, and so does a
-        pairing that has not paired the device yet.
+        pairing still in its pairing step.
 
         Its widgets go as well. GTK clicks a button a moment after A or Enter and calls that off only when the
         button is unrealized, so a hidden sheet could still act; and nothing typed on the pad stays in a label.
@@ -1172,8 +1182,9 @@ class HomeWindow(Gtk.ApplicationWindow):
         if inline:
             holder, image = self._bt_badge()
             part.append(holder)
+        # A pairing that has paired offers nothing to press: its words take the whole panel, in the middle of its height.
         text = label("", "gh-option-title" if inline else "gh-bt-question", wrap=True, max_chars=BT_WRAP_CHARS,
-                     hexpand=True, valign=Gtk.Align.CENTER)
+                     hexpand=True, valign=Gtk.Align.CENTER, vexpand=not block.controls)
         part.append(text)
         digits = []
         if block.code:
@@ -1188,7 +1199,7 @@ class HomeWindow(Gtk.ApplicationWindow):
                 digits.append(digit)
             part.append(code)
         actions = part if inline else hbox(12)
-        if not inline:
+        if not inline and block.controls:
             part.append(actions)
         buttons = {}
         for control in block.controls:

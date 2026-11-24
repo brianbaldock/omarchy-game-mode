@@ -173,14 +173,19 @@ class FakeBluetooth:
         """The device of a CODE prompt has received this many digits."""
         self._update(prompt=replace(self._own["prompt"], typed=typed))
 
-    def finish_cancel(self):
-        """BlueZ answers the cancelled pairing: it ends, cancelled."""
+    def finish_cancel(self, paired=False, trusted=False):
+        """BlueZ answers the cancelled pairing: it ends, cancelled. ``paired``: the device had paired before the
+        cancel took effect, so it stays paired and the failure says so, as the BlueZ client reports it; ``trusted``:
+        the attempt had got as far as trusting it too."""
         activity, prompt = self._own["activity"], self._own["prompt"]
         self._cancelling = False
         device = activity.device if activity is not None else prompt.device
         name = activity.name if activity is not None else prompt.name
         stage = activity.stage if activity is not None else bt.STAGE_PAIR
-        self._update(prompt=None, activity=None, failure=bt.Failure(bt.CANCELED, bt.PAIRING, stage, device, name))
+        if paired and device in self._devices:
+            self._devices[device] = replace(self._devices[device], paired=True, trusted=trusted)
+        self._update(prompt=None, activity=None,
+                     failure=bt.Failure(bt.CANCELED, bt.PAIRING, stage, device, name, paired))
 
     def finish(self):
         """The activity under way succeeds."""
