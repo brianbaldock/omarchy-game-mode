@@ -20,7 +20,10 @@ def comments(relative) -> str:
     return " ".join(" ".join(line.lstrip("#").split()) for line in lines if line.startswith("#"))
 
 
-README, CONTRIBUTING, SITE = text("README.md"), text("CONTRIBUTING.md"), text("site/index.html")
+README, CONTRIBUTING = text("README.md"), text("CONTRIBUTING.md")
+# The source archive leaves the website out, so its wording is only checked in a full checkout.
+SITE = text("site/index.html") if (ROOT / "site" / "index.html").is_file() else ""
+needs_site = unittest.skipUnless(SITE, "the source archive has no website")
 HWDB = comments("contrib/udev/61-rog-xbox-ally-gamepad.hwdb")
 REPORT_FORM = text(".github/ISSUE_TEMPLATE/hardware-validation.yml")
 
@@ -28,7 +31,9 @@ REPORT_FORM = text(".github/ISSUE_TEMPLATE/hardware-validation.yml")
 class DocsTest(unittest.TestCase):
     def test_no_working_notes_in_user_facing_text(self):
         notes = re.compile(r"\b(workstreams?|orchestrator|rubber[ -]duck|session[- ]state|critique|WS[0-9])\b", re.I)
-        for name, document in (("README.md", README), ("CONTRIBUTING.md", CONTRIBUTING), ("site/index.html", SITE)):
+        documents = [("README.md", README), ("CONTRIBUTING.md", CONTRIBUTING)]
+        documents += [("site/index.html", SITE)] if SITE else []
+        for name, document in documents:
             self.assertEqual(notes.findall(document), [], name)
 
     def test_claims_that_reading_inputplumber_made_false_are_gone(self):
@@ -43,8 +48,11 @@ class DocsTest(unittest.TestCase):
         self.assertIn("it loads no profile, sets no property and sends no event", README)
         self.assertIn("it is not a mapping upgrade by itself", README)
         self.assertIn("never changes it", CONTRIBUTING)
-        self.assertIn("never changes it", SITE)
         self.assertIsNone(re.search(r"InputPlumber (improves|fixes|restores)", README + CONTRIBUTING + SITE))
+
+    @needs_site
+    def test_website_says_inputplumber_is_never_changed(self):
+        self.assertIn("never changes it", SITE)
 
     def test_readme_separates_verified_from_pending(self):
         tiers = ("**Verified by automated tests:**", "without physical input:**",
@@ -98,10 +106,13 @@ class DocsTest(unittest.TestCase):
         self.assertIn("a restart is the cleanest", README)
 
     def test_guide_promise_is_kept_everywhere(self):
-        self.assertIn("Game Mode never acts on the Xbox Guide button", SITE)
-        self.assertIn("It never acts on the Guide button", SITE)
         self.assertIn("Guide/Xbox button is deliberately left alone", README)
         self.assertIn("capture Guide", CONTRIBUTING)
+
+    @needs_site
+    def test_website_keeps_the_guide_promise(self):
+        self.assertIn("Game Mode never acts on the Xbox Guide button", SITE)
+        self.assertIn("It never acts on the Guide button", SITE)
 
 
 if __name__ == "__main__":
