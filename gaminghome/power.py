@@ -2,8 +2,8 @@
 
 A power profile is one of the three that power-profiles-daemon (PPD) offers: power-saver, balanced and performance.
 On hardware that backs them (a firmware platform profile, the CPU's boost and energy preference) a profile changes
-more than a label: measured on one ROG Xbox Ally, on AC power with short synthetic loads, power-saver, balanced and
-performance held the chip to about 6, 18 and 24 W. On a machine where nothing backs a profile, PPD's placeholder
+more than a label: measured on one ROG Xbox Ally, on AC power with short synthetic loads, the chip drew about 6, 18
+and 24 W in power-saver, balanced and performance. On a machine where nothing backs a profile, PPD's placeholder
 driver changes nothing, and this module does not offer such a profile. The names are PPD's own, which are also
 Omarchy's and the desktop's, so there is nothing to translate between.
 
@@ -33,13 +33,15 @@ service (starting PPD would stop the other power managers it conflicts with), an
 does not see every write to the files behind a profile (another program's energy preference or boost, or a platform
 profile of ``custom``).
 
-``stop()`` forgets a request that is still on its way. The service may well carry it out, but the source reports
-nothing about it, clears ``pending`` and starts no timer; the next ``start()`` reads the service again. The one
-process a source starts is the short helper that makes Omarchy remember a choice. It may finish after ``stop()``,
-because ending it would lose the choice at the next plug or unplug: it is bounded by its own time limit, killed
-with everything it started if that runs out, reaped, and never reports back. What was last read stays across
-``stop()`` and ``start()``, so that the header does not blink while the first reading is on its way; ``pending``,
-``failure`` and ``note`` do not. The window gets its source from a ``PowerFactory``.
+``stop()`` stops following a request that is still on its way. The service may well carry it out, but the source
+reports nothing about it, clears ``pending`` and starts no timer; the next ``start()`` reads the service again, and
+if that reading comes within a few seconds of the request and shows its profile, the request counts as done (see
+Operations). Later it is forgotten. The one process a source starts is the short helper that makes Omarchy remember
+a choice. It may finish after ``stop()``, because ending it would lose the choice at the next plug or unplug: it is
+bounded by its own time limit, killed with everything it started if that runs out, reaped, and never reports back.
+What was last read stays across ``stop()`` and ``start()``, so that the header does not blink while the first
+reading is on its way; ``pending``, ``failure`` and ``note`` do not. The window gets its source from a
+``PowerFactory``.
 
 Changes
 -------
@@ -50,19 +52,23 @@ once. Reading ``snapshot`` is cheap and never blocks. ``set_profile`` returns at
 Operations
 ----------
 * ``set_profile(profile)``:
-  * ends at once with ``UNAVAILABLE`` when the state is not ``READY``, and with ``UNSUPPORTED`` for a profile that is
-    not in ``available``; it is ignored while ``snapshot.pending`` is set;
+  * ends at once with ``UNAVAILABLE`` when the state is not ``READY`` or the service has not been read yet in this
+    visit (until then the last visit's reading is shown, ``READY`` included), and with ``UNSUPPORTED`` for a profile
+    that is not in ``available``; it is ignored while ``snapshot.pending`` is set;
   * when the profile is already the active one nothing is asked of the service (it would do nothing, and would leave
     another program's hold in place), but Omarchy is still told to remember it;
   * otherwise it asks the service and ``pending`` holds the profile until the answer. The answer is the outcome: the
     service applies a profile before it replies, so there is no waiting for it to take hold. ``DENIED`` is the
     system refusing this session, ``UNAVAILABLE`` the service going away, ``TIMEOUT`` no answer in time and ``FAILED``
-    anything else. After a ``TIMEOUT`` the failure goes again if the service later reports that profile;
+    anything else. After a ``TIMEOUT``, or when ``stop()`` came before the answer, the request still counts as done
+    if the service reports its profile within a few seconds of the request: the failure goes, Omarchy is told as
+    below, and another program's change after that is noted (``CHANGED_ELSEWHERE``). Later the same profile may as
+    well be another program's choice, and the request is forgotten;
   * afterwards the source tells Omarchy to remember the choice for the current power source, with Omarchy's own
     command when it is installed (a profile set straight in PPD is forgotten at the next plug or unplug). That is
     bookkeeping: when it fails the profile is set all the same and the note ``NOT_REMEMBERED`` says so.
-* ``retry`` reads the service again after ``ERROR``. ``dismiss`` clears the failure and the note, and so does a new
-  ``set_profile``.
+* ``retry`` reads the service again after ``ERROR``. ``dismiss`` clears the failure and the note and forgets a request
+  whose answer never came, and so does a new ``set_profile``.
 
 Holds
 -----
