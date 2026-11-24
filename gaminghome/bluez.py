@@ -44,8 +44,11 @@ addressed to the unique name that owns ``org.bluez`` at that moment (never to th
   the adapter's ``Powered`` only when the adapter did not follow (or when the command is not installed).
 
 Never sent: ``SetDiscoveryFilter``, ``RequestDefaultAgent``, ``ConnectDevice``, and no other property write
-(``Discoverable``, ``Pairable``, ``Alias``, ``Blocked``, ``WakeAllowed``, ``PreferredBearer``, ...). What an operation
-did is read back from BlueZ's signals, never assumed from a reply.
+(``Discoverable``, ``Pairable``, ``Alias``, ``Blocked``, ``WakeAllowed``, ``PreferredBearer``, ...). What a device is
+(paired, trusted, connected, its battery) is read from BlueZ's properties and their signals, never assumed from a
+reply: a reply only says whether a step worked. The one thing taken from a reply is ``Failure.paired`` after a
+``Pair()`` that succeeded or found the device paired already, since BlueZ announces ``Paired`` only after it has
+looked up the device's services.
 
 The pairing agent
 -----------------
@@ -53,10 +56,12 @@ The agent exists from the press of Pair to the end of the pairing step, on this 
 only BlueZ and only about that device (``bluezagent.py`` says how). BlueZ asks the agent a program registered about
 the pairings that program starts, and its default agent about everything else: pairings that a device starts and
 services that ask to connect. Omarchy runs ``bt-agent`` (from bluez-tools, ``NoInputNoOutput``, accepting) as that
-default agent, so the agent registered here queues behind it, answers the pairing Gaming Home started and leaves
-everything else to it. That is what lets Gaming Home pair a device that needs a code, such as a keyboard's passkey or
-a number to compare. Where no other agent is registered, BlueZ makes the first one registered the default: then, for
-the seconds of a pairing, this agent is the default one and refuses a pairing that another device starts meanwhile.
+default agent. While it stays registered, the agent registered here queues behind it, answers the pairing Gaming Home
+started and leaves everything else to it. That is what lets Gaming Home pair a device that needs a code, such as a
+keyboard's passkey or a number to compare. Where no other agent is registered, BlueZ makes the first one registered
+the default: then, for the seconds of a pairing, this agent is the default one and refuses a pairing that another
+device starts meanwhile, and with BlueZ's default ``AlwaysPairable=false`` BlueZ also makes the adapter bondable,
+which it shows as ``Pairable``, until the agent goes. A cancel ends the agent at once.
 
 Power
 -----
@@ -74,8 +79,9 @@ Timers and the rest
 -------------------
 Nothing polls. A timer exists only while it has something to do: the notification coalescer while a change waits to
 be reported (``COALESCE_MS``, or at once for what the user did), the search limit while a search runs, one timeout
-while an operation runs, and the power command's. ``idle`` says that there is none and no call in flight. Replies,
-signals and timers that come after ``stop()``, or from an owner that is gone, are dropped by an epoch counter.
+while an operation runs, and the power command's. ``idle`` says that there is none and no call in flight. ``stop()``
+and an owner of ``org.bluez`` that goes cancel every call in flight, so that no answer to one is ever delivered, and an
+epoch counter drops whatever else still comes from before: signals, timers, and a reply should one get through.
 Replies are bounded (``MAX_REPLY_BYTES``), at most ``MAX_TRACKED`` devices are tracked, and every property is
 type-checked as it is read. Device ids count up and are never reused. Object paths, addresses, error texts and codes
 never leave this module, and nothing is logged.
