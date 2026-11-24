@@ -1441,13 +1441,13 @@ class PowerTest(BusCase):
     def command(self, body: str) -> Path:
         """A stand-in for omarchy-bluetooth-power. It notes its arguments and exact environment first."""
         path = SCRATCH / "power"
-        path.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""\
+        path.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""\
             import json, os, pathlib, sys, time
             here = pathlib.Path(__file__).parent
             environment = [item.split("=", 1)[0] for item in
                            pathlib.Path("/proc/self/environ").read_bytes().decode().split("\\0") if item]
-            (here / "seen.json").write_text(json.dumps({{"argv": sys.argv[1:], "environment": environment,
-                                                        "pid": os.getpid()}}))
+            (here / "seen.json").write_text(json.dumps({"argv": sys.argv[1:], "environment": environment,
+                                                       "pid": os.getpid()}))
         """) + textwrap.dedent(body), encoding="utf-8")
         path.chmod(0o755)
         return path
