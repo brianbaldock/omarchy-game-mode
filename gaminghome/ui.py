@@ -231,7 +231,7 @@ window.gh-window {
 .gh-icon-button.off { color: @gh_muted; }
 .gh-icon-button.connected { color: @gh_accent; }
 .gh-icon-button.warn, .gh-icon-button.warn.selected { background: alpha(@gh_warning, 0.16); color: @gh_warning; }
-.gh-bt-sheet .gh-nav:disabled { opacity: 0.45; }
+.gh-bt-sheet .gh-nav.dimmed { opacity: 0.45; }
 .gh-bt-sheet .gh-option { min-height: 56px; }
 .gh-pill.danger { background-color: @gh_danger; color: @gh_bg; }
 .gh-pill.danger.selected { background-color: mix(@gh_danger, @gh_fg, 0.15); border-color: @gh_fg; }
@@ -965,13 +965,21 @@ class HomeWindow(Gtk.ApplicationWindow):
         self._hover_selects(button)
         return button
 
-    @staticmethod
-    def _bt_apply(button, control):
+    @classmethod
+    def _bt_apply(cls, button, control):
         if not control.icon and button.get_label() != control.text:
             button.set_label(control.text)
-        button.set_sensitive(control.enabled)
+        cls._bt_dim(button, not control.enabled)
         for style in ("primary", "danger"):
             (button.add_css_class if style == control.style else button.remove_css_class)(style)
+
+    @staticmethod
+    def _bt_dim(button, dimmed):
+        """A control that would do nothing now is dimmed and announced as disabled, but stays sensitive: GTK takes
+        the focus away from an insensitive widget, and the focus must stay where the user left it."""
+        if button.has_css_class("dimmed") != dimmed:
+            (button.add_css_class if dimmed else button.remove_css_class)("dimmed")
+            button.update_state([Gtk.AccessibleState.DISABLED], [dimmed])
 
     def _bt_set_icon(self, image, icon):
         name = icon_name(self.icons, icon)
@@ -1052,7 +1060,7 @@ class HomeWindow(Gtk.ApplicationWindow):
             state.set_text(b.status)
             (track.add_css_class if b.on else track.remove_css_class)("on")
             knob.set_halign(Gtk.Align.END if b.on else Gtk.Align.START)
-            button.set_sensitive(b.controls[0].enabled)
+            self._bt_dim(button, not b.controls[0].enabled)
         return button, update, {button.get_name(): button}
 
     def _bt_row(self, block):

@@ -135,19 +135,19 @@ def failure_message(failure: bt.Failure, name: str) -> FailureMessage:
 
 
 def choose_focus(wanted: str | None, controls, first: str | None = None) -> str | None:
-    """The control to focus after the sheet changed, or None to leave the focus as it is.
+    """The control to focus after the sheet changed, or None when there is none to focus.
 
     ``controls`` are the sheet's controls in order, as ``(name, enabled)``. ``first`` is where a part that has just
-    appeared wants the focus to start (No for a number to compare, Cancel for a question). Otherwise the focus stays
-    on the control of the same name; when that one is only disabled while something runs, it keeps its claim (None)
-    and gets the focus back once it is enabled again. When it is gone, the focus goes to Search or Close, or else to
-    the first control that neither forgets nor pairs a device.
+    appeared wants the focus to start (No for a number to compare, Cancel for a question); it wins over the control
+    that had the focus. Otherwise the focus stays on the control of the same name, even one that is disabled while
+    something runs: the window only dims it. When that control is gone, the focus goes to Search or Close, or else
+    to the first enabled control that neither forgets nor pairs a device.
     """
     enabled = {name: on for name, on in controls}
     if first and enabled.get(first):
         return first
     if wanted in enabled:
-        return wanted if enabled[wanted] else None
+        return wanted
     for name in SAFE_FOCUS:
         if enabled.get(name):
             return name

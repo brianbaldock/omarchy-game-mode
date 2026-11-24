@@ -277,10 +277,18 @@ def check_behaviour(word, language, window, source):
         check_layout(language, window)
     if word == "bt":
         press(window, f"{sheet.CONNECT}2")
-        busy = [name for name in (f"{sheet.CONNECT}1", f"{sheet.FORGET}2", sheet.POWER)
-                if window._bt_buttons[name].get_sensitive()]
-        check(not busy, f"{busy} can be pressed while a device connects")
-        check(window._bt_buttons[sheet.SEARCH].get_sensitive(), "Search is disabled while a device connects")
+        lit = [name for name in (f"{sheet.CONNECT}1", f"{sheet.FORGET}2", sheet.POWER)
+               if not window._bt_buttons[name].has_css_class("dimmed")]
+        check(not lit, f"{lit} are not dimmed while a device connects")
+        check(window.get_focus() is window._bt_buttons[f"{sheet.CONNECT}2"],
+              f"the focus left the device it connects for {window.get_focus() and window.get_focus().get_name()}")
+        before = len(source.calls)
+        press(window, f"{sheet.FORGET}2")                           # dimmed: pressing it does nothing
+        check(len(source.calls) == before and f"{sheet.FORGET_YES}2" not in window._bt_buttons,
+              "a dimmed control acted while a device connects")
+        window.handle_action(core.UP)                               # the D-pad still moves over dimmed controls
+        window.handle_action(core.DOWN)
+        window._focus_by_name(f"{sheet.CONNECT}2")
         source.finish()
         settle()
         check(window.selected_name() == f"{sheet.CONNECT}2",

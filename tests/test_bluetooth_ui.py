@@ -164,10 +164,13 @@ class FocusTest(unittest.TestCase):
     def test_the_focus_stays_on_the_control_of_the_same_name(self):
         self.assertEqual(choose_focus("bt:connect:1", self.CONTROLS), "bt:connect:1")
 
-    def test_a_control_disabled_while_something_runs_keeps_its_claim_on_the_focus(self):
+    def test_a_control_disabled_while_something_runs_keeps_the_focus(self):
         busy = [(name, name in ("bt:search", "bt:close", "bt:dismiss")) for name, _ in self.CONTROLS]
-        self.assertIsNone(choose_focus("bt:connect:1", busy))
-        self.assertEqual(choose_focus("bt:connect:1", self.CONTROLS), "bt:connect:1")
+        self.assertEqual(choose_focus("bt:connect:1", busy), "bt:connect:1")
+
+    def test_where_a_part_that_just_appeared_starts_beats_the_control_that_had_the_focus(self):
+        controls = [("bt:connect:1", True), ("bt:forget-yes:1", True), ("bt:forget-no:1", True), ("bt:close", True)]
+        self.assertEqual(choose_focus("bt:connect:1", controls, first="bt:forget-no:1"), "bt:forget-no:1")
 
     def test_when_the_control_is_gone_the_focus_goes_to_search_then_close(self):
         self.assertEqual(choose_focus("bt:pair:4", self.CONTROLS), "bt:search")
@@ -926,6 +929,20 @@ class WindowTest(unittest.TestCase):
                         header.index("header.append(self.bluetooth_button)"))
         self.assertLess(header.index("header.append(self.bluetooth_button)"),
                         header.index("header.append(self.settings_button)"))
+
+    def test_a_control_that_would_do_nothing_now_is_dimmed_and_stays_sensitive_so_it_keeps_the_focus(self):
+        # GTK moves the focus away from a widget that turns insensitive.
+        disabled = importlib.import_module("gaminghome.ui").Gtk.AccessibleState.DISABLED
+        button = mock.Mock()
+        button.has_css_class.return_value = False
+        self.window._bt_apply(button, sheet.Control("bt:connect:2", "Connect", enabled=False))
+        button.set_sensitive.assert_not_called()
+        button.add_css_class.assert_any_call("dimmed")
+        button.update_state.assert_called_once_with([disabled], [True])
+        button.has_css_class.return_value = True
+        self.window._bt_apply(button, sheet.Control("bt:connect:2", "Connect"))
+        button.remove_css_class.assert_any_call("dimmed")
+        button.update_state.assert_called_with([disabled], [False])
 
     def test_a_pad_key_counts_every_press_of_a(self):
         from gaminghome.core import ACTIVATE
