@@ -156,7 +156,9 @@ and the buttons keep their room.
 - **Sheet.** A, Enter, a click or a tap on the button opens it. From the top: a line when
   something failed, with Dismiss; the Bluetooth switch; **My devices**, the devices this
   computer remembers, each with Connect or Disconnect and Forget; **Add a device**, with
-  Search. A device keeps its place in the list when it connects. A device without a name
+  Search. When something fails, or the sheet opens on a failure, the focus goes to Dismiss,
+  so that the line is in view; Dismiss takes it back to the device the failure was about.
+  A device keeps its place in the list when it connects. A device without a name
   is listed as "Unnamed device" and devices with the same name are numbered: an address is
   never shown. While Bluetooth is busy with something, such as connecting a device, the
   buttons that would have to wait for it, Search among them, are dimmed and do nothing;

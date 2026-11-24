@@ -31,8 +31,9 @@ PAD_KEYS = (("1", "2", "3"), ("4", "5", "6"), ("7", "8", "9"), ("erase", "0", "d
 # the top into view, then to Search or Close; never to a control that forgets or pairs a device.
 SAFE_FOCUS = (DISMISS, SEARCH, CLOSE)
 DESTRUCTIVE = (FORGET, FORGET_YES, PAIR)
-# Where the focus starts when the sheet opens. None of them changes a connection: the power switch is first only
-# while Bluetooth is off, because while it is on, Search is there before it.
+# Where the focus starts when the sheet opens, unless something failed: then it starts on the failure's Dismiss,
+# which every part that appears asks for, so that the failure line at the top is in view. None of them changes a
+# connection: the power switch is first only while Bluetooth is off, because while it is on, Search is there before it.
 OPENING_FOCUS = (SEARCH, RETRY, POWER, CLOSE)
 
 KIND_ICONS = {"gamepad": "controller", "headphones": "headphones", "headset": "headset", "speaker": "speaker",
@@ -424,7 +425,10 @@ class BluetoothSheet:
         elif name == RETRY:
             self.source.retry()
         elif name == DISMISS:
+            failure = snapshot.failure
             self.source.dismiss()
+            if failure is not None and any(d.id == failure.device for d in bt.remembered(snapshot.devices)):
+                return f"{CONNECT}{failure.device}"     # back to the device that the failure was about
         elif (number := id_in(name, YES)) is not None or (number := id_in(name, NO)) is not None:
             self.source.answer(number, name.startswith(YES))    # the prompt shown; the source ignores one replaced
         elif name == CANCEL:
@@ -517,8 +521,8 @@ class BluetoothSheet:
         if failure is not None and (failure.code != bt.CANCELED or failure.paired):
             device = next((d for d in bt.remembered(snapshot.devices) if d.id == failure.device), None)
             message = failure_message(failure, called(failure.device, failure.name), device)
-            blocks.append(Problem("failure", (Control(DISMISS, t("bluetooth.dismiss")),), text=message.text(t),
-                                  hint=t(message.hint) if message.hint else ""))
+            blocks.append(Problem("failure", (Control(DISMISS, t("bluetooth.dismiss")),), first=DISMISS,
+                                  text=message.text(t), hint=t(message.hint) if message.hint else ""))
         if not snapshot.visible:
             blocks.append(Text("unavailable", text=t("bluetooth.unavailable")))
         elif snapshot.state == bt.ERROR:

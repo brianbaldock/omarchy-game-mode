@@ -207,6 +207,18 @@ class FocusTest(unittest.TestCase):
         self.assertEqual(choose_focus("bt:close", [("bt:pad:done", False), ("bt:close", True)], "bt:pad:done"),
                          "bt:close")
 
+    def test_a_failure_takes_the_focus_when_it_shows_and_dismissing_it_goes_back_to_its_device(self):
+        source = world()
+        visit = opened(source)
+        visit.press(f"{sheet.CONNECT}2")
+        source.fail(bt.UNREACHABLE)
+        blocks = visit.blocks(ENGLISH)
+        first = next(block.first for block in blocks if block.first)         # what the part that appeared asks for
+        self.assertEqual(choose_focus(f"{sheet.CONNECT}2", control_states(blocks), first), sheet.DISMISS)
+        self.assertEqual(visit.press(sheet.DISMISS), f"{sheet.CONNECT}2")
+        source.fail(bt.BLOCKED, bt.SEARCHING)
+        self.assertIsNone(visit.press(sheet.DISMISS))                         # a failure about no device
+
     def test_the_sheet_opens_on_a_control_that_changes_no_connection(self):
         self.assertEqual(opening_focus(self.CONTROLS), "bt:search")
         self.assertEqual(opening_focus([("bt:power", True), ("bt:close", True)]), "bt:power")

@@ -236,7 +236,7 @@ def play(word, window, source):
 
 FIRST_FOCUS = {"bt": sheet.SEARCH, "btoff": sheet.POWER, "bterror": sheet.RETRY, "btforget": f"{sheet.FORGET_NO}3",
                "btconfirm": sheet.NO, "btcode": sheet.CANCEL, "btpin": sheet.PAD_DONE, "btpasskey": sheet.PAD_DONE,
-               "btpairing": sheet.CLOSE, "btfail": f"{sheet.CONNECT}2", "btpaired": sheet.DISMISS,
+               "btpairing": sheet.CLOSE, "btfail": sheet.DISMISS, "btpaired": sheet.DISMISS,
                "btcancelpaired": sheet.DISMISS}
 
 
@@ -382,13 +382,21 @@ def check_behaviour(word, language, window, source):
         check(window._bluetooth.entry.digits == "", "the digits typed outlived the prompt")
         check(not any("042" in text for text in texts_in(window)), "the digits typed stay in a hidden label")
         window.set_visible(True)
+    elif word == "btfail":
+        press(window, sheet.DISMISS)
+        check(window.get_focus() is window._bt_buttons.get(f"{sheet.CONNECT}2"),
+              "dismissing the failure did not take the focus back to the device that failed")
     elif word == "btcancelpaired":
         press(window, sheet.CLOSE)
         window.open_bluetooth()
         settle()
-        check_cancel_told(window, source)                           # still told at the next visit
+        check_cancel_told(window, source)                           # still told at the next visit,
+        check(window.get_focus() is window._bt_buttons[sheet.DISMISS], "the sheet opened away from its failure")
         press(window, sheet.DISMISS)
         check(sheet.DISMISS not in window._bt_buttons and source.snapshot.failure is None, "Dismiss left the failure")
+        speaker = next(device.id for device in source.snapshot.devices if device.name == "Travel Speaker")
+        check(window.get_focus() is window._bt_buttons.get(f"{sheet.CONNECT}{speaker}"),
+              "dismissing the failure did not take the focus to the device that had paired")
     elif word == "btpasskey":
         window.handle_action(core.MENU)
         check(window.sheet is None and source.calls[-1] == ("cancel",), "Menu did not give up the pairing")
