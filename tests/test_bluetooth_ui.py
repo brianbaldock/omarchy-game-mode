@@ -490,15 +490,36 @@ class BlocksTest(unittest.TestCase):
         self.assertIn("Nothing found. Check that the device is in pairing mode.", texts(blocks))
         self.assertEqual(next(block for block in blocks if block.key == "add").status, "")
 
-    def test_a_search_asked_for_reads_as_one_before_the_source_says_it_runs(self):
+    def test_a_search_shows_only_once_the_source_runs_it_and_nothing_found_only_after_one_ran(self):
         source = world()
         visit = opened(source)
         with mock.patch.object(source, "scan", lambda on: source.calls.append(("scan", on))):
-            visit.press(sheet.SEARCH)                               # the source has not answered yet
-        self.assertIn("Looking for devices…", texts(self.blocks(source, visit)))
-        source.fail(bt.BLOCKED, bt.SEARCHING)
-        visit.sync()
-        self.assertIn("Nothing found. Check that the device is in pairing mode.", texts(self.blocks(source, visit)))
+            visit.press(sheet.SEARCH)                               # the source has not started it (yet)
+        blocks = self.blocks(source, visit)
+        self.assertEqual(next(block for block in blocks if block.key == "search").controls[0].text, "Search")
+        self.assertFalse({"Looking for devices…", "Nothing found. Check that the device is in pairing mode."}
+                         & set(texts(blocks)))
+        source.fail(bt.BLOCKED, bt.SEARCHING)                         # it could not start
+        self.assertNotIn("Nothing found. Check that the device is in pairing mode.", texts(self.blocks(source, visit)))
+
+    def test_search_waits_while_something_runs_and_a_search_that_runs_can_always_stop(self):
+        source = world()
+        visit = opened(source)
+        visit.press(f"{sheet.CONNECT}2")
+        self.assertFalse(controls(self.blocks(source, visit))[sheet.SEARCH])
+        visit.press(sheet.SEARCH)
+        self.assertNotIn(("scan", True), source.calls)
+        source.finish()                                               # what a search pressed meanwhile left behind:
+        blocks = self.blocks(source, visit)                           # nothing, as nothing searched
+        self.assertEqual(next(block for block in blocks if block.key == "search").controls[0].text, "Search")
+        heading = next(block for block in blocks if block.key == "add")
+        self.assertFalse({"Searching…", "Looking for devices…"} & set(texts(blocks) + [heading.status]))
+        visit.press(sheet.SEARCH)
+        visit.press(f"{sheet.CONNECT}3")
+        search = next(block for block in self.blocks(source, visit) if block.key == "search").controls[0]
+        self.assertEqual((search.text, search.enabled), ("Stop searching", True))
+        visit.press(sheet.SEARCH)
+        self.assertEqual(source.calls[-1], ("scan", False))
 
     def test_more_devices_than_listed_says_so(self):
         source = world()

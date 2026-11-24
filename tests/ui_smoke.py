@@ -277,7 +277,7 @@ def check_behaviour(word, language, window, source):
         check_layout(language, window)
     if word == "bt":
         press(window, f"{sheet.CONNECT}2")
-        lit = [name for name in (f"{sheet.CONNECT}1", f"{sheet.FORGET}2", sheet.POWER)
+        lit = [name for name in (f"{sheet.CONNECT}1", f"{sheet.FORGET}2", sheet.POWER, sheet.SEARCH)
                if not window._bt_buttons[name].has_css_class("dimmed")]
         check(not lit, f"{lit} are not dimmed while a device connects")
         check(window.get_focus() is window._bt_buttons[f"{sheet.CONNECT}2"],

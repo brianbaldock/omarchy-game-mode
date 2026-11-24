@@ -294,7 +294,7 @@ class BluetoothSheet:
         self.searched = False        # Search was pressed during this visit: the nearby list stays until it ends
         self.forgetting = 0          # the device whose Forget asks for confirmation
         self.entry = DigitEntry()
-        self._asked_search = False   # Search was pressed and the source has not said yet that it searches
+        self._search_seen = False    # a search was seen running during this visit, so "nothing found" can be said
         self._power_target = None    # what the power switch was last asked for, while that runs
 
     @property
@@ -303,7 +303,8 @@ class BluetoothSheet:
 
     @property
     def searching(self) -> bool:
-        return self.snapshot.scanning or self._asked_search
+        """Only the source says whether it searches: it may ignore a request, and it ends a search by itself."""
+        return self.snapshot.scanning
 
     @property
     def typing(self) -> bool:
@@ -324,7 +325,7 @@ class BluetoothSheet:
         if self.visiting:
             return
         self.visiting = True
-        self.searched = self._asked_search = False
+        self.searched = self._search_seen = False
         self.forgetting = 0
         self.entry.clear()
         self.sync()
@@ -334,7 +335,7 @@ class BluetoothSheet:
         if not self.visiting:
             return False
         self.visiting = False
-        self.searched = self._asked_search = False
+        self.searched = self._search_seen = False
         self.forgetting = 0
         self._power_target = None
         self.entry.clear()
@@ -354,9 +355,8 @@ class BluetoothSheet:
             self.entry.begin(prompt)
         if self.forgetting and not any(d.id == self.forgetting for d in bt.remembered(snapshot.devices)):
             self.forgetting = 0
-        failure = snapshot.failure
-        if snapshot.scanning or (failure is not None and failure.action == bt.SEARCHING):
-            self._asked_search = False
+        if self.visiting and snapshot.scanning:
+            self._search_seen = True
         if snapshot.activity is None or snapshot.activity.kind != bt.POWERING:
             self._power_target = None
 
@@ -374,11 +374,10 @@ class BluetoothSheet:
                 self._power_target = snapshot.state != bt.ON
                 self.source.set_power(self._power_target)
         elif name == SEARCH:
-            if self.searching:
-                self._asked_search = False
+            if snapshot.scanning:
                 self.source.scan(False)
-            elif snapshot.state == bt.ON:
-                self.searched = self._asked_search = True
+            elif snapshot.state == bt.ON and idle:
+                self.searched = True
                 self.source.scan(True)
         elif name == RETRY:
             self.source.retry()
@@ -517,15 +516,16 @@ class BluetoothSheet:
         searching = self.searching
         blocks.append(Text("add", text=t("bluetooth.addDevice").upper(), tone="section",
                            status=t("bluetooth.searching") if searching else ""))
+        # A search cannot start while something else runs; one that runs can always be stopped.
         blocks.append(Actions("search", (Control(SEARCH, t("bluetooth.stopSearch" if searching else "bluetooth.search"),
-                                                 style="" if searching else "primary"),),
+                                                 searching or idle, "" if searching else "primary"),),
                               text=t("bluetooth.addHint")))
         if self.searched:
             found = bt.nearby(snapshot.devices)
             for device in found:
                 blocks.append(Row(f"nearby:{device.id}", (Control(f"{PAIR}{device.id}", t("bluetooth.pair"), idle),),
                                   icon=device_icon(device.kind), title=names[device.id]))
-            if not found:
+            if not found and (searching or self._search_seen):
                 blocks.append(Text("nearby-empty", tone="muted",
                                    text=t("bluetooth.looking" if searching else "bluetooth.nothingFound")))
         if snapshot.truncated:
