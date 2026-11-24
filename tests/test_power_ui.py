@@ -189,6 +189,40 @@ class FakePowerTest(unittest.TestCase):
         source.change(active=SAVER)
         self.assertEqual(source.snapshot.note, "")
 
+    def test_a_request_whose_answer_never_came_counts_as_done_when_its_profile_shows_up_in_time(self):
+        timed_out = started(active=BALANCED)
+        timed_out.set_profile(PERFORMANCE)
+        timed_out.fail(TIMEOUT)
+        timed_out.finish()                                            # the service carried it out after all
+        snapshot = timed_out.snapshot
+        self.assertEqual((snapshot.active, snapshot.failure, timed_out.remembered), (PERFORMANCE, None,
+                                                                                     [PERFORMANCE]))
+        timed_out.change(active=SAVER)                                # done: another program's change is noted
+        self.assertEqual(timed_out.snapshot.note, CHANGED_ELSEWHERE)
+        hidden = started(active=BALANCED)
+        hidden.set_profile(SAVER)
+        hidden.stop()                                                 # on its way when the window was hidden
+        hidden.finish()
+        hidden.start()
+        self.assertEqual((hidden.snapshot.active, hidden.remembered), (SAVER, [SAVER]))
+
+    def test_later_the_profile_is_no_answer_and_neither_after_dismiss_or_a_visit_that_did_not_find_it(self):
+        source = started(active=BALANCED)
+        source.set_profile(PERFORMANCE)
+        source.fail(TIMEOUT)
+        source.expire()
+        source.finish()
+        self.assertEqual((source.snapshot.active, source.snapshot.failure, source.remembered),
+                         (PERFORMANCE, Failure(TIMEOUT, PERFORMANCE), []))
+        for forget in (FakePower.dismiss, lambda visit: (visit.stop(), visit.start())):
+            with self.subTest(forget=forget):
+                source = started(active=BALANCED)
+                source.set_profile(PERFORMANCE)
+                source.fail(TIMEOUT)
+                forget(source)
+                source.finish()
+                self.assertEqual((source.snapshot.active, source.remembered), (PERFORMANCE, []))
+
     def test_omarchy_not_keeping_the_choice_is_a_note_and_a_new_request_clears_it(self):
         source = started(active=BALANCED)
         source.set_profile(PERFORMANCE)

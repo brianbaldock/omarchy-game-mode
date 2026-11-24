@@ -18,7 +18,11 @@ Where a window could be fooled, it does what the client does:
   (``remembered``). Otherwise the service is asked: with ``answers="now"`` it answers at once, with
   ``answers="later"`` when the test calls ``finish()`` or ``fail(code)``;
 * another program's change after a request of this visit succeeded is noted (``CHANGED_ELSEWHERE``), and so is
-  Omarchy's command failing (``not_remembered``); a new request and ``dismiss`` clear the failure and the note.
+  Omarchy's command failing (``not_remembered``); a new request and ``dismiss`` clear the failure and the note;
+* a request whose answer never came (``fail(TIMEOUT)``, or on its way at ``stop()``) may still be carried out
+  (``finish``). Its profile showing up in time counts as the answer: the time-out goes and Omarchy is told.
+  ``expire()`` lets that time pass (about ten seconds for the client): afterwards the profile is only the active
+  one, whoever chose it. A new request, ``dismiss`` and a first reading of a visit that does not show it forget it.
 
 When it reports: ``on_change`` only between ``start()`` and ``stop()``, and a burst of changes once. The client calls
 ``on_change`` from inside ``start``, ``set_profile``, ``dismiss`` and ``retry``; this stand-in does that only with
@@ -34,7 +38,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 
 from gaminghome.power import (ABSENT, CHANGED_ELSEWHERE, ERROR, NOT_REMEMBERED, PERFORMANCE, PROFILES, READY,
-                              UNAVAILABLE, UNSUPPORTED, Evidence, Failure, Snapshot)
+                              TIMEOUT, UNAVAILABLE, UNSUPPORTED, Evidence, Failure, Snapshot)
 
 
 class FakePower:
@@ -54,6 +58,7 @@ class FakePower:
         self.changes = 0                      # how often on_change was called
         self._snapshot = Snapshot()
         self._asked = ""                      # the request the service is working on, whether the source waits or not
+        self._late = ""                       # asked for, and the answer never came: shown in time, it is the answer
         self._live = False                    # the service was read in this visit
         self._armed = False                   # a request of this visit succeeded: another program's change is noted
         self._epoch = 0                       # one more at each start() and stop(): a late report of another is dropped
@@ -87,6 +92,7 @@ class FakePower:
             return
         self.running, self._live, self._armed, self._owed = False, False, False, False
         self._epoch += 1
+        self._late = self._snapshot.pending or self._late
         self._snapshot = replace(self._snapshot, pending="", failure=None, note="")
 
     def retry(self):
@@ -98,7 +104,7 @@ class FakePower:
     def dismiss(self):
         self.calls.append(("dismiss",))
         if self.running:
-            self._armed = False
+            self._armed, self._late = False, ""
             with self._inside_call():
                 self._update(failure=None, note="")
 
@@ -107,7 +113,7 @@ class FakePower:
         snapshot = self._snapshot
         if not self.running or snapshot.pending:
             return
-        self._armed = False
+        self._armed, self._late = False, ""
         asked = profile if profile in PROFILES else ""
         with self._inside_call():
             if snapshot.state != READY or not self._live:
@@ -133,7 +139,7 @@ class FakePower:
 
     def finish(self):
         """The service carries out the request on its way and answers. A source stopped meanwhile forgot it, and
-        sees the profile at its next reading."""
+        sees the profile at its next reading; one that gave up waiting sees it now (see ``expire``)."""
         profile, self._asked = self._asked, ""
         assert profile, "nothing was asked"
         self.world["active"] = profile
@@ -144,14 +150,23 @@ class FakePower:
             self.remembered.append(profile)
             self._update(active=profile, pending="")
         else:
-            self._update(active=profile)          # asked in an earlier visit: the service says what it did
+            self._read()                          # the service says what it did
 
     def fail(self, code):
-        """The service refuses the request on its way, or does not answer it."""
-        profile, self._asked = self._asked, ""
+        """The service refuses the request on its way, or does not answer it in time (``TIMEOUT``): then it may
+        still carry it out with ``finish``."""
+        profile = self._asked
         assert profile, "nothing was asked"
+        if code != TIMEOUT:
+            self._asked = ""
         if self.running and self._snapshot.pending == profile:
+            if code == TIMEOUT:
+                self._late = profile
             self._update(pending="", failure=Failure(code, profile))
+
+    def expire(self):
+        """About ten seconds pass: the profile of a request whose answer never came is no answer to it any more."""
+        self._late = ""
 
     def change(self, **world):
         """The service changes: another program switches the profile, the service restarts with other profiles,
@@ -178,7 +193,7 @@ class FakePower:
     # ---- inside ----------------------------------------------------------------------------------------------------
     def _read(self):
         world, snapshot = self.world, self._snapshot
-        self._live = world["state"] == READY
+        first, self._live = not self._live, world["state"] == READY
         if self._live:
             reading = {"state": READY, "active": world["active"],
                        "available": tuple(p for p in PROFILES if p in world["available"]),
@@ -186,13 +201,21 @@ class FakePower:
         else:
             reading = {"state": world["state"], "active": "", "available": (), "degraded": (), "holds": ()}
         changes = {**reading, "evidence": world["evidence"]}
+        late = self._live and bool(self._late) and reading["active"] == self._late
         if world["state"] == ABSENT:
             self._armed, self._asked = False, ""    # the service went, and the request on its way with it
             if snapshot.pending:
                 changes.update(pending="", failure=Failure(UNAVAILABLE, snapshot.pending))
+        elif late:                                  # the answer that never came, in time: the request is done
+            self._armed, self._late = True, ""
+            self.remembered.append(reading["active"])
+            if snapshot.failure == Failure(TIMEOUT, reading["active"]):
+                changes["failure"] = None
         elif (self._armed and not snapshot.pending and snapshot.state == READY and reading["active"]
               and reading["active"] != snapshot.active):
             changes["note"] = CHANGED_ELSEWHERE
+        if first and self._live and not late:
+            self._late = ""                         # it did not take, or did not stay
         self._update(**changes)
 
     @contextmanager
