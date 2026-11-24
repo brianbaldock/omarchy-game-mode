@@ -336,6 +336,11 @@ def check_behaviour(word, language, window, source):
         source.finish()
         settle()
     elif word == "btpin":
+        prompt = source.snapshot.prompt.id
+        window._focus_by_name(f"{sheet.PAD}5")                      # Enter answers from any key of the pad
+        window._on_key(None, Gdk.KEY_Return, 0, Gdk.ModifierType(0))
+        check(source.calls[-1] == ("answer", prompt, "042"), "Enter on the pad did not answer what was typed")
+        settle()
         cancels = source.calls.count(("cancel",))
         window.set_visible(False)
         check(window.sheet is None, "hiding the window left the Bluetooth sheet open")

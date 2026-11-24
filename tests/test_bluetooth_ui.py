@@ -1066,6 +1066,20 @@ class WindowTest(unittest.TestCase):
         button.remove_css_class.assert_any_call("dimmed")
         button.update_state.assert_called_with([disabled], [False])
 
+    def test_enter_answers_from_any_key_of_the_pad_and_presses_cancel_on_cancel(self):
+        gdk = importlib.import_module("gaminghome.ui").Gdk
+        source = world()
+        window = self.stand_in(source)
+        window._bluetooth.press(f"{sheet.PAIR}{source.add_device('Speaker', 'speaker')}")
+        number = source.show_prompt(bt.PIN, max_length=16)
+        window._bluetooth.sync()
+        for key in ("0", "4"):                                        # typed with the D-pad or a click
+            window._bluetooth.press(f"{sheet.PAD}{key}")
+        for focus, handled in (("bt:cancel", False), ("bt:pad:4", True)):
+            window.get_focus.return_value.get_name.return_value = focus
+            self.assertEqual(self.window._on_key(window, None, gdk.KEY_Return, 0, gdk.ModifierType(0)), handled)
+        self.assertEqual(source.calls[-1], ("answer", number, "04"))
+
     def test_a_pad_key_counts_every_press_of_a(self):
         from gaminghome.core import ACTIVATE
         key = mock.Mock()

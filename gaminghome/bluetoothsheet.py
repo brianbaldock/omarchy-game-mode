@@ -450,12 +450,12 @@ class BluetoothSheet:
         return False, None                  # and a pairing given up already lets the sheet close
 
     def key(self, key: str) -> str | None:
-        """A digit or "erase" from a keyboard while the pad is shown. The focus moves to Done after a digit, so
-        that Enter answers; to Erase when nothing is left, because Done is then disabled."""
+        """A digit, "erase" or "done" (Enter) from a keyboard while the pad is shown. The focus moves to Done after
+        a digit, and to Erase when nothing is left, because Done is then disabled."""
         if not self.typing:
             return None
-        if key == "erase":
-            return self._pad("erase")
+        if key in ("erase", "done"):
+            return self._pad(key)
         return PAD_DONE if self.entry.press(key) else None
 
     def _pad(self, key: str) -> str | None:

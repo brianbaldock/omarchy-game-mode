@@ -1612,9 +1612,13 @@ class HomeWindow(Gtk.ApplicationWindow):
             return True
         if self.sheet == "bluetooth" and self._bluetooth.typing and not state & (
                 Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK):
-            # A keyboard types on the pad too. Enter needs nothing here: a digit moves the focus to Done.
-            char = chr(Gdk.keyval_to_unicode(keyval))
-            key = "erase" if keyval == Gdk.KEY_BackSpace else char if char.isascii() and char.isdigit() else None
+            # A keyboard types on the pad too. Enter answers while the focus is on the pad, whichever key it is on;
+            # on Cancel or Close it presses that, as everywhere else.
+            char, focus = chr(Gdk.keyval_to_unicode(keyval)), self.get_focus()
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
+                key = "done" if focus is None or focus.get_name().startswith(PAD) else None
+            else:
+                key = "erase" if keyval == Gdk.KEY_BackSpace else char if char.isascii() and char.isdigit() else None
             if key is not None:
                 self._render_bluetooth(self._bluetooth.key(key))
                 return True
