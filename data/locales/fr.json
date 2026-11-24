@@ -92,5 +92,15 @@
   "app.battlenet.description": "Jeux Battle.net via le lanceur d'Omarchy, sans Steam.",
   "app.minecraft.description": "Le Minecraft Launcher officiel sur ce bureau.",
   "app.moonlight.installHelp": "Moonlight est fourni avec Omarchy, donc il n'y a pas d'installateur séparé ici. Si la commande moonlight manque, réinstallez le paquet moonlight-qt de l'ensemble de base d'Omarchy.",
-  "app.remote.installHelp": "Choisir Installer est la confirmation. Omarchy ajoute ensuite le paquet vérifié greenlight-bin et ne redemande rien dans le terminal."
+  "app.remote.installHelp": "Choisir Installer est la confirmation. Omarchy ajoute ensuite le paquet vérifié greenlight-bin et ne redemande rien dans le terminal.",
+  "inputplumber.device": "InputPlumber {version} gère {name} avec le profil {profile}.",
+  "inputplumber.reading": "Omarchy Game Mode lit sa manette virtuelle et ne modifie rien dans InputPlumber.",
+  "inputplumber.noDevice": "InputPlumber est lancé, mais ne gère aucune manette.",
+  "inputplumber.readFailed": "InputPlumber est lancé, mais Omarchy Game Mode n’a pas pu lire son état.",
+  "inputplumber.unrecognized": "Omarchy Game Mode ne reconnaît pas son type de manette virtuelle ({kinds}). Utilisez le clavier ou le tactile ici.",
+  "inputplumber.ambiguous": "Plusieurs manettes virtuelles ressemblent à celle qu’annonce InputPlumber ; Omarchy Game Mode n’en utilise donc aucune. Utilisez le clavier ou le tactile ici.",
+  "inputplumber.hidden": "{name} est présent, mais InputPlumber le masque et Omarchy Game Mode ne peut pas le lire.",
+  "inputplumber.evdevOnly": "Il lit cette manette uniquement via evdev.",
+  "inputplumber.noR3": "Il ne signale pas le clic du stick droit (R3).",
+  "inputplumber.padName": "{name} (InputPlumber)"
 }

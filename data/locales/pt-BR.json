@@ -92,5 +92,15 @@
   "app.battlenet.description": "Jogos da Battle.net pelo lançador do Omarchy, sem Steam.",
   "app.minecraft.description": "O Minecraft Launcher oficial nesta área de trabalho.",
   "app.moonlight.installHelp": "O Moonlight vem com o Omarchy, então não há um instalador separado aqui. Se o comando moonlight estiver ausente, reinstale o pacote moonlight-qt do conjunto base do Omarchy.",
-  "app.remote.installHelp": "Escolher Instalar é a confirmação. O Omarchy então adiciona o pacote verificado greenlight-bin e não pergunta de novo no terminal."
+  "app.remote.installHelp": "Escolher Instalar é a confirmação. O Omarchy então adiciona o pacote verificado greenlight-bin e não pergunta de novo no terminal.",
+  "inputplumber.device": "O InputPlumber {version} gerencia {name} com o perfil {profile}.",
+  "inputplumber.reading": "O Omarchy Game Mode lê o controle virtual dele e não altera nada no InputPlumber.",
+  "inputplumber.noDevice": "O InputPlumber está em execução, mas não gerencia nenhum controle.",
+  "inputplumber.readFailed": "O InputPlumber está em execução, mas o Omarchy Game Mode não conseguiu ler o estado dele.",
+  "inputplumber.unrecognized": "O Omarchy Game Mode não reconhece o tipo de controle virtual dele ({kinds}). Use o teclado ou o toque aqui.",
+  "inputplumber.ambiguous": "Vários controles virtuais se parecem com o que o InputPlumber anuncia, então o Omarchy Game Mode não usa nenhum. Use o teclado ou o toque aqui.",
+  "inputplumber.hidden": "{name} está presente, mas o InputPlumber o oculta e o Omarchy Game Mode não consegue lê-lo.",
+  "inputplumber.evdevOnly": "Ele lê este controle apenas via evdev.",
+  "inputplumber.noR3": "Ele não informa o clique do analógico direito (R3).",
+  "inputplumber.padName": "{name} (InputPlumber)"
 }

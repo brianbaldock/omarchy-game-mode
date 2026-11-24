@@ -27,7 +27,7 @@ body:
     id: input_stack
     attributes:
       label: Input stack
-      description: Choose the main stack. Mention combinations in the setup field; HHD/InputPlumber compatibility is unverified.
+      description: Choose the main stack. Mention combinations in the setup field. HHD compatibility is unverified; InputPlumber is only read, and its physical validation is pending.
       options:
         - None / direct physical controller
         - HHD

@@ -58,8 +58,13 @@ class Runtime:
         self.interpreter = core.ControllerInterpreter(self._schedule, GLib.source_remove, self._on_controller_action)
         from .hypr import HyprlandIPC
         from .input import ControllerMonitor
+        from .inputplumber import InputPlumberClient
         from .mapper import AntimicroxMapper
-        self.input = ControllerMonitor(self.interpreter, self.on_ui_changed)
+        # Read-only: InputPlumber only tells the monitor which virtual gamepad it may read.
+        self.inputplumber = InputPlumberClient(self._on_inputplumber_changed)
+        self.input = ControllerMonitor(self.interpreter, self.on_ui_changed,
+                                       extra_gamepads=self.inputplumber.virtual_gamepads,
+                                       on_candidate=self.inputplumber.hint)
         self.hypr = HyprlandIPC(self._on_windows_changed, self._on_ipc_changed)
         self.mapper = AntimicroxMapper(self._on_mapper_changed, managed=self.settings.mapper_managed)
         self._stopped = False
@@ -74,6 +79,7 @@ class Runtime:
         self.css = load_css(display, settings_mod.theme_colors())
         self._watch_dirs()
         self.mapper.start()
+        self.inputplumber.start()
         self.input.start()
         if not self.hypr.start():
             self._run(self.model.ipc_lost())
@@ -89,6 +95,7 @@ class Runtime:
         self.interpreter.set_nav_enabled(False)
         self.interpreter.reset()
         self.mapper.stop()
+        self.inputplumber.stop()
         self.input.stop()
         self.hypr.stop()
         for monitor in self._monitors:
@@ -158,6 +165,10 @@ class Runtime:
 
     def _on_mapper_changed(self):
         self._sync_nav()
+        self.on_ui_changed()
+
+    def _on_inputplumber_changed(self):
+        self.input.rescan()
         self.on_ui_changed()
 
     def window_state_changed(self, *_):
@@ -278,11 +289,76 @@ class Runtime:
         if status["devices"] and self.mapper.external:
             return {"label": self.t("status.mapperExternal"), "state": "warn", "tooltip": self.t("status.mapperExternalHelp")}
         if status["devices"]:
-            names = ", ".join(d["name"] for d in status["devices"])
+            names = ", ".join(self.t("inputplumber.padName", name=d["name"]) if d.get("virtual") else d["name"]
+                              for d in status["devices"])
             return {"label": self.t("status.controllerConnected"), "state": "ok", "tooltip": names}
-        if any("permission" in e["error"] for e in status["errors"]):
-            return {"label": self.t("status.controllerPermission"), "state": "warn", "tooltip": "; ".join(e["error"] for e in status["errors"])}
-        return {"label": self.t("status.controllerUnavailable"), "state": None, "tooltip": ""}
+        from .inputplumber import STATE_FAILED, STATE_PENDING, STATE_UNKNOWN
+        state = self.inputplumber.state
+        # Until InputPlumber has answered, a hidden physical node is not yet known to be hidden on purpose.
+        if state not in (STATE_UNKNOWN, STATE_PENDING) and any("permission" in e["error"] for e in status["errors"]):
+            reasons = [e["error"] for e in status["errors"]]
+            if state == STATE_FAILED:
+                reasons.append(self.t("inputplumber.readFailed"))
+            return {"label": self.t("status.controllerPermission"), "state": "warn", "tooltip": "; ".join(reasons)}
+        gap = self._inputplumber_gap(status)
+        if status.get("unreadable"):
+            # Information, not a fault to fix: the controller is there, hidden, and has no virtual twin to read.
+            return {"label": self.t("status.controllerPermission"), "state": None, "tooltip": gap}
+        return {"label": self.t("status.controllerUnavailable"), "state": None, "tooltip": gap}
+
+    def _inputplumber_gap(self, status) -> str:
+        """Why no controller navigates Game Mode although InputPlumber is running, as far as that is known."""
+        from .inputplumber import STATE_FAILED
+        if not self.inputplumber.available:
+            return ""
+        parts = []
+        if self.inputplumber.state == STATE_FAILED:
+            parts.append(self.t("inputplumber.readFailed"))
+        if status.get("unreadable"):
+            parts.append(self.t("inputplumber.hidden", name=", ".join(d["name"] for d in status["unreadable"])))
+        kinds = self.inputplumber.unrecognized_targets()
+        if status.get("ambiguous"):
+            parts.append(self.t("inputplumber.ambiguous"))
+        elif kinds:
+            parts.append(self.t("inputplumber.unrecognized", kinds=", ".join(kinds)))
+        return " ".join(parts)
+
+    def inputplumber_summary(self):
+        """Informational text for Settings; None while InputPlumber is not running or has not answered yet."""
+        from .inputplumber import NOTE_EVDEV_ONLY, NOTE_NO_R3, STATE_EMPTY, STATE_FAILED, STATE_READY
+        client = self.inputplumber
+        if client.state == STATE_FAILED:
+            return self.t("inputplumber.readFailed")
+        if client.state == STATE_EMPTY:
+            return self.t("inputplumber.noDevice")
+        if client.state != STATE_READY:
+            return None
+        status = self.input.status()
+        version = client.version or "?"
+        parts = [self.t("inputplumber.device", version=version, name=c.name or "?", profile=c.profile or "?")
+                 for c in client.composites]
+        if any(d.get("virtual") for d in status["devices"]):
+            parts.append(self.t("inputplumber.reading"))
+        else:
+            parts.append(self._inputplumber_gap(status))
+        notes = client.notes()
+        if NOTE_EVDEV_ONLY in notes:
+            parts.append(self.t("inputplumber.evdevOnly"))
+        if NOTE_NO_R3 in notes:
+            parts.append(self.t("inputplumber.noR3"))
+        return " ".join(part for part in parts if part)
+
+    def inputplumber_status(self):
+        """InputPlumber as Game Mode sees it. Never includes a persistent or serial identifier."""
+        status = self.input.status()
+        report = self.inputplumber.status()
+        if report["available"] and status.get("ambiguous"):
+            report["notes"].append("ambiguous-gamepad")
+        if report["available"] and status.get("unreadable"):
+            report["notes"].append("hidden-unreadable")
+        report["gamepad_nodes"] = [{"path": d["path"], "name": d["name"]}
+                                   for d in status["devices"] if d.get("virtual")]
+        return report
 
     def mode_summary(self):
         choice_keys = {core.AUTO: "settings.modeAuto", core.GAME: "settings.modeGame", core.DESKTOP: "settings.modeDesktop"}
@@ -444,6 +520,7 @@ class Runtime:
             "mode": {"desired": m.desired_mode(), "requested": m.requested_mode, "mapper": self.mapper.status(),
                      "raw_navigation": self.interpreter.nav_enabled},
             "controllers": self.input.status(),
+            "inputplumber": self.inputplumber_status(),
             "ipc": {"connected": self.hypr.connected, "error": self.hypr.error},
             "launch": {"service": pending.service, "handoff": pending.handoff} if pending else None,
             "session": {"service": m.session_service, "window": m.describe(m.session_window())},
