@@ -93,8 +93,11 @@ while an operation runs, and the power command's. ``idle`` says that there is no
 and an owner of ``org.bluez`` that goes cancel every call in flight, so that no answer to one is ever delivered, and an
 epoch counter drops whatever else still comes from before: signals, timers, and a reply should one get through.
 Replies are bounded (``MAX_REPLY_BYTES``), at most ``MAX_TRACKED`` devices are tracked, and every property is
-type-checked as it is read. Device ids count up and are never reused. Object paths, addresses, error texts and codes
-never leave this module, and nothing is logged.
+type-checked as it is read. When that many are tracked, a device seen anew takes the place of the oldest one that is
+neither paired nor bonded nor the device of the operation under way (nameless ones first), even a connected one. A
+device that is not tracked stays out of sight until Gaming Home is shown again and BlueZ is read again, even if
+another program pairs it meanwhile. Device ids count up and are never reused. Object paths, addresses, error texts and
+codes never leave this module, and nothing is logged.
 """
 
 from __future__ import annotations
