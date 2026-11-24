@@ -558,7 +558,7 @@ class BluetoothSheet:
             if not found and (searching or self._search_seen):
                 blocks.append(Text("nearby-empty", tone="muted",
                                    text=t("bluetooth.looking" if searching else "bluetooth.nothingFound")))
-        if snapshot.truncated:
+        if self.searched and snapshot.truncated:                   # about the nearby list, shown after Search
             blocks.append(Text("truncated", text=t("bluetooth.truncated"), tone="muted"))
         return blocks
 

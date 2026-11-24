@@ -602,11 +602,13 @@ class BlocksTest(unittest.TestCase):
         visit.press(sheet.SEARCH)
         self.assertEqual(source.calls[-1], ("scan", False))
 
-    def test_more_devices_than_listed_says_so(self):
+    def test_more_devices_than_listed_says_so_once_search_was_pressed(self):
         source = world()
         visit = opened(source)
         for number in range(bt.MAX_DEVICES):
             source.add_device(f"Sensor {number}", "other")
+        self.assertNotIn("More devices were found than are shown.", texts(self.blocks(source, visit)))
+        visit.press(sheet.SEARCH)
         self.assertIn("More devices were found than are shown.", texts(self.blocks(source, visit)))
 
     def test_devices_with_the_same_name_or_none_are_told_apart_without_an_address(self):
