@@ -1080,6 +1080,20 @@ class WindowTest(unittest.TestCase):
         self.assert_left(source)
         self.assertEqual((source.running, source.calls[-1]), (False, ("stop",)))
 
+    def test_hiding_the_window_takes_the_focus_back_to_the_button_before_the_sheet_goes(self):
+        # GTK moves a focus left in removed widgets on to the next control at the first frame after the window is
+        # shown again, and a hidden window cannot call that off by taking the focus then.
+        for shown in (True, False):
+            with self.subTest(button_shown=shown):
+                window = self.stand_in(world())
+                window.bluetooth_button.get_visible.return_value = shown
+                window._on_unmap()
+                calls = [name for name, _args, _kwargs in window.mock_calls]
+                focused = calls.index("bluetooth_button.grab_focus" if shown else "_focus_default")
+                self.assertLess(focused, calls.index("scrim.set_visible"))
+                self.assertLess(focused, calls.index("_bt_content.get_ancestor().get_parent().remove"))
+                self.assertEqual("bluetooth_button.grab_focus" in calls, shown)
+
     def test_quitting_leaves_the_sheet_and_stops_bluetooth(self):
         source = self.pairing_world()
         window = self.stand_in(source)

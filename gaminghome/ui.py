@@ -835,12 +835,17 @@ class HomeWindow(Gtk.ApplicationWindow):
 
     def _on_unmap(self, *_):
         self._status.stop()
-        self._leave_bluetooth()
         if self.sheet == "bluetooth":
-            # The sheet goes with the window, so no prompt or search of it greets the user after a game.
+            # The sheet goes with the window, so no prompt or search of it greets the user after a game, and the focus
+            # goes back to the button that opened it, as when the sheet is closed. It goes there before the sheet's
+            # widgets do: GTK moves a focus left in removed widgets on to the next control at the first frame after
+            # the window is shown again, and a window already hidden cannot call that off by taking the focus.
             self.sheet = None
-            self.scrim.set_visible(False)
             self.root.set_sensitive(True)
+            if not (self.bluetooth_button.get_visible() and self.bluetooth_button.grab_focus()):
+                self._focus_default()
+            self.scrim.set_visible(False)
+        self._leave_bluetooth()
         self._bluetooth.stop()
 
     def _on_active_changed(self, *_):

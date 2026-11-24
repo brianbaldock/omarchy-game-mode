@@ -31,6 +31,8 @@ has closed does nothing (A then B on Search, A then Menu on Pair, Enter then Esc
 is checked once for each way: B in ``btcode``, the window built again in ``btconfirm``, hidden in ``btpin`` and Menu
 in ``btpasskey``; ``btpairing`` checks that a device paired already goes on connecting when the window is built again,
 and ``btcancelpaired`` that a pairing given up after the device had paired is told about, then and at the next visit.
+A window hidden with the sheet open must have the focus on the Bluetooth button once it is shown again and has drawn a
+frame.
 """
 
 import datetime
@@ -444,7 +446,8 @@ def check_late_clicks(window, source):
 
 
 def check_exits(window, source):
-    """Each way out of the sheet ends its search."""
+    """Each way out of the sheet ends its search, and hiding the window with the sheet open leaves the focus on the
+    Bluetooth button that opened it."""
     def ended():
         return source.calls.count(("scan", False))
 
@@ -474,8 +477,25 @@ def check_exits(window, source):
     check(window.sheet is None, "hiding the window left the Bluetooth sheet open")
     check(ended() > before and not source.running and source.calls[-1] == ("stop",),
           "hiding the window did not end the search and stop Bluetooth")
-    window.set_visible(True)
+    show_again(window)
     check(source.running, "showing the window again did not start Bluetooth")
+    check(window.get_focus() is window.bluetooth_button,
+          f"shown again, the window has the focus on {window.get_focus() and window.get_focus().get_name()}, "
+          "not on the Bluetooth button that opened the sheet")
+
+
+def show_again(window):
+    """Show the hidden window and run the main loop until it has drawn a frame. GTK moves a focus that was left in
+    removed widgets at the end of a frame, so only then is the focus where it stays."""
+    clock, drawn = window.get_frame_clock(), []
+    handler = clock.connect("after-paint", lambda *_: drawn.append(True))
+    window.set_visible(True)
+    context, deadline = GLib.MainContext.default(), time.monotonic() + 3
+    while not drawn and time.monotonic() < deadline:
+        if not context.iteration(False):
+            time.sleep(0.005)
+    clock.disconnect(handler)
+    check(drawn, "the window drew no frame once it was shown again")
     settle()
 
 
