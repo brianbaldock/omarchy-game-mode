@@ -1,7 +1,7 @@
 """Render Omarchy Game Mode with fake IO and save PNG screenshots.
 
 Usage (headless, touches no live desktop state):
-  gtk4-broadwayd :7 &
+  gtk4-broadwayd --address 127.0.0.1 :7 &
   GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 python3 tests/ui_smoke.py OUTDIR [lang] [WxH] [word ...]
 
 The words after the size choose what the fakes show. ``inputplumber`` renders a handheld where InputPlumber
@@ -29,6 +29,27 @@ its place, the window being built again and the window being hidden), and that a
 has closed does nothing (A then B on Search, A then Menu on Pair, Enter then Escape on Search). Giving up a pairing
 is checked once for each way: B in ``btcode``, the window built again in ``btconfirm``, hidden in ``btpin`` and Menu
 in ``btpasskey``; ``btpairing`` checks that a device paired already goes on connecting when the window is built again.
+
+The power profile is a scripted ``FakePower``, never the machine's: nothing reaches power-profiles-daemon. Without a
+``pw`` word it offers all three profiles with performance active. It answers the way the client does: from inside
+the window's own calls, and from the main loop for what the service does; a request is answered when the script
+says so. A ``pw`` word (use one ``bt`` or ``pw`` word at a time) renders Home and then the power sheet:
+
+  pw          performance active, three profiles          pwsaver      power-saver active
+  pwbalanced  balanced active                              pwpending    performance asked for, no answer yet
+  pwfail      performance refused (denied)                 pwerror      the service could not be read
+  pwnone      only one real profile: no button             pwheld       two programs ask for performance
+  pwdegraded  performance held back because of heat        pwelsewhere  another program changed it afterwards
+  pwnotremembered  Omarchy could not keep the choice       pwmismatch   the firmware says quiet, not performance
+
+Every ``pw`` word but ``pwnone`` checks where the focus starts and that the status command names it neutrally, that
+each way out of the sheet (B, Escape, Menu, Close, Settings or Bluetooth taking its place, the window built again or
+hidden) leaves it and takes its widgets out of the window, and that a click GTK delivers after the sheet has closed
+chooses nothing (A then B, A then Menu, Enter then Escape on another profile). ``pwpending`` checks that the focus
+stays on the option asked for, which stays sensitive, until the answer and after it; ``pwfail`` that a failure is
+not there at the next visit, also one that arrives after the sheet closed; ``pwerror`` that Try again reads the
+service; ``pw`` that a profile vanishing from the list does not leave the focus on a dead button; ``pwnone`` that
+there is no power button until a second profile is offered.
 """
 
 import datetime
@@ -46,7 +67,9 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from fakes.fake_bluetooth import FakeBluetooth  # noqa: E402
+from fakes.fake_power import FakePower  # noqa: E402
 from gaminghome import application, bluetooth as bt, bluetoothsheet as sheet, core, settings as settings_mod  # noqa: E402
+from gaminghome import power, powersheet as pw  # noqa: E402
 from gaminghome.battery import CHARGING, DISCHARGING, FULL, Battery  # noqa: E402
 from gaminghome.catalog import Availability, load_catalog, machine_arch  # noqa: E402
 from gaminghome.clock import ClockStyle  # noqa: E402
@@ -67,6 +90,9 @@ BLUETOOTH = ("bt", "btoff", "bterror", "btnone", "btscan", "btempty", "btmany", 
 SEARCHED = ("btscan", "btempty", "btmany", "btdupes", "btconfirm", "btcode", "btpin", "btpasskey", "btpairing",
             "btpaired")
 PAIRING = ("btconfirm", "btcode", "btpin", "btpasskey", "btpairing", "btpaired")
+POWER = ("pw", "pwsaver", "pwbalanced", "pwpending", "pwfail", "pwerror", "pwnone", "pwheld", "pwdegraded",
+         "pwelsewhere", "pwnotremembered", "pwmismatch")
+CHOOSING = ("pwpending", "pwfail", "pwelsewhere", "pwnotremembered")     # performance is chosen from balanced
 
 
 class Stub:
@@ -153,7 +179,8 @@ def check(condition, message):
 def press(window, name):
     """Select a control by its name and press A on it, as the controller does. GTK clicks a button a moment after
     it is activated, so this runs the main loop until it has."""
-    check(window._focus_by_name(name), f"{name} cannot be selected; the sheet has {sorted(window._bt_buttons)}")
+    check(window._focus_by_name(name),
+          f"{name} cannot be selected; the sheet has {sorted(window._bt_buttons or window._pw_buttons)}")
     button, clicked = window.get_focus(), []
     handler = button.connect("clicked", lambda *_: clicked.append(True))
     window.handle_action(core.ACTIVATE)
@@ -442,12 +469,276 @@ def check_exits(window, source):
     settle()
 
 
+# ---- the power profile ------------------------------------------------------------------------------------------
+def power_world(word, on_change):
+    """What the power service looks like before the sheet is opened; the programs' names are made up. Like the
+    client, the source reports from inside the window's own calls, and reports what the service does from the main
+    loop; a request is answered when the script says so."""
+    active = {"pwsaver": power.SAVER, "pwbalanced": power.BALANCED}.get(word, power.PERFORMANCE)
+    options = {}
+    if word in CHOOSING or word == "pwnone":
+        active = power.BALANCED
+    if word == "pwerror":
+        options["state"] = power.ERROR
+    elif word == "pwnone":
+        options["available"] = (power.BALANCED,)
+    elif word == "pwheld":
+        options["holds"] = (power.Hold(power.PERFORMANCE, "Racing Game"), power.Hold(power.PERFORMANCE))
+    elif word == "pwdegraded":
+        options["degraded"] = (power.HEAT,)
+    elif word == "pwmismatch":
+        options["evidence"] = power.Evidence("quiet", "off")
+    return FakePower(on_change, active=active, answers="later", reentrant=True, defer=later, **options)
+
+
+def play_power(word, window, source):
+    """Do in the open sheet what the scenario shows."""
+    if word in CHOOSING:
+        press(window, pw.option_name(power.PERFORMANCE))
+        check(source.snapshot.pending == power.PERFORMANCE, "pressing A on Performance asked for nothing")
+    if word == "pwfail":
+        source.fail(power.DENIED)
+    elif word in ("pwelsewhere", "pwnotremembered"):
+        source.finish()
+        settle()
+        if word == "pwelsewhere":
+            source.change(active=power.SAVER)
+        else:
+            source.not_remembered()
+    settle()
+
+
+def keys(window):
+    return [block.key for block in window._power.blocks(window.runtime.t, window._battery)]
+
+
+def named(widget, prefix):
+    """Whether this widget or one under it has a name that starts with ``prefix``."""
+    if (widget.get_name() or "").startswith(prefix):
+        return True
+    child = widget.get_first_child()
+    while child is not None:
+        if named(child, prefix):
+            return True
+        child = child.get_next_sibling()
+    return False
+
+
+def check_power_shown(word, window, source):
+    """What the sheet must look like before its picture is taken."""
+    t = window.runtime.t
+    check(window.sheet == "power", f"the power sheet is not open: {window.sheet!r}")
+    focus = window.get_focus()
+    name = focus.get_name() if focus is not None else None
+    check(window._pw_buttons.get(name) is focus, f"the focus is outside the sheet: {name!r}")
+    wanted = pw.RETRY if word == "pwerror" else pw.option_name(
+        {"pwsaver": power.SAVER, "pwbalanced": power.BALANCED}.get(word, power.PERFORMANCE))
+    check(name == wanted, f"the focus is on {name}, not on {wanted}")
+    told = window.runtime.status()["selected"]
+    check(told == name and told in pw.NAMES, f"the status command names the focus {told!r}")
+    shown = keys(window)
+    if source.snapshot.usable:
+        current = window._pw_buttons[pw.option_name(source.snapshot.active)]
+        check(current.has_css_class("current") and sum(button.has_css_class("current") for button in
+                                                       window._pw_buttons.values()) == 1,
+              "the active profile is not the one marked")
+        check("sources" in shown, "the line about plugged in and battery is missing although there is a battery")
+    if word == "pwpending":
+        asked = window._pw_buttons[wanted]
+        others = [button for key, button in window._pw_buttons.items() if pw.option_profile(key) and key != wanted]
+        check(asked.has_css_class("pending") and not asked.has_css_class("dimmed")
+              and t("power.switching") in texts_in(asked), "the profile asked for does not say that it is switching")
+        check(all(button.has_css_class("dimmed") and button.get_sensitive() for button in others),
+              "the other profiles are not dimmed, or not sensitive, while one is asked for")
+    expected = {"pwfail": "failure", "pwelsewhere": "note", "pwnotremembered": "note", "pwheld": "holds",
+                "pwdegraded": "degraded", "pwmismatch": "evidence", "pwerror": "retry"}.get(word)
+    if expected:
+        check(expected in shown, f"the sheet does not show {expected}: {shown}")
+    if word in ("pwfail", "pwelsewhere", "pwnotremembered"):
+        check(pw.DISMISS in window._pw_buttons, "what happened to the choice has no Dismiss")
+    if word == "pwheld":
+        check(any("Racing Game" in text for text in texts_in(window._pw_content)), "the program asking is not named")
+    if word == "pwerror":
+        check(window.power_button.has_css_class("warn"), "the power button does not warn that it could not read")
+
+
+def check_header(language, window, width):
+    """The header: the power button between Bluetooth and Settings (mirrored in Arabic), every chip and button
+    inside the window, and no chip's text cut short."""
+    settle()
+    check(window.get_width() == width, f"the header made the window {window.get_width()} pixels wide, not {width}")
+    shown = [button for button in (window.bluetooth_button, window.power_button, window.settings_button)
+             if button.get_visible()]
+    places = [middle(window, button) for button in shown]
+    check(places == sorted(places, reverse=language == "ar"), f"the header's buttons are out of order in {language}")
+    for widget in shown + [window.controller_chip, window.mode_chip, window.battery_chip, window.clock_label]:
+        if widget.get_visible():
+            ok, bounds = widget.compute_bounds(window)
+            check(ok and bounds.get_x() >= 0 and bounds.get_x() + bounds.get_width() <= width,
+                  f"{widget.get_name() or type(widget).__name__} does not fit in the header in {language}")
+    for text in (window.controller_label, window.mode_label, window.battery_label, window.clock_label):
+        if text.get_mapped():
+            check(not text.get_layout().is_ellipsized(), f"{text.get_text()!r} is cut short in {language}")
+
+
+def check_power_layout(language, window):
+    """An option reads glyph, words, mark from the start of the line: mirrored in Arabic."""
+    settle()
+    option = next((window._pw_buttons[pw.option_name(profile)] for profile in power.PROFILES
+                   if pw.option_name(profile) in window._pw_buttons), None)
+    if option is None:
+        return
+    row = option.get_child()
+    glyph, mark = row.get_first_child(), row.get_last_child()
+    texts = glyph.get_next_sibling()
+    mirrored = middle(window, glyph) > middle(window, texts) > middle(window, mark)
+    check(mirrored == (language == "ar"), f"a profile is {'not ' if language == 'ar' else ''}mirrored in {language}")
+
+
+def check_power_behaviour(word, language, window, source):
+    """After the picture: what pressing things does. Each scenario leaves the sheet open for the next check."""
+    check_header(language, window, window.get_size_request()[0])
+    if word == "pwnone":
+        check(not window.power_button.get_visible() and window.power_button not in window.nav_rows()[0],
+              "the header offers a power profile with only one to choose")
+        source.change(available=power.PROFILES)
+        settle()
+        check(window.power_button.get_visible() and window.power_button in window.nav_rows()[0],
+              "a second profile did not bring the power button")
+        return
+    check_power_layout(language, window)
+    option = pw.option_name
+    if word == "pwpending":
+        asked = window._pw_buttons[option(power.PERFORMANCE)]
+        window.handle_action(core.UP)                               # the D-pad still moves over dimmed profiles
+        check(window.get_focus() is window._pw_buttons[option(power.BALANCED)], "the D-pad did not move up")
+        window.handle_action(core.DOWN)
+        check(window.get_focus() is asked, "the D-pad did not come back to the profile asked for")
+        source.finish()
+        settle()
+        check(window.get_focus() is window._pw_buttons[option(power.PERFORMANCE)] and asked.get_root() is window,
+              f"the focus left the profile asked for when the answer came: {window.selected_name()}")
+        check(asked.has_css_class("current") and not any(button.has_css_class("dimmed")
+                                                         for button in window._pw_buttons.values()),
+              "the profile asked for is not the active one after the answer, or something stays dimmed")
+    elif word == "pwfail":
+        window.handle_action(core.BACK)
+        window.open_power()
+        settle()
+        check(pw.DISMISS not in window._pw_buttons and source.snapshot.failure is None,
+              "the failure is still there at the next visit")
+        press(window, option(power.PERFORMANCE))                    # asked again, and the sheet closes first
+        window.handle_action(core.BACK)
+        source.fail(power.TIMEOUT)
+        settle()
+        window.open_power()
+        settle()
+        check(pw.DISMISS not in window._pw_buttons and source.snapshot.failure is None,
+              "a failure that came after the sheet closed greets the next visit")
+    elif word == "pwerror":
+        source.change(state=power.READY)
+        press(window, pw.RETRY)
+        settle()
+        check(source.snapshot.usable and window.selected_name() == option(source.snapshot.active),
+              f"Try again did not read the service, or the focus is on {window.selected_name()}")
+        check(not window.power_button.has_css_class("warn"), "the power button still warns after a good reading")
+    elif word == "pw":
+        check(window._focus_by_name(option(power.SAVER)), "power-saver cannot be selected")
+        source.change(available=(power.BALANCED, power.PERFORMANCE))     # the service restarted without it
+        settle()
+        focus = window.get_focus()
+        check(focus is window._pw_buttons.get(option(power.PERFORMANCE)) and focus.get_root() is window,
+              f"the focus stayed on a profile that went away, or went to {window.selected_name()}")
+        source.change(available=power.PROFILES)
+        settle()
+    check_power_exits(window, source)
+    check_power_late_clicks(window, source)
+
+
+def check_power_exits(window, source):
+    """Each way out of the sheet leaves it, and takes its widgets and words out of the window."""
+    t = window.runtime.t
+
+    def reopen():
+        if window.sheet is not None:
+            window.close_sheet()
+        window.open_power()
+        settle()
+        check(window.sheet == "power" and window._power.visiting and window._pw_buttons, "the power sheet did not open")
+
+    def left(way):
+        check(window.sheet != "power" and not window._power.visiting, f"{way} left the power sheet open")
+        check(not window._pw_buttons and window._pw_content is None and not named(window, pw.OPTION),
+              f"{way} left the power sheet's controls in the window")
+        check(t("power.intro") not in texts_in(window), f"{way} left the power sheet's words in a hidden label")
+
+    ways = {"Menu": lambda: window.handle_action(core.MENU), "B": lambda: window.handle_action(core.BACK),
+            "Escape": lambda: window._on_key(None, Gdk.KEY_Escape, 0, Gdk.ModifierType(0)),
+            "Close": lambda: press(window, pw.CLOSE), "Settings": window.open_settings,
+            "Bluetooth": window.open_bluetooth,
+            "a new language": lambda: (setattr(window, "sheet", None), window.build())}
+    for way, leave in ways.items():
+        reopen()
+        leave()
+        left(way)
+    reopen()
+    window.set_visible(False)
+    left("hiding the window")
+    check(window.sheet is None and not source.running and source.calls[-1] == ("stop",),
+          "hiding the window did not close the sheet and stop the power profile")
+    window.set_visible(True)
+    settle()
+    check(source.running, "showing the window again did not start the power profile")
+    if window.sheet is not None:
+        window.close_sheet()
+
+
+def check_power_late_clicks(window, source):
+    """GTK clicks a button 250 ms after A or Enter. A click on its way when the sheet goes must choose nothing: A then
+    B, A then Menu, Enter then Escape, each on a profile that is not the active one. Then A alone, which chooses."""
+    def target():
+        snapshot = source.snapshot
+        return next(profile for profile in snapshot.available if profile != snapshot.active)
+
+    def attempt(way, press_it, close):
+        window.open_power()
+        settle()
+        chosen, active = target(), source.snapshot.active
+        check(window._focus_by_name(pw.option_name(chosen)), f"{chosen} cannot be selected")
+        before = len(source.calls)
+        press_it()
+        close()
+        check(window.sheet is None, f"{way} did not close the sheet")
+        settle(400)
+        late = [call for call in source.calls[before:] if call[0] == "set_profile"]
+        check(not late and source.snapshot.active == active and not source.snapshot.pending,
+              f"{late or chosen} reached the power profile after {way} had closed the sheet")
+
+    def escape():
+        window._on_key(None, Gdk.KEY_Escape, 0, Gdk.ModifierType(0))
+
+    attempt("A then B", lambda: window.handle_action(core.ACTIVATE), lambda: window.handle_action(core.BACK))
+    attempt("A then Menu", lambda: window.handle_action(core.ACTIVATE), lambda: window.handle_action(core.MENU))
+    attempt("Enter then Escape", lambda: window.get_focus().activate(), escape)
+    window.open_power()
+    settle()
+    chosen = target()
+    press(window, pw.option_name(chosen))
+    check(source.calls[-1] == ("set_profile", chosen) and source.snapshot.pending == chosen,
+          "A on another profile did not ask for it")
+    source.finish()
+    settle()
+    window.close_sheet()
+
+
 class FakeRuntime(application.Runtime):
-    def __init__(self, app, language, inputplumber=False, battery="", bluetooth="bt"):
+    def __init__(self, app, language, inputplumber=False, battery="", bluetooth="bt", power_word="pw"):
         self.app = app
         self.battery = BATTERIES[battery]
         self.bluetooth_word = bluetooth
         self.bluetooth_source = None
+        self.power_word = power_word
+        self.power_source = None
         self.settings = settings_mod.Settings(Path(os.devnull))
         self.settings.save = lambda: None
         self.catalog = load_catalog(application.DATA_DIR / "catalog.json")
@@ -480,6 +771,10 @@ class FakeRuntime(application.Runtime):
         self.bluetooth_source = bluetooth_world(self.bluetooth_word, on_change)
         return self.bluetooth_source
 
+    def power(self, on_change):
+        self.power_source = power_world(self.power_word, on_change)
+        return self.power_source
+
 
 def main():
     out = Path(sys.argv[1])
@@ -490,6 +785,7 @@ def main():
     inputplumber = "inputplumber" in words
     battery = next((word for word in words if word in BATTERIES), "")
     bluetooth = next((word for word in words if word in BLUETOOTH), "")
+    power_word = "" if bluetooth else next((word for word in words if word in POWER), "")
     suffix = "".join(f"-{word}" for word in words)
     app = Gtk.Application(application_id="io.github.brianbaldock.OmarchyGameModeSmoke")
     failures = []
@@ -513,7 +809,7 @@ def main():
         Gtk.IconTheme.get_for_display(display).add_search_path(str(application.DATA_DIR / "icons"))
         from gaminghome.ui import HomeWindow, load_css
         load_css(display, settings_mod.theme_colors())
-        runtime = FakeRuntime(app, language, inputplumber, battery, bluetooth or "bt")
+        runtime = FakeRuntime(app, language, inputplumber, battery, bluetooth or "bt", power_word or "pw")
         runtime._apply_direction()
         window = HomeWindow(app, runtime)
         runtime.window = window
@@ -522,7 +818,7 @@ def main():
         # screen; a size request does not, so the picture has the size asked for.
         window.set_size_request(width, height)
         window.present()
-        source = runtime.bluetooth_source
+        source, power_source = runtime.bluetooth_source, runtime.power_source
         if bluetooth == "btnone":
             steps = [("home", lambda: (window._focus_default(), check(
                 not window.bluetooth_button.get_visible() and window.bluetooth_button not in window.nav_rows()[0],
@@ -533,6 +829,12 @@ def main():
                                             check_shown(bluetooth, window, source)))]
             if bluetooth in ("btmany", "btscan"):
                 steps.append(("bluetooth-end", lambda: scroll_to_end(window)))
+        elif power_word == "pwnone":
+            steps = [("home", lambda: window._focus_default())]
+        elif power_word:
+            steps = [("home", lambda: window._focus_default()),
+                     ("power", lambda: (window.open_power(), play_power(power_word, window, power_source),
+                                        check_power_shown(power_word, window, power_source)))]
         else:
             steps = [
                 ("home", lambda: window._focus_default()),
@@ -574,6 +876,8 @@ def main():
                 if index == len(steps):
                     if bluetooth:
                         check_behaviour(bluetooth, language, window, source)
+                    elif power_word:
+                        check_power_behaviour(power_word, language, window, power_source)
                     app.quit()
                     return False
                 steps[index][1]()
