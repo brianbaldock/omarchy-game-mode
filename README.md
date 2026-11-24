@@ -16,6 +16,10 @@ accessibility feedback. Start with the [contribution guide](CONTRIBUTING.md) and
 Small fixes and reproducible reports are welcome; you do not need a handheld to help.
 This is an independent preview, not an official Omarchy component.
 
+<!-- release:line:start -->
+**Latest release: [0.2.1](https://github.com/brianbaldock/omarchy-game-mode/releases/tag/v0.2.1)** (2026-11-24) · [What changed](CHANGELOG.md) · [Install it](#install)
+<!-- release:line:end -->
+
 [Watch the 56-second silent guided tour](https://brianbaldock.github.io/omarchy-game-mode/#preview), or [download the MP4](site/assets/omarchy-game-mode-demo.mp4). It shows the actual GTK UI with simulated session/controller state, not gameplay footage. [Recording details and chapters](media/README.md).
 
 ## Features
@@ -555,6 +559,21 @@ Keyboard/Armoury buttons.
   Game Mode intentionally does not canonicalize them.
 
 ## Install
+
+From a release (Arch and Omarchy):
+
+<!-- release:install:start -->
+Download `omarchy-game-mode-0.2.1-1-any.pkg.tar.zst` and `SHA256SUMS` from the
+[0.2.1 release](https://github.com/brianbaldock/omarchy-game-mode/releases/tag/v0.2.1), then:
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS
+sudo pacman -U omarchy-game-mode-0.2.1-1-any.pkg.tar.zst
+omarchy-game-mode quit      # so the new version starts
+```
+
+See the [changelog](CHANGELOG.md) for what changed in each version.
+<!-- release:install:end -->
 
 From source (needs `python`, `python-gobject` and `gtk4`):
 
