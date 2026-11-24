@@ -283,14 +283,16 @@ class HelperEnvironmentTest(unittest.TestCase):
                "XDG_RUNTIME_DIR": "/run/user/1000", "XDG_STATE_HOME": "/home/user/.local/state",
                "DBUS_SYSTEM_BUS_ADDRESS": "unix:path=/run/dbus/system_bus_socket",
                "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus", "LD_PRELOAD": "/home/user/hook.so",
-               "PYTHONPATH": "/home/user/python", "VIRTUAL_ENV": "/home/user/venv", "LC_ALL": "C"}
+               "PYTHONPATH": "/home/user/python", "VIRTUAL_ENV": "/home/user/venv", "LC_ALL": "C",
+               "OMARCHY_POWERPROFILES_STATE_DIR": "/home/user/.local/state/profiles", "OMARCHY_PATH": "/home/user/o"}
 
     def test_the_path_is_the_commands_own_directory_and_the_systems_never_the_inherited_one(self):
         script = "/home/user/.local/share/omarchy/bin/omarchy-powerprofiles-set"
         self.assertEqual(powerprofiles.helper_environment(script, self.ENVIRON), {
             "PATH": "/home/user/.local/share/omarchy/bin:/usr/local/bin:/usr/bin:/bin", "HOME": "/home/user",
             "LANG": "en_US.UTF-8", "XDG_RUNTIME_DIR": "/run/user/1000", "XDG_STATE_HOME": "/home/user/.local/state",
-            "DBUS_SYSTEM_BUS_ADDRESS": "unix:path=/run/dbus/system_bus_socket"})
+            "DBUS_SYSTEM_BUS_ADDRESS": "unix:path=/run/dbus/system_bus_socket",
+            "OMARCHY_POWERPROFILES_STATE_DIR": "/home/user/.local/state/profiles"})
 
     def test_variables_that_are_not_set_are_left_out_and_the_path_has_each_directory_once(self):
         environment = powerprofiles.helper_environment("/usr/bin/omarchy-powerprofiles-set",
@@ -1083,6 +1085,7 @@ class RememberTest(BusCase):
                        "LANG": "C.UTF-8", "XDG_RUNTIME_DIR": "/run/user/1000",
                        "XDG_STATE_HOME": "/home/user/.local/state",
                        "DBUS_SYSTEM_BUS_ADDRESS": "unix:path=/run/dbus/system_bus_socket",
+                       "OMARCHY_POWERPROFILES_STATE_DIR": "/home/user/.local/state/profiles",
                        "GAMING_HOME_TEST_LEAK": "1"}
         with mock.patch.dict(os.environ, environment):
             source.set_profile(PERFORMANCE)

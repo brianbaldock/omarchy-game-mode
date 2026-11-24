@@ -33,17 +33,18 @@ Files and the one process
 * Omarchy's ``omarchy-powerprofiles-set autodetect PROFILE``, found on ``PATH``, runs after a change succeeded,
   when the active profile is chosen again, and when a profile whose answer never came (it timed out, or the window
   was hidden first) shows up in a reading after all, so that Omarchy keeps the choice for the current power source
-  (it switches to what it keeps at every plug and unplug). No shell, stdin closed, output dropped, its own directory and
-  ``/usr/local/bin:/usr/bin:/bin`` as ``PATH`` (never the inherited one: a version manager's shims there would give
-  ``powerprofilesctl`` another Python), only ``HOME``, ``LANG``, ``XDG_RUNTIME_DIR``, ``XDG_STATE_HOME`` and
-  ``DBUS_SYSTEM_BUS_ADDRESS`` besides, and a process group of its own that is killed as a whole when
-  ``HELPER_LIMIT_MS`` runs out. Its exit status is a note at most. The script always sets its profile itself
-  (``powerprofilesctl set``) before it records it, so a run must not outlive its choice: a newer choice ends it, and
-  so does any reading that shows another profile active, ``GetAll`` (the one at ``start()`` too) or
-  ``PropertiesChanged``; the note is then ``CHANGED_ELSEWHERE`` and the choice is not recorded. After ``stop()`` it is
-  left to finish and reports nothing. That leaves one gap: while the window is hidden nothing reads the service, so
-  a change by another program in the few hundred milliseconds the command still runs after the window was hidden
-  can be undone by it. The script also decides between AC and battery when it runs, not when the user chose.
+  (it switches to what it keeps at every plug and unplug). No shell, stdin closed, output dropped, its own directory
+  and ``/usr/local/bin:/usr/bin:/bin`` as ``PATH`` (never the inherited one: a version manager's shims there would
+  give ``powerprofilesctl`` another Python), only ``HOME``, ``LANG``, ``XDG_RUNTIME_DIR``, ``XDG_STATE_HOME``,
+  ``DBUS_SYSTEM_BUS_ADDRESS`` and ``OMARCHY_POWERPROFILES_STATE_DIR`` besides when they are set, and a process group
+  of its own that is killed as a whole when ``HELPER_LIMIT_MS`` runs out. Its exit status is a note at most. The
+  script always sets its profile itself (``powerprofilesctl set``) before it records it, so a run must not outlive
+  its choice: a newer choice ends it, and so does any reading that shows another profile active, ``GetAll`` (the one
+  at ``start()`` too) or ``PropertiesChanged``; the note is then ``CHANGED_ELSEWHERE`` and the choice is not
+  recorded. After ``stop()`` it is left to finish and reports nothing. That leaves one gap: while the window is
+  hidden nothing reads the service, so a change by another program in the few hundred milliseconds the command
+  still runs after the window was hidden can be undone by it. The script also decides between AC and battery when it
+  runs, not when the user chose.
 
 Nothing is polled. The only timer is that command's limit. A started source that is left alone holds the name watch
 and the subscription and nothing else (``idle``). A hold is never taken here: that belongs to the resident core.
@@ -87,7 +88,8 @@ CPU_BOOST = "devices/system/cpu/cpufreq/policy0/boost"
 
 HELPER = "omarchy-powerprofiles-set"
 HELPER_PATH = ("/usr/local/bin", "/usr/bin", "/bin")
-HELPER_ENVIRONMENT = ("HOME", "LANG", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "DBUS_SYSTEM_BUS_ADDRESS")
+HELPER_ENVIRONMENT = ("HOME", "LANG", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "DBUS_SYSTEM_BUS_ADDRESS",
+                      "OMARCHY_POWERPROFILES_STATE_DIR")      # where the script keeps its choices, when moved
 
 # What the error of a Set means. Anything else, InvalidArgs among them, is FAILED.
 DENIED_ERRORS = frozenset({"org.freedesktop.DBus.Error.AccessDenied"})
