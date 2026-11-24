@@ -232,7 +232,6 @@ window.gh-window {
 .gh-icon-button.off { color: @gh_muted; }
 .gh-icon-button.connected { color: @gh_accent; }
 .gh-icon-button.warn, .gh-icon-button.warn.selected { background: alpha(@gh_warning, 0.16); color: @gh_warning; }
-.gh-bt-sheet .gh-nav.dimmed { opacity: 0.45; }
 .gh-bt-sheet .gh-option { min-height: 56px; }
 .gh-pill.danger { background-color: @gh_danger; color: @gh_bg; }
 .gh-pill.danger.selected { background-color: mix(@gh_danger, @gh_fg, 0.15); border-color: @gh_fg; }
@@ -274,6 +273,11 @@ window.gh-window {
 .gh-pad-key.primary { background-color: @gh_accent; color: @gh_bg; }
 .gh-pad-key.selected { background-color: alpha(@gh_accent, 0.18); }
 .gh-pad-key.primary.selected { background-color: mix(@gh_accent, @gh_fg, 0.15); border-color: @gh_fg; }
+/* A control that would do nothing now: what it shows fades and a colored fill goes, but its border and shadow stay,
+   so the focus ring on it is as strong as on any other control. */
+.gh-bt-sheet .gh-nav.dimmed > * { opacity: 0.45; }
+.gh-bt-sheet .gh-pill.dimmed, .gh-bt-sheet .gh-pad-key.dimmed { background-color: alpha(@gh_fg, 0.07); color: @gh_fg; }
+.gh-bt-sheet .gh-pill.dimmed.selected, .gh-bt-sheet .gh-pad-key.dimmed.selected { border-color: @gh_accent; }
 .gh-compact .gh-bt-panel { padding: 14px 18px; }
 .gh-compact .gh-bt-digit { font-size: 36px; }
 """)

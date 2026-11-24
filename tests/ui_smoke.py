@@ -24,6 +24,7 @@ these states, and checks what the sheet does, so a wrong behaviour stops the run
   btpairing  a pairing that is connecting   btfail     a connection that failed
   btpaired   a device paired that did not connect
   btcancelpaired  a pairing given up just after the device had paired: it stays, and the sheet says so
+  btconnecting    a device connecting, with the focus on its Connect, dimmed with what waits for it
 
 Every ``bt`` word also checks that each way out of the sheet ends its search (Menu and B closing it, Settings taking
 its place, the window being built again and the window being hidden), and that a click GTK delivers after the sheet
@@ -32,7 +33,8 @@ is checked once for each way: B in ``btcode``, the window built again in ``btcon
 in ``btpasskey``; ``btpairing`` checks that a device paired already goes on connecting when the window is built again,
 and ``btcancelpaired`` that a pairing given up after the device had paired is told about, then and at the next visit.
 A window hidden with the sheet open must have the focus on the Bluetooth button once it is shown again and has drawn a
-frame.
+frame. ``btconnecting`` and ``btcode`` check that the focus ring on a dimmed control is drawn in the theme's accent,
+as strong as on any other control: on Connect, Search and the switch while a device connects, and on "Canceling…".
 """
 
 import datetime
@@ -67,7 +69,7 @@ BATTERIES = {
     "nobattery": None,
 }
 BLUETOOTH = ("bt", "btoff", "bterror", "btnone", "btscan", "btempty", "btmany", "btdupes", "btforget", "btconfirm",
-             "btcode", "btpin", "btpasskey", "btpairing", "btfail", "btpaired", "btcancelpaired")
+             "btcode", "btpin", "btpasskey", "btpairing", "btfail", "btpaired", "btcancelpaired", "btconnecting")
 SEARCHED = ("btscan", "btempty", "btmany", "btdupes", "btconfirm", "btcode", "btpin", "btpasskey", "btpairing",
             "btpaired", "btcancelpaired")
 PAIRING = ("btconfirm", "btcode", "btpin", "btpasskey", "btpairing", "btpaired", "btcancelpaired")
@@ -178,6 +180,48 @@ def settle(milliseconds=60):
             time.sleep(0.005)
 
 
+def frame(window, action=lambda: None):
+    """Do this and run the main loop until the window has drawn a frame since. GTK applies a change of style, and moves
+    a focus that was left in removed widgets, only in a frame."""
+    clock, drawn = window.get_frame_clock(), []
+    handler = clock.connect("after-paint", lambda *_: drawn.append(True))
+    action()
+    window.queue_draw()
+    context, deadline = GLib.MainContext.default(), time.monotonic() + 3
+    while not drawn and time.monotonic() < deadline:
+        if not context.iteration(False):
+            time.sleep(0.005)
+    clock.disconnect(handler)
+    check(drawn, "the window drew no frame")
+
+
+def ring(window, name):
+    """The colour in the middle of the top border of the control of this name, drawn with the focus on it: the colour
+    of its focus ring, as the window shows it."""
+    check(window._focus_by_name(name), f"{name} cannot be selected")
+    frame(window)
+    ok, bounds = window._bt_buttons[name].compute_bounds(window)
+    check(ok, f"{name} has not been laid out")
+    x, y = int(bounds.get_x() + bounds.get_width() / 2), int(bounds.get_y()) + 1
+    snapshot = Gtk.Snapshot()
+    Gtk.WidgetPaintable.new(window).snapshot(snapshot, window.get_width(), window.get_height())
+    downloader = Gdk.TextureDownloader.new(window.get_renderer().render_texture(snapshot.to_node(), None))
+    downloader.set_format(Gdk.MemoryFormat.R8G8B8A8)
+    pixels, stride = downloader.download_bytes()
+    return tuple(pixels.get_data()[y * stride + x * 4:y * stride + x * 4 + 3])
+
+
+def check_ring(window, *names):
+    """The focus ring on each of these dimmed controls is the theme's accent at full strength, as on a plain control
+    that is not dimmed."""
+    accent = settings_mod.theme_colors()["accent"]
+    wanted = tuple(int(accent[i:i + 2], 16) for i in (1, 3, 5))
+    for name in names:
+        seen = ring(window, name)
+        check(all(abs(a - b) <= 3 for a, b in zip(seen, wanted)),
+              f"the focus ring on {name} is {seen}, not the accent {wanted} it has on a plain control")
+
+
 def texts_in(widget):
     """Every text that the labels under this widget hold, shown or not."""
     found = [widget.get_text()] if isinstance(widget, Gtk.Label) else []
@@ -206,6 +250,8 @@ def play(word, window, source):
     elif word == "btfail":
         press(window, f"{sheet.CONNECT}2")
         source.fail(bt.UNREACHABLE)
+    elif word == "btconnecting":
+        press(window, f"{sheet.CONNECT}2")
     elif word == "btforget":
         press(window, f"{sheet.FORGET}3")
     elif word in PAIRING:
@@ -239,7 +285,7 @@ def play(word, window, source):
 FIRST_FOCUS = {"bt": sheet.SEARCH, "btoff": sheet.POWER, "bterror": sheet.RETRY, "btforget": f"{sheet.FORGET_NO}3",
                "btconfirm": sheet.NO, "btcode": sheet.CANCEL, "btpin": sheet.PAD_DONE, "btpasskey": sheet.PAD_DONE,
                "btpairing": sheet.CLOSE, "btfail": sheet.DISMISS, "btpaired": sheet.DISMISS,
-               "btcancelpaired": sheet.DISMISS}
+               "btcancelpaired": sheet.DISMISS, "btconnecting": f"{sheet.CONNECT}2"}
 
 
 def scroll_to_end(window):
@@ -344,6 +390,8 @@ def check_behaviour(word, language, window, source):
         check(source.calls.count(("cancel",)) == 1 and window.sheet == "bluetooth"
               and window._bt_buttons[sheet.CANCEL].get_label() == t("bluetooth.canceling"),
               "B did not give the pairing up, or Cancel does not say that it is being canceled")
+        check(window.selected_name() == sheet.CANCEL, f"the focus left Canceling… for {window.selected_name()}")
+        check_ring(window, sheet.CANCEL)                            # dimmed until Bluetooth lets go
         window.handle_action(core.BACK)                             # ... and closes the sheet while BlueZ answers
         check(window.sheet is None and source.calls.count(("cancel",)) == 1,
               "B is stuck on a pairing given up already")
@@ -404,6 +452,10 @@ def check_behaviour(word, language, window, source):
         check(window.sheet is None and source.calls[-1] == ("cancel",), "Menu did not give up the pairing")
         check(not any("042" in text for text in texts_in(window)), "the digits typed stay in a hidden label")
         source.finish_cancel()
+        settle()
+    elif word == "btconnecting":
+        check_ring(window, f"{sheet.CONNECT}2", sheet.SEARCH, sheet.POWER)    # a pill, a primary one and the switch
+        source.finish()
         settle()
     if word != "btnone":
         check_exits(window, source)
@@ -477,26 +529,12 @@ def check_exits(window, source):
     check(window.sheet is None, "hiding the window left the Bluetooth sheet open")
     check(ended() > before and not source.running and source.calls[-1] == ("stop",),
           "hiding the window did not end the search and stop Bluetooth")
-    show_again(window)
+    frame(window, lambda: window.set_visible(True))
+    settle()
     check(source.running, "showing the window again did not start Bluetooth")
     check(window.get_focus() is window.bluetooth_button,
           f"shown again, the window has the focus on {window.get_focus() and window.get_focus().get_name()}, "
           "not on the Bluetooth button that opened the sheet")
-
-
-def show_again(window):
-    """Show the hidden window and run the main loop until it has drawn a frame. GTK moves a focus that was left in
-    removed widgets at the end of a frame, so only then is the focus where it stays."""
-    clock, drawn = window.get_frame_clock(), []
-    handler = clock.connect("after-paint", lambda *_: drawn.append(True))
-    window.set_visible(True)
-    context, deadline = GLib.MainContext.default(), time.monotonic() + 3
-    while not drawn and time.monotonic() < deadline:
-        if not context.iteration(False):
-            time.sleep(0.005)
-    clock.disconnect(handler)
-    check(drawn, "the window drew no frame once it was shown again")
-    settle()
 
 
 class FakeRuntime(application.Runtime):
