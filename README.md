@@ -564,15 +564,20 @@ posting: window titles can contain private information.
 `omarchy-game-mode power` prints the active power profile (`power-saver`, `balanced` or
 `performance`), the profiles this machine really offers (a profile that only
 power-profiles-daemon's placeholder backs changes nothing and is left out) and any program
-holding one. `power set <profile>` and `power cycle` change it through power-profiles-daemon;
-`cycle` goes from power-saver to balanced to performance and back, through the profiles
-offered, and does nothing from a profile that is not one of them. Choosing a different
-profile ends every hold other programs have on one, as power-profiles-daemon does for any
-change. When Omarchy's `omarchy-powerprofiles-set` is installed, the choice is also kept for
-the current power source. The command needs no running Game Mode, waits for a change still
-running from an earlier press, and exits 1 with a one-line reason when a change fails (for
-example `denied` from an ssh session, which polkit refuses) and 2 on bad usage, so a key can
-run it. In a custom Omarchy Hyprland Lua bindings file:
+holding one. `power set <profile>` and `power cycle` change it through
+power-profiles-daemon; `cycle` goes from power-saver to balanced to performance and back,
+through the profiles offered, and does nothing from a profile that is not one of them.
+Choosing a different profile ends every hold other programs have on one, as
+power-profiles-daemon does for any change. When Omarchy's `omarchy-powerprofiles-set` is
+installed, Omarchy keeps the choice for the power source in use once that command has
+finished (usually within a second, up to ten seconds under load). Another program changing
+the profile right then (Omarchy itself does on plug and unplug) can keep the choice from
+being recorded: Gaming Home cannot always tell whether Omarchy recorded the choice when
+another program changed the profile at the same moment. The command needs no running Game
+Mode, waits for a change still running from an earlier press, and exits 1 with a one-line
+reason when a change fails (for example `denied` from an ssh session, which polkit
+refuses) and 2 on bad usage, so a key can run it. In a custom Omarchy Hyprland Lua
+bindings file:
 
 ```lua
 o.bind("F14", "Cycle the power profile", "omarchy-game-mode power cycle")

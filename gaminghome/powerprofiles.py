@@ -35,22 +35,23 @@ Files and the one process
 * Two kernel files are read, never written, a few hundred bytes at most: ``firmware/acpi/platform_profile`` and
   ``devices/system/cpu/cpufreq/policy0/boost`` under ``/sys``. They are read at ``start()``, with each reading of
   the service, each ``PropertiesChanged`` and each reply to a ``Set``, and they never decide whether a change worked.
-* Omarchy's ``omarchy-powerprofiles-set autodetect PROFILE``, found on ``PATH``, runs after a change succeeded,
-  when the active profile is chosen again, and when a profile whose answer never came (it timed out, or the window
-  was hidden first) shows up in a reading after all, within ``LATE_ANSWER_MS`` of the request (later, the same
-  profile may as well be another program's choice, and the request is forgotten, as it is by ``dismiss()``), so
-  that Omarchy keeps the choice for the current power source (it switches to what it keeps at every plug and
-  unplug). No shell, stdin closed, output dropped, its own directory
-  and ``/usr/local/bin:/usr/bin:/bin`` as ``PATH`` (never the inherited one: a version manager's shims there would
-  give ``powerprofilesctl`` another Python), only ``HOME``, ``LANG``, ``XDG_RUNTIME_DIR``, ``XDG_STATE_HOME``,
-  ``DBUS_SYSTEM_BUS_ADDRESS`` and ``OMARCHY_POWERPROFILES_STATE_DIR`` besides when they are set, and a process group
-  of its own that is killed as a whole when ``HELPER_LIMIT_MS`` runs out. Its exit status is a note at most. The
-  script always sets its profile itself (``powerprofilesctl set``) before it records it, so a run must not outlive
-  its choice: a newer choice ends it, and so does any reading that shows another profile active, ``GetAll`` (the one
-  at ``start()`` too) or ``PropertiesChanged``; the note is then ``CHANGED_ELSEWHERE`` and the choice is not
-  recorded. After ``stop()`` it is left to finish and reports nothing. That leaves one gap: while the window is
-  hidden nothing reads the service, so a change by another program in the few hundred milliseconds the command
-  still runs after the window was hidden can be undone by it. The script also decides between AC and battery when it
+* Omarchy's ``omarchy-powerprofiles-set autodetect PROFILE``, found on ``PATH``, runs after a change succeeded, when
+  the active profile is chosen again, and when a profile whose answer never came (it timed out, or the window was
+  hidden first) shows up in a reading after all, within ``LATE_ANSWER_MS`` of the request (later, the same profile
+  may as well be another program's choice, and the request is forgotten, as it is by ``dismiss()``), so that Omarchy
+  keeps the choice for the current power source (it switches to what it keeps at every plug and unplug). No shell,
+  stdin closed, output dropped, its own directory and ``/usr/local/bin:/usr/bin:/bin`` as ``PATH`` (never the
+  inherited one: a version manager's shims there would give ``powerprofilesctl`` another Python), only ``HOME``,
+  ``LANG``, ``XDG_RUNTIME_DIR``, ``XDG_STATE_HOME``, ``DBUS_SYSTEM_BUS_ADDRESS`` and
+  ``OMARCHY_POWERPROFILES_STATE_DIR`` besides when they are set, and a process group of its own that is killed as a
+  whole when ``HELPER_LIMIT_MS`` runs out. Its exit status is a note at most. The script always sets its profile
+  itself (``powerprofilesctl set``) before it records it, so a run must not outlive its choice: a newer choice ends
+  it, and so does any reading that shows another profile active, ``GetAll`` (the one at ``start()`` too) or
+  ``PropertiesChanged``; the note is then ``CHANGED_ELSEWHERE``. Gaming Home cannot always tell whether Omarchy
+  recorded the choice when another program changed the profile at the same moment. After ``stop()`` it is left to
+  finish and reports nothing. That leaves one gap: while the window is hidden nothing reads the service, so a change
+  by another program in the time the command still runs after the window was hidden (usually a fraction of a second,
+  up to its 10 second limit under load) can be undone by it. The script also decides between AC and battery when it
   runs, not when the user chose. And the tools it uses may start a service, which Gaming Home's own calls never do:
   ``busctl`` (UPower, to tell AC from battery) and ``powerprofilesctl`` (PPD).
 
