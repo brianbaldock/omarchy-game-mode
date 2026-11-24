@@ -23,9 +23,29 @@ addressed to the unique name that owns ``org.bluez`` at that moment (never to th
   change of signal strength becomes a message, and makes BlueZ list devices that cannot be connected to.
 * ``pair(device)``: ``AgentManager1.RegisterAgent`` for the agent of ``bluezagent.py`` (capability
   ``KeyboardDisplay``), ``Device1.Pair`` (``PAIR_TIMEOUT_MS``: one agent request alone may take a minute), then
-  ``Properties.Set`` of the device's ``Trusted`` to true and ``Device1.Connect``. ``Device1.CancelPairing`` when the
-  user cancels or the pairing times out, and ``AgentManager1.UnregisterAgent`` as soon as the pairing step is over,
-  however it ended.
+  ``Properties.Set`` of the device's ``Trusted`` to true and ``Device1.Connect``. ``AgentManager1.UnregisterAgent`` as
+  soon as the pairing step is over, however it ended. ``Device1.CancelPairing`` when the user cancels or the pairing
+  times out, but only before the bond is made. BlueZ announces ``Bonded`` when it stores the keys and then looks up
+  the device's services before it answers ``Pair()``; its pairing request is over by then, and BlueZ 5.87 answers a
+  ``CancelPairing`` without one by having the kernel delete the new keys and drop the link. So once the device is
+  bonded the client sends nothing, waits for ``Pair()`` (at most ``CALL_TIMEOUT_MS`` after a cancel) and reports
+  ``CANCELED`` or ``TIMEOUT`` with ``paired=True``: the bond stays and nothing more is done to the device. Two races
+  remain, each a few milliseconds wide and possible with any cancel. A ``CancelPairing`` that reaches BlueZ after its
+  pairing request has ended but before this client has heard ``Bonded`` has the kernel delete the new keys and drop
+  the link, yet ``Pair()`` succeeds and BlueZ goes on showing the device as paired and bonded: this client reports
+  ``paired=True``. One that reaches BlueZ while its request is still open but after the kernel has stored and
+  announced the keys makes ``Pair()`` fail with ``AuthenticationCanceled``, so this client reports no pairing, while
+  BlueZ still stores the announced keys and shows the device as bonded, and as paired once it has looked up the
+  device's services (a fresh read shows that at once). If the kernel's own pairing command was still open too, its
+  ``cancel_pair_device`` deletes the fresh keys (``hci_remove_link_key``, or ``smp_cancel_and_remove_pairing`` for LE)
+  and drops the link it made; if not, the keys stay and the device is paired after all. Where keys were deleted, the
+  kernel has none for the device until it is forgotten and paired again, or until bluetoothd restarts and loads the
+  keys it stored. A cancel during the trust step cannot take back the ``Trusted`` write already sent: the device stays
+  paired and trusted, and only the connection is not made.
+  A device or adapter that goes away during a pairing: BlueZ answers ``Pair()`` before it announces the removal,
+  ``AuthenticationCanceled`` while the link is up (``AUTH_FAILED``) and ``ConnectionAttemptFailed`` while the device
+  is still being reached (``UNREACHABLE``). Once the bond is made it drops that answer instead, and the removal ends
+  the pairing with ``GONE``, as it ends any operation whose call still waits.
 * ``connect(device)``: ``Device1.Connect`` (``CONNECT_TIMEOUT_MS``), and ``Device1.Disconnect`` to abandon it when it
   times out or the user cancels. It never changes trust.
 * ``disconnect(device)``: ``Device1.Disconnect``.
@@ -34,8 +54,11 @@ addressed to the unique name that owns ``org.bluez`` at that moment (never to th
   the adapter's ``Powered`` only when the adapter did not follow (or when the command is not installed).
 
 Never sent: ``SetDiscoveryFilter``, ``RequestDefaultAgent``, ``ConnectDevice``, and no other property write
-(``Discoverable``, ``Pairable``, ``Alias``, ``Blocked``, ``WakeAllowed``, ``PreferredBearer``, ...). What an operation
-did is read back from BlueZ's signals, never assumed from a reply.
+(``Discoverable``, ``Pairable``, ``Alias``, ``Blocked``, ``WakeAllowed``, ``PreferredBearer``, ...). What a device is
+(paired, trusted, connected, its battery) is read from BlueZ's properties and their signals, never assumed from a
+reply: a reply only says whether a step worked. The one thing taken from a reply is ``Failure.paired`` after a
+``Pair()`` that succeeded or found the device paired already, since BlueZ announces ``Paired`` only after it has
+looked up the device's services.
 
 The pairing agent
 -----------------
@@ -43,29 +66,38 @@ The agent exists from the press of Pair to the end of the pairing step, on this 
 only BlueZ and only about that device (``bluezagent.py`` says how). BlueZ asks the agent a program registered about
 the pairings that program starts, and its default agent about everything else: pairings that a device starts and
 services that ask to connect. Omarchy runs ``bt-agent`` (from bluez-tools, ``NoInputNoOutput``, accepting) as that
-default agent, so the agent registered here queues behind it, answers the pairing Gaming Home started and leaves
-everything else to it. That is what lets Gaming Home pair a device that needs a code, such as a keyboard's passkey or
-a number to compare. Where no other agent is registered, BlueZ makes the first one registered the default: then, for
-the seconds of a pairing, this agent is the default one and refuses a pairing that another device starts meanwhile.
+default agent. While it stays registered, the agent registered here queues behind it, answers the pairing Gaming Home
+started and leaves everything else to it. That is what lets Gaming Home pair a device that needs a code, such as a
+keyboard's passkey or a number to compare. Where no other agent is registered, BlueZ makes the first one registered
+the default: then, for the seconds of a pairing, this agent is the default one and refuses a pairing that another
+device starts meanwhile, and with BlueZ's default ``AlwaysPairable=false`` BlueZ also makes the adapter bondable,
+which it shows as ``Pairable``, until the agent goes. A cancel ends the agent at once.
 
 Power
 -----
 ``omarchy-bluetooth-power`` switches every Bluetooth radio of the machine through rfkill and keeps the choice across
 reboots. It runs as an argument list without a shell, with a minimal environment and its output silenced and never
-read, and it is killed after ``POWER_COMMAND_TIMEOUT_MS`` (it may legitimately take about ten seconds). Whatever its
-exit status, the selected adapter is checked afterwards, and its ``Powered`` is set once directly when it did not
-follow. ``BLOCKED`` is reported only when the adapter says ``off-blocked`` or the write was refused because of
-rfkill. A command that still runs at ``stop()`` is left to finish on its own.
+read. After ``POWER_COMMAND_TIMEOUT_MS`` (it may legitimately take about ten seconds) only the command itself, a
+shell script, is killed: what it started (``bluetoothctl`` under ``timeout``, ``sleep``) ends by its own time limits
+within a few seconds. Killing a process group would not reach further, since GNU ``timeout`` moves into a group of
+its own. Whatever the exit status, the selected adapter is checked afterwards, and its ``Powered`` is set once
+directly when it did not follow; when BlueZ answers that write ``Busy``, a change is under way already and is waited
+for. ``BLOCKED`` is reported only when the adapter says ``off-blocked`` or the write was refused because of rfkill. A
+command that still runs at ``stop()`` is left to finish on its own.
 
 Timers and the rest
 -------------------
 Nothing polls. A timer exists only while it has something to do: the notification coalescer while a change waits to
 be reported (``COALESCE_MS``, or at once for what the user did), the search limit while a search runs, one timeout
-while an operation runs, and the power command's. ``idle`` says that there is none and no call in flight. Replies,
-signals and timers that come after ``stop()``, or from an owner that is gone, are dropped by an epoch counter.
+while an operation runs, and the power command's. ``idle`` says that there is none and no call in flight. ``stop()``
+and an owner of ``org.bluez`` that goes cancel every call in flight, so that no answer to one is ever delivered, and an
+epoch counter drops whatever else still comes from before: signals, timers, and a reply should one get through.
 Replies are bounded (``MAX_REPLY_BYTES``), at most ``MAX_TRACKED`` devices are tracked, and every property is
-type-checked as it is read. Device ids count up and are never reused. Object paths, addresses, error texts and codes
-never leave this module, and nothing is logged.
+type-checked as it is read. When that many are tracked, a device seen anew takes the place of the oldest one that is
+neither paired nor bonded nor the device of the operation under way (nameless ones first), even a connected one. A
+device that is not tracked stays out of sight until Gaming Home is shown again and BlueZ is read again, even if
+another program pairs it meanwhile. Device ids count up and are never reused. Object paths, addresses, error texts and
+codes never leave this module, and nothing is logged.
 """
 
 from __future__ import annotations
@@ -128,6 +160,8 @@ ERRORS = {
     "AuthenticationTimeout": TIMEOUT,
     "ConnectionAttemptFailed": UNREACHABLE,
     "InProgress": IN_PROGRESS,
+    "Busy": IN_PROGRESS,                         # a write of a setting while BlueZ still makes an earlier one
+    "Blocked": BLOCKED,                          # BlueZ 5.87's answer to powering an adapter rfkill blocks
     "NotReady": NOT_READY,
     "NotSupported": UNSUPPORTED,
     "ProfileUnavailable": UNSUPPORTED,           # org.bluez.Error.BREDR.ProfileUnavailable
@@ -147,8 +181,13 @@ ERRORS = {
     "TimedOut": TIMEOUT,
 }
 # The short reason of a ``Failed`` error is not documented API: these words are looked for loosely, first match wins.
-REASONS = (("page-timeout", UNREACHABLE), ("page timeout", UNREACHABLE), ("host is down", UNREACHABLE),
-           ("key-missing", AUTH_FAILED), ("rfkill", BLOCKED), ("blocked", BLOCKED))
+# In BlueZ 5.87 (src/error.h) a device that does not answer gives ``br-connection-page-timeout``,
+# ``br-connection-timeout`` or ``le-connection-timeout``, and an LE connection the kernel gave up on
+# ``le-connection-abort-by-local``; ``*-key-missing`` is a device that forgot the pairing. BR/EDR's
+# ``br-connection-aborted-by-local`` (spelled differently) is a local termination for other reasons: FAILED.
+REASONS = (("page-timeout", UNREACHABLE), ("page timeout", UNREACHABLE), ("connection-timeout", UNREACHABLE),
+           ("abort-by-local", UNREACHABLE), ("host is down", UNREACHABLE), ("key-missing", AUTH_FAILED),
+           ("rfkill", BLOCKED), ("blocked", BLOCKED))
 
 # Icon names BlueZ gives devices, and what the window draws for them.
 ICONS = {"audio-headset": "headset", "audio-headphones": "headphones", "audio-card": "speaker",
@@ -385,8 +424,9 @@ class _Adapter:
 # Device1 properties the model uses: (name, D-Bus type, attribute, value when missing or of another type).
 _DEVICE_FIELDS = (("Alias", "s", "alias", ""), ("Name", "s", "name", ""), ("Icon", "s", "icon", ""),
                   ("Class", "u", "device_class", None), ("Appearance", "q", "appearance", None),
-                  ("Paired", "b", "paired", False), ("Trusted", "b", "trusted", False),
-                  ("Connected", "b", "connected", False), ("Connectable", "b", "connectable", None))
+                  ("Paired", "b", "paired", False), ("Bonded", "b", "bonded", False),
+                  ("Trusted", "b", "trusted", False), ("Connected", "b", "connected", False),
+                  ("Connectable", "b", "connectable", None))
 
 
 @dataclass(eq=False)
@@ -399,26 +439,36 @@ class _Device:
     device_class: int | None = None
     appearance: int | None = None
     paired: bool = False
+    bonded: bool = False                    # its keys are stored: BlueZ says so before Paired, see ``cancel``
     trusted: bool = False
     connected: bool = False
-    connectable: bool | None = None
+    connectable: bool | None = None         # not a Device1 property in BlueZ 5.87; kept for a BlueZ that has one
     battery: int | None = None
     view: bluetooth.Device | None = None    # what the snapshot lists
 
     def apply(self, properties, full: bool, invalidated=frozenset()) -> bool:
+        """Take in properties; True when what the snapshot lists changed. A search brings a stream of changes to
+        RSSI and advertising data that the model does not use: those return before anything is computed."""
+        changed = self.view is None
         for name, signature, attribute, default in _DEVICE_FIELDS:
             value = prop(properties, name, signature)
             if value is None and not full and name not in invalidated and not present(properties, name):
                 continue
-            setattr(self, attribute, default if value is None else value)
-        return self.refresh()
+            value = default if value is None else value
+            if getattr(self, attribute) != value:
+                setattr(self, attribute, value)
+                changed = True
+        return self.refresh() if changed else False
 
     def apply_battery(self, properties, full: bool, invalidated=frozenset()) -> bool:
         """The device's own Battery1. A battery object below the device (``battery_*``) never gets here."""
         value = prop(properties, "Percentage", "y")
         if value is None and not full and "Percentage" not in invalidated and not present(properties, "Percentage"):
             return False
-        self.battery = None if value is None else max(0, min(100, value))
+        value = None if value is None else max(0, min(100, value))
+        if value == self.battery and self.view is not None:
+            return False
+        self.battery = value
         return self.refresh()
 
     def refresh(self) -> bool:
@@ -499,6 +549,7 @@ class BlueZ:
         self._paths: dict[int, str] = {}
         self._overflow = 0
         self._scanning = self._scan_starting = self._scan_active = self._scan_stop = False
+        self._scan_stopping = self._scan_restart = False
         self._scan_path = ""
         self._op: _Operation | None = None
         self._prompt: Prompt | None = None
@@ -627,6 +678,7 @@ class BlueZ:
         if self._op is not None:
             self._end(UNAVAILABLE, unregister=False)    # nobody to unregister with
         if self._cancellable is not None:
+            # The epoch check in _on_reply drops these answers as well: cancelling only stops waiting for them.
             self._cancellable.cancel()
             self._cancellable = Gio.Cancellable()
         for subscription in self._subscriptions:
@@ -708,6 +760,24 @@ class BlueZ:
         if len(adapters) > MAX_ADAPTERS:
             del adapters[max(adapters)]
 
+    def _make_room(self, properties: GLib.Variant) -> bool:
+        """Crowded: stop tracking the oldest unpaired device, so that one seen now can be tracked. Nameless devices
+        go first, since the window never lists them; a remembered or bonded device and the device of the operation
+        under way are kept, and a nameless newcomer does not push out a device with a name. False: no room."""
+        target = self._op.path if self._op is not None else None
+        candidates = [record for record in self._devices.values()
+                      if not record.paired and not record.bonded and record.path != target]
+        anonymous = [record for record in candidates if not record.view.name]
+        named = bluetooth.display_name(prop(properties, "Alias", "s") or "", prop(properties, "Name", "s") or "")
+        pool = anonymous or (candidates if named else [])
+        if not pool:
+            return False
+        victim = min(pool, key=lambda record: record.id)
+        del self._devices[victim.path]
+        self._paths.pop(victim.id, None)
+        self._overflow += 1                     # still there, no longer tracked
+        return True
+
     def _track(self, path: str) -> _Device:
         self._ids += 1
         record = _Device(self._ids, path)
@@ -763,7 +833,7 @@ class BlueZ:
         if record is None:
             if device is None:
                 return                          # another interface of a device that is not tracked
-            if len(self._devices) >= MAX_TRACKED:
+            if len(self._devices) >= MAX_TRACKED and not self._make_room(device):
                 self._overflow += 1
                 self._changed()
                 return
@@ -809,6 +879,10 @@ class BlueZ:
             self._changed()
         elif interface == BATTERY and record.apply_battery(changed, False, invalidated):
             self._changed()
+        op = self._op
+        if (interface == DEVICE and op is not None and op.kind == PAIRING and op.cancelled
+                and op.stage == STAGE_PAIR and op.path == path and record.paired):
+            self._end(CANCELED, paired=True)    # cancelled after the bond: paired, and nothing more is done
 
     def _untrack(self, record: _Device):
         """A device went away. A device that comes back is a new one, with a new id."""
@@ -904,22 +978,33 @@ class BlueZ:
             return                              # the start for the adapter before is still unanswered
         self._failure = None
         self._scanning, self._scan_stop = True, False
-        if not self._scan_starting:
-            if not self._call(adapter.path, ADAPTER, "StartDiscovery", None, None, self._on_scan_started, adapter.path):
-                self._scanning = False
-                self._failure = Failure(FAILED, SEARCHING)
-                self._changed(urgent=True)
-                return
-            self._scan_starting, self._scan_path = True, adapter.path
+        if self._scan_stopping:
+            # BlueZ still counts this client's last search until it answers the stop, and would call a start
+            # meanwhile busy: the start is sent with that answer.
+            self._scan_restart = True
+        elif not self._scan_starting and not self._send_start(adapter.path):
+            return
         self._arm("scan", SCAN_SECONDS * 1000, self._on_scan_limit)
         self._changed(urgent=True)
+
+    def _send_start(self, path: str) -> bool:
+        if self._call(path, ADAPTER, "StartDiscovery", None, None, self._on_scan_started, path):
+            self._scan_starting, self._scan_path = True, path
+            return True
+        self._scanning = False
+        self._disarm("scan")
+        self._failure = Failure(FAILED, SEARCHING)
+        self._changed(urgent=True)
+        return False
 
     def _on_scan_started(self, _reply, error, path):
         if path != self._scan_path or not self._scan_starting:
             return
         self._scan_starting = False
         stop, self._scan_stop = self._scan_stop, False
-        if error is None or short_name(error) == "InProgress":     # InProgress: this client searches already
+        # InProgress: BlueZ already counts a search of this client. A start is never sent while this client's
+        # start or stop is unanswered, so that search is the one this client asked for.
+        if error is None or short_name(error) == "InProgress":
             if self._scanning and not stop:
                 self._scan_active = True
             else:
@@ -933,6 +1018,7 @@ class BlueZ:
     def _end_scan(self, send: bool):
         """End this client's search. ``send``: say so to BlueZ, which is pointless when the adapter went off or away
         or the connection closes, since BlueZ ends the search itself then."""
+        self._scan_restart = False
         if self._scanning:
             self._scanning = False
             self._disarm("scan")
@@ -947,7 +1033,16 @@ class BlueZ:
     def _send_stop_discovery(self, path: str):
         adapter = next((adapter for adapter in self._adapters.values() if adapter.path == path), None)
         if adapter is not None and adapter.powered:
-            self._call(path, ADAPTER, "StopDiscovery", None, None, self._ignore)
+            if self._call(path, ADAPTER, "StopDiscovery", None, None, self._on_scan_stopped, path):
+                self._scan_stopping = True
+
+    def _on_scan_stopped(self, _reply, _error, _path):
+        self._scan_stopping = False
+        if self._scan_restart:
+            self._scan_restart = False
+            adapter = self._selected()
+            if self._scanning and adapter is not None and self._state() == ON:
+                self._send_start(adapter.path)
 
     def _on_scan_limit(self):
         self._end_scan(send=True)
@@ -986,7 +1081,7 @@ class BlueZ:
         if code is not None:
             record = self._devices.get(op.path) if op.path else None
             if paired is None:
-                paired = record is not None and (record.paired or (op.kind == PAIRING and op.paired))
+                paired = record is not None and (record.paired or record.bonded or (op.kind == PAIRING and op.paired))
             self._failure = Failure(code, op.kind, op.stage if op.kind == PAIRING else "", op.device, op.name,
                                     bool(paired))
         self._changed(urgent=True)
@@ -1089,10 +1184,19 @@ class BlueZ:
             self._power_timeout(op)
             return
         if op.kind == PAIRING and op.stage == STAGE_PAIR and op.pair_sent:
+            if self._bonded(op):
+                self._end(CANCELED if op.cancelled else TIMEOUT, paired=True)
+                return
             self._cancel_pairing(op)
         elif op.kind == CONNECTING or (op.kind == PAIRING and op.stage == STAGE_CONNECT):
             self._abandon_connect(op)
         self._end(CANCELED if op.cancelled else TIMEOUT)
+
+    def _bonded(self, op: _Operation) -> bool:
+        """The device of a pairing has its bond already. BlueZ's pairing request is over then, and BlueZ 5.87
+        answers a CancelPairing without one by removing the device's keys: never send it after this."""
+        record = self._devices.get(op.path)
+        return record is not None and (record.bonded or record.paired)
 
     # ---- pairing -----------------------------------------------------------------------------------------------
     @_guarded
@@ -1151,7 +1255,7 @@ class BlueZ:
         self._close_agent(op, unregister=True)  # the pairing step is over
         self._prompt = None
         if op.cancelled:
-            # Paired although the user cancelled: it stays paired, and nothing more is done to it.
+            # The bond was made before the cancel took effect: it is kept, and nothing more is done to the device.
             self._end(CANCELED, paired=True)
             return
         op.stage = STAGE_TRUST
@@ -1205,19 +1309,22 @@ class BlueZ:
         if op is None or op.cancelled or op.kind not in (PAIRING, CONNECTING):
             return
         op.cancelled = True
-        if op.kind == PAIRING:
-            if op.agent is not None:
-                op.agent.withdraw()
-            self._prompt = None
-            if op.stage == STAGE_PAIR and not op.pair_sent:
-                self._end(CANCELED)             # nothing reached the device yet
-                return
-            if op.stage == STAGE_PAIR:
-                self._cancel_pairing(op)
-            elif op.stage == STAGE_CONNECT:
-                self._abandon_connect(op)
-        else:
+        if op.kind == PAIRING and op.stage == STAGE_PAIR and not op.pair_sent:
+            self._end(CANCELED)                 # nothing reached the device yet
+            return
+        if op.kind == CONNECTING or op.stage == STAGE_CONNECT:
             self._abandon_connect(op)
+        elif op.stage == STAGE_PAIR and not self._bonded(op):
+            # Sent before the agent answers what waits, so that BlueZ ends its own pairing request with
+            # AuthenticationCanceled. The other order is harmless too, only less clean: BlueZ fails the pairing on the
+            # refused answer before any keys exist, and the late CancelPairing becomes an unpair that the kernel
+            # refuses with NOT_PAIRED before it would drop the link.
+            self._cancel_pairing(op)
+        if op.kind == PAIRING:
+            # The agent ends here: what waits is answered Canceled, and anything BlueZ asks from now on, such as a
+            # pairing the device starts itself while this agent is the default one, finds nobody to answer it.
+            self._close_agent(op, unregister=True)
+            self._prompt = None
         # BlueZ answers the call in flight soon after this; it is waited for at most this long.
         self._arm("op", CALL_TIMEOUT_MS, self._on_operation_timeout)
         self._changed(urgent=True)
@@ -1292,6 +1399,9 @@ class BlueZ:
 
     def _on_powered_written(self, _reply, error, op):
         if self._op is not op:
+            return
+        if error is not None and short_name(error) == "Busy":
+            op.step = VERIFY                    # a change of Powered is under way already: wait for it
             return
         if error is not None:
             op.write_code = code_of(error)
@@ -1432,7 +1542,7 @@ class BlueZ:
             if record.paired:
                 remembered.append(record)
             elif record.connectable is False:
-                continue                        # BlueZ says it cannot be connected to
+                continue                        # a newer BlueZ says it cannot be connected to (5.87 never does)
             elif record.view.name:
                 named.append(record)
             else:
