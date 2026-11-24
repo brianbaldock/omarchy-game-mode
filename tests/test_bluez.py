@@ -559,9 +559,10 @@ class ReadingTest(BusCase):
                         {"ManufacturerData": GLib.Variant("a{qv}", {0x004C: blob(64)})},
                         {"ServiceData": GLib.Variant("a{sv}", {})}, {"AdvertisingFlags": GLib.Variant("ay", b"\x06")},
                         {"Name": GLib.Variant("s", "Pad"), "Paired": GLib.Variant("b", False)}):
-            client._on_signal(None, fake.unique_name, path, PROPERTIES, "PropertiesChanged",
-                              GLib.Variant("(sa{sv}as)", (DEVICE, changed, [])), client._epoch)
-            self.assertEqual(self.clock.pending, {}, changed)
+            with mock.patch.object(bluez.bluetooth, "display_name", side_effect=AssertionError("recomputed")):
+                client._on_signal(None, fake.unique_name, path, PROPERTIES, "PropertiesChanged",
+                                  GLib.Variant("(sa{sv}as)", (DEVICE, changed, [])), client._epoch)
+            self.assertEqual((self.clock.pending, client.error), ({}, ""), changed)
         self.assertIs(client.snapshot, snapshot)
         self.assertTrue(client.idle)
 

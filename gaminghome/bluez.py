@@ -428,19 +428,28 @@ class _Device:
     view: bluetooth.Device | None = None    # what the snapshot lists
 
     def apply(self, properties, full: bool, invalidated=frozenset()) -> bool:
+        """Take in properties; True when what the snapshot lists changed. A search brings a stream of changes to
+        RSSI and advertising data that the model does not use: those return before anything is computed."""
+        changed = self.view is None
         for name, signature, attribute, default in _DEVICE_FIELDS:
             value = prop(properties, name, signature)
             if value is None and not full and name not in invalidated and not present(properties, name):
                 continue
-            setattr(self, attribute, default if value is None else value)
-        return self.refresh()
+            value = default if value is None else value
+            if getattr(self, attribute) != value:
+                setattr(self, attribute, value)
+                changed = True
+        return self.refresh() if changed else False
 
     def apply_battery(self, properties, full: bool, invalidated=frozenset()) -> bool:
         """The device's own Battery1. A battery object below the device (``battery_*``) never gets here."""
         value = prop(properties, "Percentage", "y")
         if value is None and not full and "Percentage" not in invalidated and not present(properties, "Percentage"):
             return False
-        self.battery = None if value is None else max(0, min(100, value))
+        value = None if value is None else max(0, min(100, value))
+        if value == self.battery and self.view is not None:
+            return False
+        self.battery = value
         return self.refresh()
 
     def refresh(self) -> bool:
