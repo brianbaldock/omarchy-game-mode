@@ -542,7 +542,10 @@ def check_power_shown(word, window, source):
         check(current.has_css_class("current") and sum(button.has_css_class("current") for button in
                                                        window._pw_buttons.values()) == 1,
               "the active profile is not the one marked")
-        check("sources" in shown, "the line about plugged in and battery is missing although there is a battery")
+        has_battery = window._battery is not None
+        check(("sources" in shown) == has_battery,
+              f"the line about plugged in and battery is {'missing' if has_battery else 'there'} on a machine "
+              f"{'with' if has_battery else 'without'} a battery")
     if word == "pwpending":
         asked = window._pw_buttons[wanted]
         others = [button for key, button in window._pw_buttons.items() if pw.option_profile(key) and key != wanted]
