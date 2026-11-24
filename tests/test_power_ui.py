@@ -1,13 +1,16 @@
-"""The power profile button and sheet without a display: what they show, what their controls do, and that leaving
-the sheet makes a click GTK delivers late choose nothing. The source is always the scripted FakePower, which is
-checked here against the rules of the contract too."""
+"""The power profile button and sheet without a display: what they show, what their controls do, and that every way
+out of the sheet leaves it, so that a click GTK delivers late chooses nothing. The window's own methods run on
+stand-ins, as in test_bluetooth_ui, because the real window needs a display; the source is always the scripted
+FakePower, which is checked here against the rules of the contract too."""
 
 import ast
+import importlib
 import json
 import re
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from fakes.fake_power import FakePower
 from gaminghome import power
@@ -616,6 +619,234 @@ class TranslationTest(unittest.TestCase):
             for name in re.findall(r"\{(\w+)\}", text):
                 if name in ("name", "firmware"):
                     self.assertIn(f"\u2066{{{name}}}\u2069", text, key)
+
+
+class WindowTest(unittest.TestCase):
+    """The window's power glue, run on a stand-in for the window around a real PowerSheet and the fake."""
+
+    @classmethod
+    def setUpClass(cls):
+        importlib.import_module("gaminghome.application")             # pins Gtk 4 before the window module needs it
+        cls.ui = importlib.import_module("gaminghome.ui")
+        cls.window = cls.ui.HomeWindow
+        cls.source_text = (ROOT / "gaminghome" / "ui.py").read_text(encoding="utf-8")
+        tree = next(node for node in ast.parse(cls.source_text).body if isinstance(node, ast.ClassDef)
+                    and node.name == "HomeWindow")
+        cls.methods = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+    def calls(self, name):
+        return [node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+                for node in ast.walk(self.methods[name]) if isinstance(node, ast.Call)]
+
+    def stand_in(self, source, sheet_name="power"):
+        window = mock.MagicMock()
+        window.t = ENGLISH
+        window._power = PowerSheet(source)
+        window._power.enter()
+        window.sheet = sheet_name
+        window._pw_content = None
+        window._bt_content = None
+        for name in ("_leave_power", "_leave_bluetooth", "close_sheet", "back", "handle_action", "open_settings",
+                     "open_app", "_on_unmap", "_on_map", "stop_status", "_on_pw_clicked", "_on_power",
+                     "_update_battery"):
+            setattr(window, name, getattr(self.window, name).__get__(window))
+        return window
+
+    def assert_left(self, window, source):
+        self.assertFalse(window._power.visiting)
+        self.assertEqual((window._pw_buttons, window._pw_content), ({}, None))
+        late = len(source.calls)
+        window._power.press(option_name(SAVER))                       # a click GTK was about to deliver
+        self.assertEqual(source.calls[late:], [])
+
+    def button(self, name):
+        widget = mock.Mock()
+        widget.get_name.return_value = name
+        return widget
+
+    def test_b_escape_close_and_menu_each_leave_the_sheet(self):
+        from gaminghome.core import BACK, MENU
+        gdk = self.ui.Gdk
+        close = self.button(CLOSE)
+        ways = {"B": lambda window: window.handle_action(BACK),
+                "Menu": lambda window: window.handle_action(MENU),
+                "Escape": lambda window: self.window._on_key(window, None, gdk.KEY_Escape, 0, gdk.ModifierType(0)),
+                "Close": lambda window: window._on_pw_clicked(close)}
+        for way, leave in ways.items():
+            with self.subTest(way):
+                source = started(active=BALANCED)
+                window = self.stand_in(source)
+                window._pw_buttons = {CLOSE: close}
+                leave(window)
+                self.assertIsNone(window.sheet)
+                self.assert_left(window, source)
+                window._build_settings_sheet.assert_not_called()      # Menu closes the sheet, it opens nothing
+
+    def test_another_sheet_taking_its_place_leaves_it(self):
+        for opening in (lambda window: window.open_settings(), lambda window: window.open_app("steam")):
+            source = started(active=BALANCED)
+            window = self.stand_in(source)
+            opening(window)
+            self.assertNotEqual(window.sheet, "power")
+            self.assert_left(window, source)
+
+    def test_hiding_or_destroying_the_window_leaves_and_closes_the_sheet_and_stops_the_source(self):
+        source = started(active=BALANCED)
+        window = self.stand_in(source)
+        window._on_unmap()
+        self.assertIsNone(window.sheet)
+        window.scrim.set_visible.assert_called_with(False)
+        self.assert_left(window, source)
+        self.assertEqual((source.running, source.calls[-1]), (False, ("stop",)))
+
+    def test_quitting_leaves_the_sheet_and_stops_the_source(self):
+        source = started(active=BALANCED)
+        window = self.stand_in(source)
+        window.stop_status()
+        self.assert_left(window, source)
+        self.assertFalse(source.running)
+
+    def test_showing_the_window_starts_the_source(self):
+        source = FakePower()
+        window = self.stand_in(source, None)
+        window._on_map()
+        self.assertTrue(source.running)
+
+    def test_every_way_out_goes_through_the_one_cleanup(self):
+        for name in ("close_sheet", "open_settings", "open_app", "open_bluetooth", "build", "_on_unmap",
+                     "stop_status"):
+            self.assertIn("_leave_power", self.calls(name), name)
+
+        def leaves(node):
+            return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "leave"
+                    and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "_power")
+        self.assertEqual([name for name, method in self.methods.items() if any(map(leaves, ast.walk(method)))],
+                         ["_leave_power"])
+
+    def test_building_the_window_again_leaves_the_sheet_and_forgets_it(self):
+        # build() makes widgets and needs a display, so its first lines are read off its source.
+        body = self.methods["build"].body
+        statements = [ast.get_source_segment(self.source_text, node) for node in body[2:4]]
+        self.assertEqual(statements[0], "self._leave_power()")
+        self.assertTrue(statements[1].startswith('if self.sheet == "power":'))
+
+    def test_leaving_takes_the_sheet_widgets_out_of_the_window(self):
+        # GTK calls a pending click off only when the button is unrealized, which removing it does.
+        source = started()
+        window = self.stand_in(source)
+        holder = mock.Mock()
+        window._pw_content = mock.Mock()
+        window._pw_content.get_ancestor.return_value = holder
+        window._pw_buttons = {CLOSE: self.button(CLOSE)}
+        window._leave_power()
+        holder.get_parent.return_value.remove.assert_called_once_with(holder)
+        self.assertEqual((window._pw_content, window._pw_buttons, window._power.visiting), (None, {}, False))
+
+    def test_a_click_that_arrives_after_the_sheet_changed_or_went_away_is_dropped(self):
+        source = started(active=BALANCED)
+        window = self.stand_in(source)
+        shown, stale = self.button(option_name(SAVER)), self.button(option_name(SAVER))
+        window._pw_buttons = {option_name(SAVER): shown}
+        window._on_pw_clicked(stale)                                  # a button the sheet no longer shows
+        window.sheet = "settings"
+        window._on_pw_clicked(shown)                                  # another sheet took its place
+        window.sheet = None
+        window._on_pw_clicked(shown)                                  # the sheet has gone
+        self.assertEqual(source.sent, [])
+        window.sheet = "power"
+        window._on_pw_clicked(shown)
+        self.assertEqual(source.sent, [SAVER])
+        window._render_power.assert_called_with(None)
+        window._paint_power_button.assert_called()
+
+    def test_a_source_that_reports_from_inside_the_call_is_followed_without_harm(self):
+        window = mock.MagicMock()
+        source = FakePower(lambda: self.window._on_power(window), active=BALANCED, answers="later", reentrant=True)
+        source.start()
+        window._power = PowerSheet(source)
+        window._power.enter()
+        window.sheet = "power"
+        option = self.button(option_name(PERFORMANCE))
+        window._pw_buttons = {option_name(PERFORMANCE): option}
+        self.window._on_pw_clicked(window, option)
+        self.assertEqual((source.sent, source.snapshot.pending), ([PERFORMANCE], PERFORMANCE))
+        self.assertEqual(window._render_power.call_count, 2)          # once from inside the call, once after it
+
+    def test_a_change_repaints_the_button_and_the_open_sheet_and_never_the_whole_window(self):
+        for name in ("_on_power", "_paint_power_button", "_render_power"):
+            self.assertFalse(set(self.calls(name)) & {"refresh", "on_ui_changed", "build", "show_page", "idle_add",
+                                                      "timeout_add", "timeout_add_seconds"}, name)
+        window = mock.MagicMock()
+        window.sheet = None
+        self.window._on_power(window)
+        window._paint_power_button.assert_called_once_with()
+        window._render_power.assert_not_called()
+        window.sheet = "power"
+        self.window._on_power(window)
+        window._render_power.assert_called_once_with()
+
+    def test_the_power_code_of_the_window_owns_no_timer_and_no_animation(self):
+        names = [name for name in self.methods if "power" in name or name.startswith("_pw_")]
+        self.assertGreater(len(names), 10)
+        for name in names:
+            segment = ast.get_source_segment(self.source_text, self.methods[name])
+            for word in ("timeout_add", "idle_add", "Spinner", "add_tick_callback"):
+                self.assertNotIn(word, segment, name)
+
+    def test_the_source_is_made_once_by_the_constructor(self):
+        made = [name for name in self.methods if "power" in self.calls(name)]
+        self.assertEqual(made, ["__init__"])
+        segment = ast.get_source_segment(self.source_text, self.methods["__init__"])
+        self.assertIn("pw.PowerSheet(runtime.power(self._on_power))", segment)
+
+    def test_a_choice_that_would_do_nothing_now_is_dimmed_and_stays_sensitive_so_it_keeps_the_focus(self):
+        # GTK moves the focus away from a widget that turns insensitive.
+        disabled = self.ui.Gtk.AccessibleState.DISABLED
+        button = mock.Mock()
+        button.has_css_class.return_value = False
+        self.window._pw_dim(button, True)
+        button.set_sensitive.assert_not_called()
+        button.add_css_class.assert_called_once_with("dimmed")
+        button.update_state.assert_called_once_with([disabled], [True])
+        button.has_css_class.return_value = True
+        self.window._pw_dim(button, False)
+        button.remove_css_class.assert_called_once_with("dimmed")
+        self.assertNotIn("set_sensitive", "".join(ast.get_source_segment(self.source_text, self.methods[name])
+                                                  for name in self.methods if name.startswith("_pw_")))
+
+    def test_the_power_button_sits_between_bluetooth_and_settings_in_the_header_row(self):
+        rows = ast.get_source_segment(self.source_text, self.methods["nav_rows"])
+        self.assertIn("self.bluetooth_button, self.power_button, self.settings_button]", rows)
+        header = ast.get_source_segment(self.source_text, self.methods["_build_header"])
+        self.assertLess(header.index("header.append(self.bluetooth_button)"),
+                        header.index("header.append(self.power_button)"))
+        self.assertLess(header.index("header.append(self.power_button)"),
+                        header.index("header.append(self.settings_button)"))
+
+    def test_closing_the_sheet_gives_the_focus_back_to_the_power_button(self):
+        source = started()
+        window = self.stand_in(source)
+        window._focus_by_name.return_value = True
+        window.close_sheet()
+        window._focus_by_name.assert_called_once_with(pw.BUTTON)
+
+    def test_the_status_names_every_power_control_by_its_neutral_name(self):
+        window = mock.MagicMock()
+        for name in pw.NAMES:
+            window._selected.get_name.return_value = name
+            self.assertEqual(self.window.selected_name(window), name)
+
+    def test_the_line_about_plugged_in_and_battery_follows_a_battery_that_comes_or_goes(self):
+        source = started()
+        window = self.stand_in(source)
+        window._battery = None
+        window._update_battery(ON_BATTERY)
+        window._update_battery(Battery(77, DISCHARGING, 27000))       # a new estimate changes nothing it says
+        window._update_battery(None)
+        self.assertEqual(window._render_power.call_count, 2)
+        window.sheet = None
+        window._update_battery(ON_BATTERY)
+        self.assertEqual(window._render_power.call_count, 2)
 
 
 if __name__ == "__main__":

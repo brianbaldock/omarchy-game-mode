@@ -1053,9 +1053,13 @@ class WindowTest(unittest.TestCase):
         self.assertTrue(statements[1].startswith('if self.sheet == "bluetooth":'))
 
     def test_every_way_out_goes_through_the_one_cleanup(self):
-        for name in ("close_sheet", "open_settings", "open_app", "build", "_on_unmap", "stop_status"):
+        for name in ("close_sheet", "open_settings", "open_app", "open_power", "build", "_on_unmap", "stop_status"):
             self.assertIn("_leave_bluetooth", self.calls(name), name)
-        self.assertEqual([name for name, node in self.methods.items() if "leave" in self.calls(name)],
+
+        def leaves(node):
+            return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "leave"
+                    and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "_bluetooth")
+        self.assertEqual([name for name, method in self.methods.items() if any(map(leaves, ast.walk(method)))],
                          ["_leave_bluetooth"])
 
     def test_the_source_is_made_once_by_the_constructor(self):
@@ -1079,7 +1083,8 @@ class WindowTest(unittest.TestCase):
 
     def test_the_bluetooth_button_is_between_the_status_chips_and_settings_in_the_header_row(self):
         rows = ast.get_source_segment(self.source_text, self.methods["nav_rows"])
-        self.assertIn("header = [self.tab_home, self.tab_discover, self.bluetooth_button, self.settings_button]", rows)
+        self.assertIn("header = [self.tab_home, self.tab_discover, self.bluetooth_button, self.power_button, "
+                      "self.settings_button]", rows)
         header = ast.get_source_segment(self.source_text, self.methods["_build_header"])
         self.assertLess(header.index("header.append(self.clock_label)"),
                         header.index("header.append(self.bluetooth_button)"))
