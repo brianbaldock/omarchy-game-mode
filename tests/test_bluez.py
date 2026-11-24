@@ -779,6 +779,43 @@ class SearchTest(BusCase):
         self.assertEqual(fake.sessions[self.HCI0], set())                      # the stop came, and was taken
         self.assertIsNone(client.snapshot.failure)
 
+    def test_a_search_asked_for_while_the_last_stop_is_unanswered_starts_after_it(self):
+        fake = self.fake()
+        client = self.ready()
+        name = self.name_of(client)
+        client.scan(True)
+        self.until(lambda: client._scan_active)
+        fake.defer = lambda call: call[3] == "StopDiscovery"
+        client.scan(False)
+        self.until(lambda: fake.deferred)                   # BlueZ still counts this client until it answers
+        client.scan(True)
+        self.assertTrue(client.snapshot.scanning)
+        self.assertFalse(pump(timeout=0.05))
+        self.assertEqual(self.sent(fake, client)[1:], ["StartDiscovery", "StopDiscovery"])   # no start yet
+        fake.defer = None
+        fake.answer_deferred()
+        self.until(lambda: client._scan_active)
+        self.assertEqual(self.sent(fake, client)[1:], ["StartDiscovery", "StopDiscovery", "StartDiscovery"])
+        self.assertEqual(fake.sessions[self.HCI0], {name})                     # a search that really runs
+        self.assertTrue(client.snapshot.scanning)
+        self.assertIsNone(client.snapshot.failure)
+
+    def test_a_search_cancelled_while_the_last_stop_is_unanswered_sends_nothing_more(self):
+        fake = self.fake()
+        client = self.ready()
+        client.scan(True)
+        self.until(lambda: client._scan_active)
+        fake.defer = lambda call: call[3] == "StopDiscovery"
+        client.scan(False)
+        self.until(lambda: fake.deferred)
+        client.scan(True)
+        client.scan(False)
+        fake.answer_deferred()
+        self.until(lambda: client.idle)
+        self.assertEqual(self.sent(fake, client)[1:], ["StartDiscovery", "StopDiscovery"])
+        self.assertEqual(fake.sessions[self.HCI0], set())
+        self.assertFalse(client.snapshot.scanning)
+
     def test_a_stop_before_the_start_was_answered_and_then_stop_sends_nothing_to_the_closed_connection(self):
         fake = self.fake()
         client = self.ready()

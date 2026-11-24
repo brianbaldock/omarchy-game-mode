@@ -512,6 +512,7 @@ class BlueZ:
         self._paths: dict[int, str] = {}
         self._overflow = 0
         self._scanning = self._scan_starting = self._scan_active = self._scan_stop = False
+        self._scan_stopping = self._scan_restart = False
         self._scan_path = ""
         self._op: _Operation | None = None
         self._prompt: Prompt | None = None
@@ -921,22 +922,33 @@ class BlueZ:
             return                              # the start for the adapter before is still unanswered
         self._failure = None
         self._scanning, self._scan_stop = True, False
-        if not self._scan_starting:
-            if not self._call(adapter.path, ADAPTER, "StartDiscovery", None, None, self._on_scan_started, adapter.path):
-                self._scanning = False
-                self._failure = Failure(FAILED, SEARCHING)
-                self._changed(urgent=True)
-                return
-            self._scan_starting, self._scan_path = True, adapter.path
+        if self._scan_stopping:
+            # BlueZ still counts this client's last search until it answers the stop, and would call a start
+            # meanwhile busy: the start is sent with that answer.
+            self._scan_restart = True
+        elif not self._scan_starting and not self._send_start(adapter.path):
+            return
         self._arm("scan", SCAN_SECONDS * 1000, self._on_scan_limit)
         self._changed(urgent=True)
+
+    def _send_start(self, path: str) -> bool:
+        if self._call(path, ADAPTER, "StartDiscovery", None, None, self._on_scan_started, path):
+            self._scan_starting, self._scan_path = True, path
+            return True
+        self._scanning = False
+        self._disarm("scan")
+        self._failure = Failure(FAILED, SEARCHING)
+        self._changed(urgent=True)
+        return False
 
     def _on_scan_started(self, _reply, error, path):
         if path != self._scan_path or not self._scan_starting:
             return
         self._scan_starting = False
         stop, self._scan_stop = self._scan_stop, False
-        if error is None or short_name(error) == "InProgress":     # InProgress: this client searches already
+        # InProgress: BlueZ already counts a search of this client. A start is never sent while this client's
+        # start or stop is unanswered, so that search is the one this client asked for.
+        if error is None or short_name(error) == "InProgress":
             if self._scanning and not stop:
                 self._scan_active = True
             else:
@@ -950,6 +962,7 @@ class BlueZ:
     def _end_scan(self, send: bool):
         """End this client's search. ``send``: say so to BlueZ, which is pointless when the adapter went off or away
         or the connection closes, since BlueZ ends the search itself then."""
+        self._scan_restart = False
         if self._scanning:
             self._scanning = False
             self._disarm("scan")
@@ -964,7 +977,16 @@ class BlueZ:
     def _send_stop_discovery(self, path: str):
         adapter = next((adapter for adapter in self._adapters.values() if adapter.path == path), None)
         if adapter is not None and adapter.powered:
-            self._call(path, ADAPTER, "StopDiscovery", None, None, self._ignore)
+            if self._call(path, ADAPTER, "StopDiscovery", None, None, self._on_scan_stopped, path):
+                self._scan_stopping = True
+
+    def _on_scan_stopped(self, _reply, _error, _path):
+        self._scan_stopping = False
+        if self._scan_restart:
+            self._scan_restart = False
+            adapter = self._selected()
+            if self._scanning and adapter is not None and self._state() == ON:
+                self._send_start(adapter.path)
 
     def _on_scan_limit(self):
         self._end_scan(send=True)
