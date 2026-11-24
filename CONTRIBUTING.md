@@ -74,13 +74,16 @@ Do not grant extra device permissions or bypass a lock screen for a report.
 Keep changes focused and explain the user-visible problem. Include reproduction
 steps, relevant checks and screenshots for UI changes. Add focused regression tests
 for behavior fixes; run `make test`. Validate desktop-entry changes with
-`desktop-file-validate data/*.desktop`.
+`desktop-file-validate data/*.desktop`. A change that people can see or feel also
+adds a line to the changelog (see [Changelog and releases](#changelog-and-releases)).
 
 For translations, edit `data/locales/<locale>.json`, keep every key and placeholder,
 and run `make test`. Review visible UI as well as strings, especially Arabic RTL.
 Prioritize native review of the existing seven draft locales before adding languages.
 For the static website, use `python3 -m http.server 8000 --bind 127.0.0.1 --directory site`
 and check narrow screens, keyboard focus and the existing content security policy.
+`site/changelog.html` and the release parts of `site/index.html` are generated from the
+changelog: edit `CHANGELOG.md` and run `python3 scripts/release.py sync` instead.
 
 Do not grab controllers exclusively, inject synthetic input, capture Guide, run
 automatic privileged installers or add idle polling. Preserve opt-in behavior and
@@ -94,3 +97,31 @@ there is no promised response time. Security reports belong in
 not public issues.
 
 External fork workflows require maintainer approval before running, so run relevant checks locally and expect that approval step. Maintainers review catalog executable arguments, package names, source provenance and privilege prompts manually; passing CI is not approval of a new install route. Start with existing routes rather than expanding the catalog.
+
+## Changelog and releases
+
+[CHANGELOG.md](CHANGELOG.md) is where every release is described, and `gaminghome/__init__.py` is where the
+version lives. The version in the `Makefile` and `PKGBUILD`, the website (its release line, its "What's new"
+section, `site/changelog.html` and the sitemap) and the README's release line and install steps all come from those
+two, and `make test` fails when any of them is out of step.
+
+**With every pull request** that changes what people see or do (a feature, a fix, a changed default, a removed
+option), add a line under `## [Unreleased]` in the matching group: Added, Changed, Deprecated, Removed, Fixed or
+Security. Write one short entry that says what changed for the user and ends with the pull request number, like
+`(#123)`. Documentation, tests and internal changes need none. Unreleased entries are not published on the website
+until they are released.
+
+**To release a version** (maintainers):
+
+1. Run `python3 scripts/release.py bump X.Y.Z`. It turns Unreleased into `X.Y.Z` with today's date, sets the
+   version in all three places and regenerates the website, the sitemap and the README. Review the diff and read the
+   entries as a user would.
+2. Open a pull request titled `Release X.Y.Z`. When it is merged, the website deploys by itself.
+3. Tag the merge commit (`git tag -a vX.Y.Z -m "Omarchy Game Mode X.Y.Z"`, then push the tag), build the artifacts
+   from a clean checkout of that tag (`make dist`, then `makepkg` on the tarball) and write `SHA256SUMS` for both.
+4. Publish them with `gh release create vX.Y.Z --verify-tag --title "Omarchy Game Mode X.Y.Z" --notes-file <(python3
+   scripts/release.py notes X.Y.Z) TARBALL PACKAGE SHA256SUMS`.
+
+`python3 scripts/release.py check` reports anything that is out of step, and `sync` regenerates the derived files
+after you edit the changelog by hand (`bump` does that for you). Do not edit `site/changelog.html` or the parts of
+`site/index.html` and `README.md` between `release:` markers; they are generated.

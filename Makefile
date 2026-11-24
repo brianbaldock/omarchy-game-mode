@@ -13,7 +13,7 @@ PYTHON ?= python3
 all:
 
 test check:
-	$(PYTHON) -m py_compile omarchy-game-mode.py gaminghome/*.py gaminghome/doctor/*.py
+	$(PYTHON) -m py_compile omarchy-game-mode.py gaminghome/*.py gaminghome/doctor/*.py scripts/release.py
 	$(PYTHON) -m unittest discover -s tests
 
 install:
