@@ -9,8 +9,8 @@ or a note left from before, so that what happened while the user was away does n
 stable name that carries nothing another program chose (``pw:<profile>``, ``pw:dismiss``, ``pw:retry``,
 ``pw:close``), so the window can update the sheet in place and keep the focus where it was, and the status command
 can name the focused control. A choice applies at once with A, a click or a tap; nothing asks to confirm it, and
-nothing applies on hover or focus. While a request is on its way the other choices are dimmed and do nothing, but
-they keep the focus.
+nothing applies on hover or focus. While a request is on its way the other choices are dimmed and do nothing, and
+the focus stays where it was.
 
 Nothing here imports GTK or GLib or owns a timer.
 """
@@ -218,7 +218,8 @@ class PowerSheet:
 
     The window calls ``start`` when it is mapped and ``stop`` when it is unmapped, destroyed or the app quits;
     ``enter`` when the sheet opens and ``leave`` on every way it goes away; ``press`` with a control's name when it
-    is pressed. A control acts on the snapshot as it is when it is pressed.
+    is pressed. A control acts on the snapshot as it is when it is pressed. A visit remembers nothing but that it is
+    one: the request on its way, the failure and the note are the source's, and the window keeps only its widgets.
     """
 
     def __init__(self, source: power.Power):

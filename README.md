@@ -246,9 +246,9 @@ tap.
 - **When it runs.** Gaming Home looks at the power profile only while it is shown (Omarchy's
   command that keeps a choice may still finish just after it is hidden), and it never starts
   the power service (power-profiles-daemon): without it there is no button. It never needs a
-  password: when the system does not let this session switch, the sheet says so in one line
-  and asks for nothing. The sheet holds no timer of its own and nothing in it moves while
-  nothing changes: "Switching…" is a static line.
+  password: when the system does not allow the switch, the sheet says so in one line and asks
+  for nothing. The sheet holds no timer of its own and nothing in it moves while nothing
+  changes: "Switching…" is a static line.
 
 <!-- measured: filled in by the maintainer -->
 **On the ROG Xbox Ally:** what each profile does on the device is to be filled in here by the
@@ -266,8 +266,9 @@ How far this has been checked:
   rendered headless with GTK Broadway in English, German, Japanese and Arabic, at 1280x720,
   1920x1080 and 1280x600, by a script that fails when the sheet does the wrong thing.
 - **Not yet tested on real devices:** none of this has run on a handheld yet: how the D-pad
-  and touch feel, switching from Gaming Home's own session, other programs switching the
-  profile while the sheet is open, and how the glyphs look at the device's scale.
+  and touch feel, whether the system allows a switch from Gaming Home as it is started at
+  login, other programs switching the profile while the sheet is open, and how the glyphs
+  look at the device's scale.
 
 ## Controls
 
