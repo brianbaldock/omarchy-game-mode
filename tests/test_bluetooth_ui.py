@@ -461,6 +461,29 @@ class GivingUpTest(unittest.TestCase):
         self.visit.leave()
         self.assertEqual(self.source.calls.count(("cancel",)), 1)
 
+    def test_a_pairing_given_up_leaves_no_failure_on_screen_now_or_at_the_next_visit(self):
+        self.visit.press(sheet.CANCEL)
+        self.source.finish_cancel()
+        self.assertEqual(self.source.snapshot.failure.code, bt.CANCELED)
+        self.assertNotIn("failure", [block.key for block in self.visit.blocks(ENGLISH)])
+        self.visit.leave()
+        self.visit.enter()
+        self.assertEqual((self.source.calls[-1], self.source.snapshot.failure), (("dismiss",), None))
+
+    def test_leaving_mid_pairing_does_not_greet_the_next_visit_with_it(self):
+        self.visit.leave()
+        self.source.finish_cancel()                                   # BlueZ answers after the user left
+        self.visit.enter()
+        self.assertIsNone(self.source.snapshot.failure)
+        self.assertNotIn("failure", [block.key for block in self.visit.blocks(ENGLISH)])
+
+    def test_a_failure_that_was_not_a_cancel_is_still_there_at_the_next_visit(self):
+        self.source.fail(bt.AUTH_FAILED)
+        self.visit.leave()
+        self.visit.enter()
+        self.assertNotIn(("dismiss",), self.source.calls)
+        self.assertIn("failure", [block.key for block in self.visit.blocks(ENGLISH)])
+
     def test_a_new_pairing_is_not_taken_for_the_one_given_up(self):
         self.visit.back()
         self.source.finish_cancel()

@@ -346,6 +346,9 @@ class BluetoothSheet:
         self.searched = self._search_seen = False
         self.forgetting = 0
         self.entry.clear()
+        failure = self.source.snapshot.failure
+        if failure is not None and failure.code == bt.CANCELED:
+            self.source.dismiss()           # a pairing this sheet gave up, maybe after the user had left it
         self.sync()
 
     def leave(self) -> bool:
@@ -491,7 +494,7 @@ class BluetoothSheet:
 
         blocks: list[Block] = [Text("title", text=t("bluetooth.title"), tone="title")]
         failure = snapshot.failure
-        if failure is not None:
+        if failure is not None and failure.code != bt.CANCELED:     # only this sheet cancels: nothing to tell
             message = failure_message(failure, called(failure.device, failure.name))
             blocks.append(Problem("failure", (Control(DISMISS, t("bluetooth.dismiss")),), text=message.text(t),
                                   hint=t(message.hint) if message.hint else ""))

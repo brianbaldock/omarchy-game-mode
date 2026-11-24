@@ -321,8 +321,13 @@ def check_behaviour(word, language, window, source):
         window.sheet = None                                         # as a change of language does
         window.build()
         check(source.calls.count(("cancel",)) > cancels, "building the window again during a pairing did not abandon it")
-        source.finish_cancel()                                      # BlueZ answers the cancel
+        source.finish_cancel()                                      # BlueZ answers the cancel after the sheet went
         settle()
+        window.open_bluetooth()
+        settle()
+        check(sheet.DISMISS not in window._bt_buttons and source.snapshot.failure is None,
+              "the next visit is greeted with the pairing given up")
+        window.close_sheet()
     elif word == "btpairing":
         window.sheet = None                                         # paired already: it connects as Connect does
         window.build()
