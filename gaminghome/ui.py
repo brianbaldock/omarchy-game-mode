@@ -833,6 +833,10 @@ class HomeWindow(Gtk.ApplicationWindow):
         sheet.append(self.mode_note)
         sheet.nav_rows.append(list(self.mode_options.values()))
 
+        # Information only: Game Mode reads InputPlumber and offers nothing to change there.
+        self.inputplumber_note = label("", "gh-sheet-body", wrap=True)
+        sheet.append(self.inputplumber_note)
+
         sheet.append(label(t("settings.language").upper(), "gh-sheet-label", margin_top=6))
         languages = [("system", t("settings.systemLanguage"))] + [(code, rt.translator.endonym(code)) for code in rt.translator.available]
         self.language_buttons = {}
@@ -913,6 +917,9 @@ class HomeWindow(Gtk.ApplicationWindow):
             note = ""
         self.mode_note.set_text(note)
         self.mode_note.set_visible(bool(note))
+        inputplumber = rt.inputplumber_summary()
+        self.inputplumber_note.set_text(inputplumber or "")
+        self.inputplumber_note.set_visible(bool(inputplumber))
         current = rt.settings.language
         for code, button in self.language_buttons.items():
             checked = code == current

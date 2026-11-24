@@ -23,6 +23,8 @@ INSTALL_PREFIXES = (("omarchy", "install"), ("omarchy", "pkg", "add"), ("omarchy
 INSTALL_TOKEN_RE = re.compile(r"^-{0,2}[A-Za-z0-9][A-Za-z0-9._=-]*$")
 DESKTOP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$")
 COMMAND_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+# Class globs: "*" is any run of characters, the rest literal. Limits keep matching linear and cheap.
+MAX_GLOBS, MAX_GLOB_CHARS, MAX_GLOB_STARS, MIN_GLOB_HEAD = 8, 120, 4, 8
 
 # Launcher UIs that have no controller navigation of their own: they keep
 # desktop (pointer) controls while focused. Everything else that matches a
@@ -65,6 +67,7 @@ class AppEntry:
     availability: tuple[tuple[str, str], ...]
     classes: tuple[str, ...] = ()
     prefixes: tuple[str, ...] = ()
+    globs: tuple[tuple[str, ...], ...] = ()  # casefolded, split at "*"
     title_contains: tuple[str, ...] = ()
     default_pinned: bool = False
     information_url: str | None = None
@@ -77,6 +80,9 @@ class AppEntry:
         if classes & set(self.classes):
             return MATCH_CLASS
         if any(c.startswith(p) for c in classes for p in self.prefixes):
+            return MATCH_PREFIX
+        if self.globs and any(glob_matches(glob, c.casefold())
+                              for c in (wm_class, initial_class) if c for glob in self.globs):
             return MATCH_PREFIX
         if self.id not in BROWSER_TITLE_APPS and any(h in c for c in classes for h in BROWSER_HINTS):
             return 0
@@ -106,6 +112,55 @@ def _strings(value, lower=False) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
         raise CatalogError("expected a list of non-empty strings")
     return tuple(v.lower() if lower else v for v in value)
+
+
+def _globs(value, warnings: list[str]) -> tuple[tuple[str, ...], ...]:
+    """Window class globs, checked at load: one that breaks a limit is left out with one warning."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        warnings.append("globs ignored: expected a list of strings")
+        return ()
+    globs = []
+    for index, text in enumerate(value):
+        if index == MAX_GLOBS:
+            warnings.append(f"globs[{index}:] ignored: more than {MAX_GLOBS} globs")
+            break
+        if not isinstance(text, str):
+            reason = "expected a string"
+        elif len(text) > MAX_GLOB_CHARS:
+            reason = f"longer than {MAX_GLOB_CHARS} characters"
+        elif text.count("*") > MAX_GLOB_STARS:
+            reason = f"more than {MAX_GLOB_STARS} stars"
+        elif len(text.split("*", 1)[0]) < MIN_GLOB_HEAD:
+            reason = f"does not start with {MIN_GLOB_HEAD} literal characters"
+        else:
+            globs.append(tuple(part.casefold() for part in text.split("*")))
+            continue
+        warnings.append(f"globs[{index}] ignored: {reason}")
+    return tuple(globs)
+
+
+def glob_matches(glob: tuple[str, ...], text: str) -> bool:
+    """Whether a casefolded class matches a glob split at its stars, in one pass with no backtracking.
+
+    The class has to start with the first part and, unless the glob ends
+    with a star, end with the last one. The parts between are found in
+    order, each where it first occurs after the one before.
+    """
+    head, *rest = glob
+    if not rest:
+        return text == head
+    if not text.startswith(head):
+        return False
+    position = len(head)
+    *middle, tail = rest
+    for part in middle:
+        position = text.find(part, position)
+        if position < 0:
+            return False
+        position += len(part)
+    return len(text) - len(tail) >= position and text.endswith(tail)
 
 
 def _argv(value, what: str) -> tuple[str, ...]:
@@ -147,12 +202,14 @@ def _availability(value) -> tuple[tuple[str, str], ...]:
     return tuple(probes)
 
 
-def parse_entry(raw: dict) -> AppEntry:
+def parse_entry(raw: dict, warnings: list[str] | None = None) -> AppEntry:
+    """Check one app entry. A class glob left out does not reject the entry: why is added to warnings."""
     if not isinstance(raw, dict):
         raise CatalogError("app entry must be an object")
     app_id = raw.get("id")
     if not isinstance(app_id, str) or not ID_RE.match(app_id):
         raise CatalogError(f"invalid app id {app_id!r}")
+    ignored: list[str] = []
     try:
         category = raw.get("category", "native")
         if category not in CATEGORIES:
@@ -166,7 +223,7 @@ def parse_entry(raw: dict) -> AppEntry:
         url = raw.get("informationUrl")
         if url is not None and not (isinstance(url, str) and url.startswith("https://")):
             raise CatalogError("informationUrl must be https")
-        return AppEntry(
+        entry = AppEntry(
             id=app_id,
             name=name,
             description_key=str(raw.get("descriptionKey") or f"app.{app_id}.description"),
@@ -178,12 +235,16 @@ def parse_entry(raw: dict) -> AppEntry:
             availability=_availability(raw.get("availability")),
             classes=_strings(match.get("classes"), lower=True),
             prefixes=_strings(match.get("prefixes"), lower=True),
+            globs=_globs(match.get("globs"), ignored),
             title_contains=_strings(match.get("titleContains"), lower=True),
             default_pinned=bool(raw.get("defaultPinned", False)),
             information_url=url,
         )
     except CatalogError as error:
         raise CatalogError(f"{app_id}: {error}") from None
+    if warnings is not None:
+        warnings.extend(f"{app_id}: {reason}" for reason in ignored)
+    return entry
 
 
 BUILTIN_CATALOG = {
@@ -246,7 +307,7 @@ class Catalog:
         return [app.id for app in self.apps]
 
     def match_window(self, wm_class: str, initial_class: str, title: str) -> AppEntry | None:
-        """Exact classes beat prefixes beat titles; ties go to catalog order."""
+        """Exact classes beat prefixes and globs, which beat titles; ties go to catalog order."""
         best, best_level = None, 0
         for app in self.apps:
             level = app.match_level(wm_class, initial_class, title)
@@ -264,7 +325,7 @@ def parse_catalog(data, source="inline") -> Catalog:
     apps, errors, seen = [], [], set()
     for raw in raw_apps:
         try:
-            entry = parse_entry(raw)
+            entry = parse_entry(raw, errors)
         except CatalogError as error:
             errors.append(str(error))
             continue
