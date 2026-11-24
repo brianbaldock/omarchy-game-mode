@@ -416,6 +416,15 @@ class ButtonTest(unittest.TestCase):
         opened(source).press(option_name(PERFORMANCE))
         self.assertEqual(button_view(source.snapshot, ENGLISH), before)
 
+    def test_the_button_does_not_blink_while_the_next_reading_is_on_its_way(self):
+        source = started(active=BALANCED)
+        shown = button_view(source.snapshot, ENGLISH)
+        source.stop()
+        source.read_at_start = False
+        self.assertEqual(button_view(source.snapshot, ENGLISH), shown)
+        source.start()
+        self.assertEqual(button_view(source.snapshot, ENGLISH), shown)
+
     def test_every_icon_the_window_asks_for_is_shipped_and_drawn_as_a_symbolic_icon(self):
         icons = {pw.ICONS[profile] for profile in PROFILES} | {"power", "power-error", "check", "warning"}
         for icon in icons:
