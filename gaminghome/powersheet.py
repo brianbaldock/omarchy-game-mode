@@ -3,7 +3,8 @@
 ``PowerSheet`` holds the window's power profile source (``power.Power``) and whether the sheet is being visited.
 Every way out of the sheet ends in ``leave``, and a press that arrives after it does nothing: GTK clicks a button a
 moment after A or Enter, and that click may come after the sheet went away. Entering the sheet dismisses a failure
-or a note left from before, so that what happened while the user was away does not greet the next visit.
+or a note left from before, so that what happened while the user was away does not greet the next visit. A failure
+whose profile is active after all is moot: it leaves the sheet, and stays out when the profile changes again.
 
 ``blocks`` describes the sheet from top to bottom as plain data. Each block has a stable key and each control a
 stable name that carries nothing another program chose (``pw:<profile>``, ``pw:dismiss``, ``pw:retry``,
@@ -64,11 +65,19 @@ def failure_text(failure: power.Failure, t) -> str:
     return t("power.failure", action=t("power.failed", profile=profile_title(failure.profile, t)), reason=reason)
 
 
-def shown_failure(snapshot: power.Snapshot) -> power.Failure | None:
-    """The failure the sheet shows. None once the profile it asked for is the active one after all: an answer that
+def settles(snapshot: power.Snapshot) -> bool:
+    """Whether the snapshot's failure is moot: the profile it asked for is the active one after all. An answer that
     came too late to count, or another program, made it so, and "Couldn't switch" would contradict the check mark."""
     failure = snapshot.failure
-    if failure is not None and failure.profile in PROFILES and failure.profile == snapshot.active:
+    return failure is not None and failure.profile in PROFILES and failure.profile == snapshot.active
+
+
+def shown_failure(snapshot: power.Snapshot, settled: power.Failure | None = None) -> power.Failure | None:
+    """The failure the sheet shows: None while it is moot, and None for ``settled``, the failure that was moot once
+    (``PowerSheet.sync``), even after the profile changed again. That is the very failure, not one that reads the
+    same: a new request that fails again shows."""
+    failure = snapshot.failure
+    if failure is None or failure is settled or settles(snapshot):
         return None
     return failure
 
@@ -232,14 +241,16 @@ class PowerSheet:
     """The window's power profile source and whether the sheet is being visited.
 
     The window calls ``start`` when it is mapped and ``stop`` when it is unmapped, destroyed or the app quits;
-    ``enter`` when the sheet opens and ``leave`` on every way it goes away; ``press`` with a control's name when it
-    is pressed. A control acts on the snapshot as it is when it is pressed. A visit remembers nothing but that it is
-    one: the request on its way, the failure and the note are the source's, and the window keeps only its widgets.
+    ``sync`` each time the source reports a change; ``enter`` when the sheet opens and ``leave`` on every way it
+    goes away; ``press`` with a control's name when it is pressed. A control acts on the snapshot as it is when it is
+    pressed. The request on its way, the failure and the note are the source's; the sheet remembers only whether it
+    is being visited and which failure was moot once, and the window keeps only its widgets.
     """
 
     def __init__(self, source: power.Power):
         self.source = source
         self.visiting = False
+        self._settled: power.Failure | None = None    # the failure that was moot once: it stays out of the sheet
 
     @property
     def snapshot(self) -> power.Snapshot:
@@ -248,6 +259,15 @@ class PowerSheet:
     # -- lifecycle
     def start(self):
         self.source.start()
+
+    def sync(self):
+        """The source changed. A failure whose profile is the active one is moot, and stays out of the sheet when
+        another program changes the profile again later: it would no longer be news."""
+        snapshot = self.source.snapshot
+        if snapshot.failure is None:
+            self._settled = None
+        elif settles(snapshot):
+            self._settled = snapshot.failure
 
     def stop(self):
         self.leave()
@@ -309,7 +329,7 @@ class PowerSheet:
                                   text=t("power.readFailed")))
         else:
             blocks.append(Text("unavailable", text=t("power.unavailable")))
-        blocks.extend(self._notices(snapshot, t))
+        blocks.extend(self._notices(snapshot, t, self._settled))
         if snapshot.usable and battery is not None:
             blocks.append(Text("sources", text=t("power.sources"), tone="muted"))
         blocks.append(Actions("close", (Control(CLOSE, t("button.close")),), end=True))
@@ -330,10 +350,10 @@ class PowerSheet:
         return options
 
     @staticmethod
-    def _notices(snapshot: power.Snapshot, t) -> list[Block]:
+    def _notices(snapshot: power.Snapshot, t, settled: power.Failure | None) -> list[Block]:
         notices: list[Block] = []
         dismiss = (Control(DISMISS, t("power.dismiss")),)
-        failure = shown_failure(snapshot)
+        failure = shown_failure(snapshot, settled)
         if failure is not None:
             notices.append(Notice("failure", dismiss, text=failure_text(failure, t), tone="warn"))
         if snapshot.note in NOTES:

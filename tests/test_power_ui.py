@@ -382,6 +382,28 @@ class BlocksTest(unittest.TestCase):
         self.assertEqual([(item.key, control_names([item])) for item in blocks if isinstance(item, Notice)],
                          [("note", [DISMISS])])
 
+    def test_a_failure_that_was_moot_once_stays_out_of_the_sheet_and_a_new_one_shows(self):
+        # Another program switches to the profile that failed and later away from it: "Couldn't switch" would be old
+        # news by then. A new request that fails the same way is news again.
+        source = started(active=BALANCED)
+        visit = opened(source)
+        visit.press(option_name(PERFORMANCE))
+        source.fail(DENIED)
+        visit.sync()
+        self.assertIn("failure", keys(self.blocks(source, visit=visit)))
+        for active in (PERFORMANCE, SAVER, BALANCED):
+            source.change(active=active)
+            visit.sync()
+            blocks = self.blocks(source, visit=visit)
+            self.assertEqual((source.snapshot.failure, "failure" in keys(blocks)),
+                             (Failure(DENIED, PERFORMANCE), False))
+        visit.press(option_name(PERFORMANCE))
+        source.fail(DENIED)
+        failure = block(self.blocks(source, visit=visit), "failure")
+        self.assertEqual((failure.text, control_names([failure])),
+                         ("Couldn't switch to Performance. This session isn't allowed to change the power profile.",
+                          [DISMISS]))
+
     def test_performance_held_back_is_one_sentence_for_every_reason_and_nothing_for_none(self):
         cases = {(HEAT,): "Performance is limited right now: the device is too hot.",
                  (LAP,): "Performance is limited right now: it is on a lap.",
@@ -916,6 +938,9 @@ class WindowTest(unittest.TestCase):
         window.sheet = "power"
         self.window._on_power(window)
         window._render_power.assert_called_once_with()
+        # The sheet hears of the change before anything is painted from it: a failure moot now stays out later.
+        self.assertEqual([call[0] for call in window.mock_calls[-3:]],
+                         ["_power.sync", "_paint_power_button", "_render_power"])
 
     def test_the_power_code_of_the_window_owns_no_timer_and_no_animation(self):
         names = [name for name in self.methods if "power" in name or name.startswith("_pw_")]

@@ -52,18 +52,19 @@ says so. A ``pw`` word (use one ``bt`` or ``pw`` word at a time) renders Home an
   pwdegraded  performance held back because of heat        pwelsewhere  another program changed it afterwards
   pwnotremembered  Omarchy could not keep the choice       pwmismatch   the firmware says quiet, not performance
 
-Every ``pw`` word but ``pwnone`` checks that the window shows what the sheet's model says (the same parts in the
-same order, and every word of them drawn), where the focus starts and that the status command names it neutrally, that
-each way out of the sheet (B, Escape, Menu, Close, Settings or Bluetooth taking its place, the window built again or
-hidden) leaves it and takes its widgets out of the window, that a click GTK delivers after the sheet has closed
-chooses nothing (A then B, A then Menu, Enter then Escape on another profile), and that a click on the power button
-opens nothing once B has hidden the window or Menu has opened Settings. A window hidden with the sheet open must have
-the focus on the power button once it is shown again and has drawn a frame. ``pwpending`` checks that the focus
-stays on the option asked for, which stays sensitive, until the answer and after it; ``pwfail`` that a failure is
-not there at the next visit, also one that arrives after the sheet closed; ``pwerror`` that Try again reads the
-service; ``pw`` that moving over the profiles with the pointer or the D-pad chooses none, and that a profile vanishing
-from the list does not leave the focus on a dead button; ``pwnone`` that there is no power button until a second
-profile is offered.
+Every ``pw`` word but ``pwnone`` checks that the window shows what the sheet's model says (the same parts in the same
+order, and every word of them drawn), where the focus starts and that the status command names it neutrally, that each
+way out of the sheet (B, Escape, Menu, Close, Settings or Bluetooth taking its place, the window built again or hidden)
+leaves it and takes its widgets out of the window, that a click GTK delivers after the sheet has closed chooses nothing
+(A then B, A then Menu, Enter then Escape on another profile), and that a click on the power button opens nothing once B
+has hidden the window or Menu has opened Settings. A window hidden with the sheet open must have the focus on the power
+button once it is shown again and has drawn a frame. ``pwpending`` checks that the focus stays on the option asked for,
+which stays sensitive, until the answer and after it; ``pwfail`` that a failure goes when another program switches to
+its profile after all, handing the focus from its Dismiss to the active profile, and stays away when the profile changes
+again, and that a failure is not there at the next visit, also one that arrives after the sheet closed; ``pwerror`` that
+Try again reads the service; ``pw`` that moving over the profiles with the pointer or the D-pad chooses none, and that a
+profile vanishing from the list does not leave the focus on a dead button; ``pwnone`` that there is no power button
+until a second profile is offered.
 """
 
 import datetime
@@ -743,6 +744,20 @@ def check_power_behaviour(word, language, window, source):
                                                          for button in window._pw_buttons.values()),
               "the profile asked for is not the active one after the answer, or something stays dimmed")
     elif word == "pwfail":
+        check(window._focus_by_name(pw.DISMISS), "the failure has no Dismiss to select")
+        source.change(active=power.PERFORMANCE)                     # another program makes the switch after all
+        settle()
+        frame(window)                                               # GTK moves a focus left in removed widgets then
+        parts = [part.pw_key for part in window._iter_children(window._pw_content)]
+        check("failure" not in parts and pw.DISMISS not in window._pw_buttons,
+              f"the failure stays next to the profile it asked for, active now: {parts}")
+        focus = window.get_focus()
+        check(focus is window._pw_buttons[option(power.PERFORMANCE)] and focus.get_root() is window,
+              f"the focus went to {window.selected_name()} when the failure it was on went, not to the active profile")
+        source.change(active=power.BALANCED)                        # and later away from it
+        settle()
+        check(pw.DISMISS not in window._pw_buttons and source.snapshot.failure is not None,
+              "a failure that was moot comes back when the profile changes again")
         window.handle_action(core.BACK)
         window.open_power()
         settle()

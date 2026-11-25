@@ -1276,6 +1276,7 @@ class HomeWindow(Gtk.ApplicationWindow):
     def _on_power(self):
         """The source reports a change: repaint the button and, when it is open, the sheet, never the whole window.
         Each setter below does nothing when it is given what its widget already shows."""
+        self._power.sync()
         self._paint_power_button()
         if self.sheet == "power":
             self._render_power()
