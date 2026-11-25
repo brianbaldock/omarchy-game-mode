@@ -57,7 +57,8 @@ same order, and every word of them drawn), where the focus starts and that the s
 each way out of the sheet (B, Escape, Menu, Close, Settings or Bluetooth taking its place, the window built again or
 hidden) leaves it and takes its widgets out of the window, that a click GTK delivers after the sheet has closed
 chooses nothing (A then B, A then Menu, Enter then Escape on another profile), and that a click on the power button
-opens nothing once B has hidden the window or Menu has opened Settings. ``pwpending`` checks that the focus
+opens nothing once B has hidden the window or Menu has opened Settings. A window hidden with the sheet open must have
+the focus on the power button once it is shown again and has drawn a frame. ``pwpending`` checks that the focus
 stays on the option asked for, which stays sensitive, until the answer and after it; ``pwfail`` that a failure is
 not there at the next visit, also one that arrives after the sheet closed; ``pwerror`` that Try again reads the
 service; ``pw`` that moving over the profiles with the pointer or the D-pad chooses none, and that a profile vanishing
@@ -786,7 +787,9 @@ def check_power_behaviour(word, language, window, source):
 
 
 def check_power_exits(window, source):
-    """Each way out of the sheet leaves it, and takes its widgets and words out of the window."""
+    """Each way out of the sheet leaves it, and takes its widgets and words out of the window. Hiding the window with
+    the sheet open leaves the focus on the power button that opened it, once the window is shown again and has drawn
+    a frame."""
     t = window.runtime.t
 
     def reopen():
@@ -816,9 +819,12 @@ def check_power_exits(window, source):
     left("hiding the window")
     check(window.sheet is None and not source.running and source.calls[-1] == ("stop",),
           "hiding the window did not close the sheet and stop the power profile")
-    window.set_visible(True)
+    frame(window, lambda: window.set_visible(True))                # GTK moves a focus left in removed widgets then
     settle()
     check(source.running, "showing the window again did not start the power profile")
+    check(window.get_focus() is window.power_button,
+          f"shown again, the window has the focus on {window.get_focus() and window.get_focus().get_name()}, "
+          "not on the power button that opened the sheet")
     if window.sheet is not None:
         window.close_sheet()
 
