@@ -980,6 +980,67 @@ class WindowTest(unittest.TestCase):
                   if "dimmed" in selector and ".gh-bt-sheet" not in selector]
         self.assertEqual(fading, [".gh-pw-option.dimmed > box"])
 
+    def test_a_part_built_again_under_the_focus_gives_it_to_the_control_of_the_same_name(self):
+        # A failure takes Dismiss from the note, whose part is built again without it. The focus was on the note's
+        # Dismiss and goes to the failure's, not to the active profile. GTK reports the removed button as focused
+        # until its next frame; should it report nothing, the window still knows the name of the control.
+        class Box:
+            """The sheet's box as the render uses it: its parts in order."""
+            def __init__(self):
+                self.parts = []
+
+            def get_first_child(self):
+                return self.parts[0] if self.parts else None
+
+            def remove(self, part):
+                self.parts.remove(part)
+
+            def insert_child_after(self, part, previous):
+                part.box = self
+                self.parts.insert(self.parts.index(previous) + 1 if previous is not None else 0, part)
+
+            def reorder_child_after(self, part, previous):
+                self.remove(part)
+                self.insert_child_after(part, previous)
+
+        class Part:
+            def __init__(self, block):
+                self.pw_key, self.pw_shape, self.pw_update = block.key, block.shape, lambda _block: None
+                self.pw_buttons = {control.name: mock.Mock() for control in block.controls}
+                for name, button in self.pw_buttons.items():
+                    button.get_name.return_value = name
+
+            def get_next_sibling(self):
+                index = self.box.parts.index(self) + 1
+                return self.box.parts[index] if index < len(self.box.parts) else None
+
+            def get_prev_sibling(self):
+                index = self.box.parts.index(self)
+                return self.box.parts[index - 1] if index else None
+
+        noted = Snapshot(READY, BALANCED, PROFILES, note=CHANGED_ELSEWHERE)
+        for reported in ("the removed button", "nothing"):
+            with self.subTest(gtk_reports=reported):
+                window, source = mock.MagicMock(), SimpleNamespace(snapshot=noted)
+                window.t, window._battery, window._pw_content, window._pw_part = ENGLISH, None, Box(), Part
+                window._iter_children = self.window._iter_children
+                window._power = PowerSheet(source)
+                self.window._render_power(window, opening=True)
+                note, dismiss = window._pw_content.parts[5], window._pw_buttons[DISMISS]
+                window.get_focus.return_value, window._pw_focus = dismiss, DISMISS      # the user selects Dismiss
+                source.snapshot = Snapshot(READY, BALANCED, PROFILES, failure=Failure(TIMEOUT, PERFORMANCE),
+                                           note=CHANGED_ELSEWHERE)
+                if reported == "nothing":
+                    window.get_focus.return_value = None
+                self.window._render_power(window)
+                parts = window._pw_content.parts
+                self.assertEqual(([part.pw_key for part in parts][5:7], list(parts[6].pw_buttons)),
+                                 (["failure", "note"], []))
+                self.assertIsNot(parts[6], note)
+                self.assertIsNot(window._pw_buttons[DISMISS], dismiss)
+                window._pw_buttons[DISMISS].grab_focus.assert_called_once_with()
+                window._pw_buttons[option_name(BALANCED)].grab_focus.assert_called_once_with()    # at the opening
+
     def test_the_power_button_sits_between_bluetooth_and_settings_in_the_header_row(self):
         rows = ast.get_source_segment(self.source_text, self.methods["nav_rows"])
         self.assertIn("self.bluetooth_button, self.power_button, self.settings_button]", rows)
