@@ -30,10 +30,15 @@ NAMES = (BUTTON, *(OPTION + profile for profile in PROFILES), DISMISS, RETRY, CL
 ICONS = {SAVER: "power-saver", BALANCED: "power-balanced", PERFORMANCE: "power-performance"}
 MAX_HOLDS_SHOWN = 3
 
-# The words of the firmware's platform profile that go with each profile. Any other word, "custom" among them,
-# disagrees with it. The CPU may boost in every profile but power-saver.
-FIRMWARE_WORDS = {SAVER: ("low-power", "quiet", "power-saver"), BALANCED: ("balanced", "balanced-performance"),
-                  PERFORMANCE: ("performance", "balanced-performance")}
+# The words of the firmware's platform profile that fit each profile: what power-profiles-daemon writes for it and
+# what it reads back as it. Power saver is written as low-power where the firmware offers it, else as quiet, and else
+# as balanced: the daemon writes balanced where the firmware has neither. Balanced is read back from balanced, cool
+# and balanced_performance; the kernel's own balanced-performance, which the daemon does not read, fits it as well.
+# Any other word disagrees with the active profile: custom, a word of another profile, and balanced-performance while
+# performance is active.
+FIRMWARE_WORDS = {SAVER: ("low-power", "quiet", "balanced"),
+                  BALANCED: ("balanced", "balanced-performance", "balanced_performance", "cool"),
+                  PERFORMANCE: ("performance",)}
 DEGRADED_REASONS = (HEAT, LAP, LIMITED)
 
 
@@ -96,8 +101,11 @@ def hold_lines(holds, t) -> list[str]:
 
 
 def evidence_text(snapshot: power.Snapshot, t) -> str:
-    """A sentence when what the kernel was told disagrees with the active profile, else "". It is what the kernel
-    was told, not a measurement, and it never says whether a change worked."""
+    """A sentence when what the kernel was told disagrees with the active profile, else "": a firmware word that does
+    not fit it (``FIRMWARE_WORDS``), or a processor that may not boost while balanced or performance is active. A
+    processor that may boost says nothing in any profile: power-profiles-daemon turns boost off for power saver only
+    with some processor drivers, and the snapshot does not say which one the machine has. It is what the kernel was
+    told, not a measurement, and it never says whether a change worked."""
     active = snapshot.active
     if active not in PROFILES:
         return ""
@@ -107,8 +115,6 @@ def evidence_text(snapshot: power.Snapshot, t) -> str:
         return t("power.evidence.firmware", firmware=firmware, profile=profile)
     if boost == "off" and active != SAVER:
         return t("power.evidence.boostOff", profile=profile)
-    if boost == "on" and active == SAVER:
-        return t("power.evidence.boostOn", profile=profile)
     return ""
 
 

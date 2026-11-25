@@ -405,27 +405,36 @@ class BlocksTest(unittest.TestCase):
             "Launcher is asking for Balanced. Choosing another profile ends its request."])
         self.assertIsNone(re.search(r"\b(is|are) (using|in force|holding|active)\b", text))
 
-    def test_what_the_kernel_was_told_is_shown_only_when_it_disagrees_with_the_active_profile(self):
-        agree = {SAVER: ("low-power", "quiet", "power-saver"), BALANCED: ("balanced", "balanced-performance"),
-                 PERFORMANCE: ("performance", "balanced-performance")}
-        for active, words in agree.items():
-            boost = "off" if active == SAVER else "on"
-            for word in words + ("",):
-                with self.subTest(active=active, firmware=word):
-                    self.assertNotIn("evidence", keys(self.blocks(started(active=active,
-                                                                          evidence=Evidence(word, boost)))))
-        cases = {(PERFORMANCE, "quiet", "on"): "The firmware is set to quiet, not Performance. Another program may "
-                                               "have changed it.",
-                 (SAVER, "custom", "off"): "The firmware is set to custom, not Power saver. Another program may have "
-                                           "changed it.",
-                 (BALANCED, "balanced", "off"): "The processor isn't allowed to boost, which doesn't fit Balanced. "
-                                                "Another program may have changed it.",
-                 (SAVER, "", "on"): "The processor is allowed to boost, which doesn't fit Power saver. Another "
-                                    "program may have changed it."}
-        for (active, firmware, boost), text in cases.items():
-            with self.subTest(active=active, firmware=firmware, boost=boost):
-                blocks = self.blocks(started(active=active, evidence=Evidence(firmware, boost)))
-                self.assertEqual(block(blocks, "evidence").text, text)
+    def test_each_firmware_word_disagrees_with_every_profile_it_does_not_fit(self):
+        # What power-profiles-daemon writes for a profile and reads back as it. It writes balanced for power saver
+        # where the firmware has neither low-power nor quiet, and it does not read the kernel's balanced-performance.
+        fits = {"low-power": {SAVER}, "quiet": {SAVER}, "balanced": {SAVER, BALANCED}, "cool": {BALANCED},
+                "balanced_performance": {BALANCED}, "balanced-performance": {BALANCED}, "performance": {PERFORMANCE},
+                "custom": set(), "power-saver": set(), "": set(PROFILES)}
+        for word, profiles in fits.items():
+            for active in PROFILES:
+                with self.subTest(firmware=word, active=active):
+                    blocks = self.blocks(started(active=active, evidence=Evidence(word, "on")))
+                    self.assertEqual("evidence" in keys(blocks), active not in profiles)
+        blocks = self.blocks(started(active=PERFORMANCE, evidence=Evidence("balanced-performance", "on")))
+        self.assertEqual(block(blocks, "evidence").text, "The firmware is set to balanced-performance, not "
+                                                         "Performance. Another program may have changed it.")
+        blocks = self.blocks(started(active=SAVER, evidence=Evidence("custom", "off")))
+        self.assertEqual(block(blocks, "evidence").text, "The firmware is set to custom, not Power saver. Another "
+                                                         "program may have changed it.")
+
+    def test_a_processor_that_may_not_boost_disagrees_with_balanced_and_performance_and_one_that_may_with_none(self):
+        # Boost is off in power saver only with some processor drivers, and the snapshot does not say which.
+        for active, boost, text in ((SAVER, "on", None), (SAVER, "off", None), (BALANCED, "on", None),
+                                    (PERFORMANCE, "on", None), (BALANCED, "", None),
+                                    (BALANCED, "off", "The processor isn't allowed to boost, which doesn't fit "
+                                                      "Balanced. Another program may have changed it."),
+                                    (PERFORMANCE, "off", "The processor isn't allowed to boost, which doesn't fit "
+                                                         "Performance. Another program may have changed it.")):
+            for firmware in ("", {SAVER: "quiet", BALANCED: "balanced", PERFORMANCE: "performance"}[active]):
+                with self.subTest(active=active, boost=boost, firmware=firmware):
+                    blocks = self.blocks(started(active=active, evidence=Evidence(firmware, boost)))
+                    self.assertEqual(next((item.text for item in blocks if item.key == "evidence"), None), text)
 
     def test_the_notes_come_in_order_below_the_profiles(self):
         source = started(active=BALANCED, degraded=(HEAT,), holds=(Hold(PERFORMANCE, "Game"),),

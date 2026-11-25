@@ -241,7 +241,6 @@ DEFAULTS = {
     "power.holdUnnamed": "Another program is asking for {profile}. Choosing another profile ends its request.",
     "power.evidence.firmware": "The firmware is set to {firmware}, not {profile}. Another program may have changed it.",
     "power.evidence.boostOff": "The processor isn't allowed to boost, which doesn't fit {profile}. Another program may have changed it.",
-    "power.evidence.boostOn": "The processor is allowed to boost, which doesn't fit {profile}. Another program may have changed it.",
     "power.sources": "Omarchy keeps a separate power profile for when this device is plugged in and for when it is on battery.",
     "power.readFailed": "Couldn't read the power profile.",
     "power.tryAgain": "Try again",

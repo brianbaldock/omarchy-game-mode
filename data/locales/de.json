@@ -211,7 +211,6 @@
   "power.holdUnnamed": "Ein anderes Programm fordert „{profile}“ an. Wählst du ein anderes Profil, endet diese Anforderung.",
   "power.evidence.firmware": "Die Firmware steht auf {firmware}, nicht auf „{profile}“. Vielleicht hat ein anderes Programm das geändert.",
   "power.evidence.boostOff": "Der Prozessor darf nicht hochtakten, was nicht zu „{profile}“ passt. Vielleicht hat ein anderes Programm das geändert.",
-  "power.evidence.boostOn": "Der Prozessor darf hochtakten, was nicht zu „{profile}“ passt. Vielleicht hat ein anderes Programm das geändert.",
   "power.sources": "Omarchy hat ein eigenes Energieprofil für den Betrieb am Netzteil und eines für den Akkubetrieb.",
   "power.readFailed": "Das Energieprofil konnte nicht gelesen werden.",
   "power.tryAgain": "Erneut versuchen",

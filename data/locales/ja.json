@@ -211,7 +211,6 @@
   "power.holdUnnamed": "別のプログラムが「{profile}」を求めています。別のプロファイルを選ぶと、この要求は終了します。",
   "power.evidence.firmware": "ファームウェアは「{profile}」ではなく {firmware} に設定されています。別のプログラムが変更した可能性があります。",
   "power.evidence.boostOff": "プロセッサーのブーストが許可されておらず、「{profile}」と合っていません。別のプログラムが変更した可能性があります。",
-  "power.evidence.boostOn": "プロセッサーのブーストが許可されていて、「{profile}」と合っていません。別のプログラムが変更した可能性があります。",
   "power.sources": "Omarchy は、このデバイスが電源につながっているときとバッテリーで動いているときで、別々の電源プロファイルを保持します。",
   "power.readFailed": "電源プロファイルを読み取れませんでした。",
   "power.tryAgain": "もう一度試す",

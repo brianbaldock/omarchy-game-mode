@@ -211,7 +211,6 @@
   "power.holdUnnamed": "Un autre programme demande {profile}. Choisir un autre profil met fin à sa demande.",
   "power.evidence.firmware": "Le micrologiciel est réglé sur {firmware}, pas sur {profile}. Un autre programme l’a peut-être changé.",
   "power.evidence.boostOff": "Le processeur n’a pas le droit d’accélérer, ce qui ne correspond pas à {profile}. Un autre programme l’a peut-être changé.",
-  "power.evidence.boostOn": "Le processeur a le droit d’accélérer, ce qui ne correspond pas à {profile}. Un autre programme l’a peut-être changé.",
   "power.sources": "Omarchy garde un profil d’énergie distinct pour quand cet appareil est branché et pour quand il est sur batterie.",
   "power.readFailed": "Impossible de lire le profil d’énergie.",
   "power.tryAgain": "Réessayer",

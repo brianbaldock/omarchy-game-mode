@@ -211,7 +211,6 @@
   "power.holdUnnamed": "Outro programa está pedindo {profile}. Escolher outro perfil encerra o pedido.",
   "power.evidence.firmware": "O firmware está em {firmware}, não em {profile}. Talvez outro programa o tenha mudado.",
   "power.evidence.boostOff": "O processador não pode usar o boost, o que não combina com {profile}. Talvez outro programa o tenha mudado.",
-  "power.evidence.boostOn": "O processador pode usar o boost, o que não combina com {profile}. Talvez outro programa o tenha mudado.",
   "power.sources": "O Omarchy guarda um perfil de energia separado para quando este dispositivo está na tomada e para quando está na bateria.",
   "power.readFailed": "Não foi possível ler o perfil de energia.",
   "power.tryAgain": "Tentar de novo",
