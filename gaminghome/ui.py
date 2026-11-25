@@ -1315,6 +1315,8 @@ class HomeWindow(Gtk.ApplicationWindow):
     def _leave_power(self):
         """Every way the power sheet goes away ends here: B, Close, Escape and Menu, another sheet taking its place,
         the window being built again, hidden or destroyed, and the app quitting. A choice already asked for goes on.
+        A hidden window does not open the sheet again: a click on the power button that comes late opens nothing
+        (``_from_header``).
 
         Its widgets go as well: GTK clicks a button a moment after A or Enter and calls that off only when the button
         is unrealized, so a sheet that is gone could otherwise still choose a profile.

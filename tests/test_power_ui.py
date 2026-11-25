@@ -354,9 +354,10 @@ class BlocksTest(unittest.TestCase):
         failure = block(self.blocks(source, visit=visit), "failure")
         self.assertEqual((failure.tone, control_names([failure])), ("warn", [DISMISS]))
 
-    def test_a_choice_made_before_this_visits_first_reading_does_not_call_the_service_broken(self):
+    def test_a_choice_made_before_this_visits_first_reading_fails_as_not_reached_just_then(self):
         # Until the service is read again the last visit's reading is shown, and a choice made meanwhile ends at once
-        # as unavailable; a moment later the service answers as usual, and the sheet must not contradict that.
+        # as unavailable. A moment later the service answers as usual and the failure stays, so its words speak of
+        # that moment only, which the profiles of the new reading do not contradict.
         source = started(active=BALANCED)
         source.stop()
         source.read_at_start = False
