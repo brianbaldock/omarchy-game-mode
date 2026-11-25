@@ -345,8 +345,8 @@ class BlocksTest(unittest.TestCase):
         source.change(active=SAVER)
         note = block(self.blocks(source, visit=visit), "note")
         self.assertEqual((note.text, control_names([note])),
-                         ("Another program changed the power profile after you did. Gaming Home leaves it as it is.",
-                          [DISMISS]))
+                         ("Another program changed the power profile after you did. Omarchy Game Mode leaves it as "
+                          "it is.", [DISMISS]))
         visit.press(option_name(PERFORMANCE))
         source.not_remembered()
         self.assertEqual(block(self.blocks(source, visit=visit), "note").text,
@@ -400,9 +400,9 @@ class BlocksTest(unittest.TestCase):
                  Hold(PERFORMANCE, "Ours", ours=True), Hold(BALANCED, "Launcher"), Hold(PERFORMANCE, "Fourth"))
         text = block(self.blocks(started(active=BALANCED, holds=holds)), "holds").text
         self.assertEqual(text.split("\n"), [
-            "Racing Game is asking for Performance. Choosing another profile ends its request.",
-            "Another program is asking for Power saver. Choosing another profile ends its request.",
-            "Launcher is asking for Balanced. Choosing another profile ends its request."])
+            "Racing Game is asking for Performance. Changing the profile ends its request.",
+            "Another program is asking for Power saver. Changing the profile ends its request.",
+            "Launcher is asking for Balanced. Changing the profile ends its request."])
         self.assertIsNone(re.search(r"\b(is|are) (using|in force|holding|active)\b", text))
 
     def test_each_firmware_word_disagrees_with_every_profile_it_does_not_fit(self):
@@ -716,6 +716,15 @@ class TranslationTest(unittest.TestCase):
                           for name in ("text", "title", "body", "status")]
         for text in texts:
             self.assertIsNone(claim.search(text), text)
+
+    def test_the_sheet_names_the_app_as_the_rest_of_the_interface_does(self):
+        for language in LANGUAGES:
+            strings = self.strings(language)
+            for key, text in strings.items():
+                if key.startswith("power.") and ("Gaming Home" in text or "Game Mode" in text):
+                    with self.subTest(language=language, key=key):
+                        self.assertIn(strings["app.name"], text)
+                        self.assertNotIn("Gaming Home", text)
 
     def test_names_from_other_programs_and_the_kernel_stay_left_to_right_inside_arabic(self):
         strings = self.strings("ar")

@@ -245,12 +245,12 @@ tap.
   with Dismiss (once that profile is active after all, the failure is no longer shown); that
   another program changed the profile after you did; that Omarchy could not be told to keep
   the choice; that performance is held back right now (the device is too hot, on a lap, or
-  the system limits it); which programs are asking for a profile, because choosing another
-  profile ends their request; and that the firmware was told something that does not go
-  with the active profile, or that the processor may not boost while balanced or
-  performance is active. That the processor may boost is never a note, not even in power
-  saver: on some machines it may in every profile. A failure or a note from before is gone
-  when the sheet opens again.
+  the system limits it); which programs are asking for a profile, because changing the
+  profile ends their requests, even a change to the profile one of them asks for; and that
+  the firmware was told something that does not go with the active profile, or that the
+  processor may not boost while balanced or performance is active. That the processor may
+  boost is never a note, not even in power saver: on some machines it may in every profile.
+  A failure or a note from before is gone when the sheet opens again.
 - **How long a choice lasts.** Until the power source changes (the charger is plugged in or
   unplugged) or the machine restarts. Omarchy keeps a separate power profile for plugged in
   and for battery and may keep the choice for next time, but Gaming Home cannot always tell
