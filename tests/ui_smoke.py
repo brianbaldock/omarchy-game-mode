@@ -931,6 +931,12 @@ class FakeRuntime(application.Runtime):
     def autostart_enabled(self):
         return False
 
+    def mapping_tools(self):
+        return dict.fromkeys(("test", "edit", "ally"))
+
+    def open_mapping_tool(self, tool):
+        self.last_mapping_tool = tool
+
     def header_status(self, on_clock, on_battery):
         return HeaderStatus(on_clock, on_battery, now=lambda: datetime.datetime(2026, 11, 23, 21, 41, 7),
                             style=ClockStyle(twelve_hour=True),
@@ -1007,6 +1013,19 @@ def main():
                                             check_shown(bluetooth, window, source)))]
             if bluetooth in ("btmany", "btscan"):
                 steps.append(("bluetooth-end", lambda: scroll_to_end(window)))
+        elif "mapping" in words:
+            def mapping():
+                window.open_settings()
+                press(window, "mapping:edit")
+                check(runtime.last_mapping_tool == "edit", "Settings did not open the mapping editor")
+                old = window.get_focus()
+                window.close_sheet()
+                runtime.last_mapping_tool = None
+                old.emit("clicked")
+                check(runtime.last_mapping_tool is None, "a closed Settings page launched the old tool")
+                window.open_settings()
+                check(window._focus_by_name("mapping:ally"), "the Ally measurement cannot be selected")
+            steps = [("mapping", mapping)]
         elif power_word == "pwnone":
             steps = [("home", lambda: window._focus_default())]
         elif power_word:

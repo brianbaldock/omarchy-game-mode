@@ -493,6 +493,14 @@ How far this has been checked:
 
 ## Controller modes
 
+**Settings → Controller mapping** is separate from automatic Desktop/Game profile switching.
+**Test buttons** opens the bundled, read-only `doctor buttons` guide in a terminal.
+**Edit in AntiMicroX** opens the graphical editor if installed; select the controller there.
+On an RC73YA or RC73XA with `ally-controller-fix` installed, **Measure Ally layout** runs
+`check --no-extras` in a terminal. It records a measurement for the helper but does not
+apply a remap, test rumble, mask InputPlumber or ask for root. Close games first: button
+presses still reach other programs. None of these tools starts just because Settings opens.
+
 Settings → Controller mode:
 
 - **Automatic**: game input inside games, desktop navigation on the desktop.

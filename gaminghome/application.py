@@ -416,6 +416,39 @@ class Runtime:
     def mapper_managed(self):
         return self.mapper.managed
 
+    def mapping_tools(self):
+        """Commands for this install. Nothing is started by opening Settings."""
+        tools = {}
+        editor = shutil.which("antimicrox")
+        if editor:
+            tools["edit"] = [editor, "--show"]
+        terminal = shutil.which("xdg-terminal-exec")
+        if terminal:
+            tools["test"] = [terminal, "--hold", "--", sys.executable, "-I", str(DATA_DIR.parent / "omarchy-game-mode.py"),
+                             "doctor", "buttons"]
+            helper = shutil.which("ally-controller-fix")
+            if helper:
+                try:
+                    board = Path("/sys/class/dmi/id/board_name").read_text().strip()
+                except OSError:
+                    board = ""
+                if board in ("RC73XA", "RC73YA"):
+                    tools["ally"] = [terminal, "--hold", "--", helper, "check", "--no-extras"]
+        return tools
+
+    def open_mapping_tool(self, tool):
+        argv = self.mapping_tools().get(tool)
+        if not argv:
+            self.model.message = ("error", "mapping.unavailable", {})
+            return self.on_ui_changed()
+        try:
+            Gio.Subprocess.new(argv, Gio.SubprocessFlags.NONE)
+        except GLib.Error:
+            self.model.message = ("error", "mapping.unavailable", {})
+            return self.on_ui_changed()
+        self.window.close_sheet()
+        self.window.set_visible(False)
+
     def set_mapper_managed(self, managed: bool):
         previous = self.settings.mapper_managed
         self.settings.mapper_managed = managed

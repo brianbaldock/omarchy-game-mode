@@ -1634,6 +1634,21 @@ class HomeWindow(Gtk.ApplicationWindow):
         self.inputplumber_note = label("", "gh-sheet-body", wrap=True)
         sheet.append(self.inputplumber_note)
 
+        sheet.append(label(t("mapping.title").upper(), "gh-sheet-label", margin_top=6))
+        tools = rt.mapping_tools()
+        sheet.append(label(t("mapping.help" if tools else "mapping.unavailable"), "gh-option-body", wrap=True))
+        mapping = hbox(10)
+        actions = []
+        for tool in ("test", "edit", "ally"):
+            if tool in tools:
+                button = self._nav_button(t("mapping." + tool), "gh-pill", "mapping:" + tool,
+                                          lambda b, k=tool: self._open_mapping_tool(b, k))
+                mapping.append(button)
+                actions.append(button)
+        if actions:
+            sheet.append(mapping)
+            sheet.nav_rows.append(actions)
+
         sheet.append(label(t("settings.language").upper(), "gh-sheet-label", margin_top=6))
         languages = [("system", t("settings.systemLanguage"))] + [(code, rt.translator.endonym(code)) for code in rt.translator.available]
         self.language_buttons = {}
@@ -1676,6 +1691,10 @@ class HomeWindow(Gtk.ApplicationWindow):
         sheet.nav_rows.append([close])
         self._refresh_settings_sheet()
         return sheet
+
+    def _open_mapping_tool(self, button, tool):
+        if self.sheet == "settings" and button.get_mapped() and button.is_ancestor(self._sheet_root()):
+            self.runtime.open_mapping_tool(tool)
 
     def _toggle(self, name, title, body, callback):
         button = Gtk.Button(css_classes=["gh-option", "gh-nav"])
