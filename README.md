@@ -450,8 +450,19 @@ o.bind("code:200", "Gaming Home (Library button)", "omarchy-game-mode show")
 ```
 
 That opens Gaming Home over whatever has the focus, a game included. Omarchy already
-binds `XF86TouchpadOn`, the name the US layout gives that key; the Ally has no touchpad,
-so its handler finds nothing to enable and does nothing.
+binds `XF86TouchpadOn`, the name the US layout gives the Library key; the Ally has no
+touchpad, so its handler finds nothing to enable and does nothing.
+
+For a dedicated **return to Gaming Home even from fullscreen** on a handheld measured
+to send `KEY_F16` for Armoury Crate, use the following separate binding. It presents the
+existing Home window and leaves the running game available to resume; it neither presses
+Guide nor grabs a controller. `dont_inhibit` applies even when a game inhibits shortcuts,
+but the binding is not enabled on the lock screen. Do not bind this code on a different
+device without checking what it emits first.
+
+```lua
+o.bind("code:194", "Show Gaming Home (Armoury Crate)", "omarchy-game-mode show", { dont_inhibit = true })
+```
 
 How far this has been checked:
 
@@ -492,6 +503,20 @@ How far this has been checked:
   only); anything on the Xbox Ally X.
 
 ## Controller modes
+
+**Settings → Controller mapping** is separate from automatic Desktop/Game profile switching.
+**Test buttons** opens the bundled, read-only `doctor buttons` guide in a terminal.
+**Edit in AntiMicroX** opens the graphical editor if installed; select the controller there.
+**Test in browser** opens an offline page through the same Omarchy web-app launcher as
+Xbox Cloud Gaming. Give the page focus, press a face button and select **Check again**:
+it distinguishes no exposed pad from a pad with or without a standard browser mapping.
+It never records buttons or sends data. An evdev or SDL layout working in native games
+does not mean Chromium marks the pad `standard`. A standard-mapped USB/Bluetooth pad
+is a useful comparison before changing any system-wide mappings.
+On an RC73YA or RC73XA with `ally-controller-fix` installed, **Measure Ally layout** runs
+`check --no-extras` in a terminal. It records a measurement for the helper but does not
+apply a remap, test rumble, mask InputPlumber or ask for root. Close games first: button
+presses still reach other programs. None of these tools starts just because Settings opens.
 
 Settings → Controller mode:
 
@@ -960,6 +985,16 @@ versions and one row per control (pass, fail or not tested). Serial numbers and 
 addresses are never read.
 
 ## Xbox Remote Play: before you troubleshoot
+
+When one client streams and another hangs at *Connecting*, compare the clients, not
+just the signal strength. On the **same handheld and Wi-Fi**, end the first stream and
+try [Xbox’s browser Remote Play](https://www.xbox.com/remoteplay) with the same
+console/account. This is Remote Play, not the cloud library at `xbox.com/play`; browser
+support varies by platform. A phone working on Wi-Fi and cellular does not tell you
+whether it selected a direct or relayed path. If signaling and ICE exchange succeed but
+no console candidate answers, the failure is before video decoding. A reply from a STUN
+discovery server is not a reply from the console. No ARP entry on two clients is evidence
+about those clients' local path, not proof of a broken radio or of the phone using a relay.
 
 Remote Play streams from your own console, so most of what decides whether it connects
 is set on the console. Check these there first; none of them can be seen from the handheld.

@@ -34,6 +34,9 @@ step; see [Changelog and releases](CONTRIBUTING.md#changelog-and-releases).
   one, and that the firmware or the processor does not fit the active profile. It never asks for a password, and
   nothing in it runs while Gaming Home is hidden. The README now says what the profiles measured on a ROG Xbox
   Ally. Not yet tested on the device.
+- **Controller mapping in Settings.** Open the guided button test, check which layout the browser
+  sees on an offline test page, edit a layout in AntiMicroX, or measure the layout on a supported
+  Xbox Ally with the optional local helper. Nothing is remapped automatically (#25).
 
 ### Fixed
 

@@ -841,6 +841,47 @@ class MapperTest(unittest.TestCase):
 
 
 class ApplicationTest(unittest.TestCase):
+    def test_mapping_actions_depend_on_the_installed_tools_and_board(self):
+        from unittest.mock import patch
+        from gaminghome.application import Runtime
+        installed = {tool: "/with spaces/" + tool for tool in ("xdg-terminal-exec", "ally-controller-fix", "antimicrox")}
+        with patch("shutil.which", side_effect=installed.get), patch.object(Path, "read_text", return_value="RC73YA\n"):
+            tools = Runtime.mapping_tools(None)
+        self.assertEqual(tools["ally"], [installed["xdg-terminal-exec"], "--hold", "--",
+                                         installed["ally-controller-fix"], "check", "--no-extras"])
+        self.assertEqual(tools["test"][-2:], ["doctor", "buttons"])
+        self.assertEqual(tools["edit"], [installed["antimicrox"], "--show"])
+        with patch("shutil.which", side_effect=installed.get), patch.object(Path, "read_text", return_value="other"):
+            self.assertNotIn("ally", Runtime.mapping_tools(None))
+        with patch("shutil.which", return_value=None):
+            self.assertFalse(Runtime.mapping_tools(None))
+
+    def test_unavailable_mapping_tool_leaves_home_visible_and_launches_nothing(self):
+        from unittest.mock import Mock, patch
+        from gaminghome.application import Runtime
+        rt = Mock()
+        rt.mapping_tools.return_value = {}
+        with patch("gaminghome.application.Gio.Subprocess.new") as spawn:
+            Runtime.open_mapping_tool(rt, "ally")
+        spawn.assert_not_called()
+        rt.window.set_visible.assert_not_called()
+        self.assertEqual(rt.model.message[1], "mapping.unavailable")
+
+    def test_browser_pad_check_uses_the_cloud_browser_and_only_a_bundled_page(self):
+        from types import SimpleNamespace
+        from urllib.parse import parse_qs, urlsplit
+        from unittest.mock import patch
+        from gaminghome.application import Runtime
+        t = Translator(DATA / "locales", "ar")
+        rt = SimpleNamespace(t=t, translator=t)
+        with patch("shutil.which", side_effect={"omarchy-launch-webapp": "/bin/omarchy-launch-webapp"}.get):
+            browser, page = Runtime.mapping_tools(rt)["browser"]
+        self.assertEqual(browser, "/bin/omarchy-launch-webapp")
+        parts = urlsplit(page)
+        self.assertEqual((parts.scheme, parts.netloc, Path(parts.path)), ("file", "", DATA / "gamepad-test.html"))
+        self.assertEqual(parse_qs(parts.fragment)["dir"], ["rtl"])
+        self.assertEqual(parse_qs(parts.fragment)["raw"], [t("padweb.raw")])
+
     def test_show_claims_hyprland_focus_once_when_home_maps_unfocused(self):
         # Live regression: autostarted Home mapped with no focused window, so
         # active_window stayed null and the mapper was never requested.

@@ -23,7 +23,7 @@ install:
 	install -m 644 omarchy-game-mode.py "$(DESTDIR)$(PKGDATADIR)/"
 	install -m 644 gaminghome/*.py "$(DESTDIR)$(PKGDATADIR)/gaminghome/"
 	install -m 644 gaminghome/doctor/*.py "$(DESTDIR)$(PKGDATADIR)/gaminghome/doctor/"
-	install -m 644 data/catalog.json "$(DESTDIR)$(PKGDATADIR)/data/"
+	install -m 644 data/catalog.json data/gamepad-test.html "$(DESTDIR)$(PKGDATADIR)/data/"
 	install -m 644 data/locales/*.json "$(DESTDIR)$(PKGDATADIR)/data/locales/"
 	install -m 644 data/icons/*.svg "$(DESTDIR)$(PKGDATADIR)/data/icons/"
 	install -m 644 contrib/udev/*.hwdb "$(DESTDIR)$(PKGDATADIR)/contrib/udev/"

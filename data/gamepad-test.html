@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>Gamepad API</title>
+<style>
+:root { color-scheme: light dark; font: 150% system-ui, sans-serif; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+main { padding: 1.5rem; max-width: 32rem; }
+#result { white-space: pre-line; }
+button { font: inherit; padding: .55em 1.1em; }
+</style>
+<main>
+  <h1 id="heading">Gamepad API</h1>
+  <p id="result" role="status"></p>
+  <button id="refresh" type="button">Check again</button>
+</main>
+<script>
+"use strict";
+const words = new URLSearchParams(location.hash.slice(1));
+const text = (key, fallback) => words.get(key) || fallback;
+document.documentElement.lang = text("lang", "en");
+document.documentElement.dir = words.get("dir") === "rtl" ? "rtl" : "ltr";
+document.title = document.querySelector("#heading").textContent = text("title", "Browser controller test");
+const refresh = document.querySelector("#refresh");
+refresh.textContent = text("refresh", "Check again");
+function check() {
+  let message;
+  try {
+    const pads = Array.from(navigator.getGamepads()).filter(p => p && p.connected);
+    message = pads.length ? pads.map((pad, i) => `${i + 1}. ` + (pad.mapping === "standard"
+      ? text("standard", "Controller detected with a standard layout.")
+      : text("raw", "Controller detected without a standard layout. Some games won't recognize it."))).join("\n")
+      : text("wait", "No controller exposed yet. Focus this page, press A on the controller, then check again.");
+  } catch {
+    message = text("blocked", "The browser does not allow the Gamepad API on this page.");
+  }
+  document.querySelector("#result").textContent = message;
+}
+refresh.addEventListener("click", check);
+for (const event of ["focus", "gamepadconnected", "gamepaddisconnected"]) window.addEventListener(event, check);
+check();
+</script>
+</html>
