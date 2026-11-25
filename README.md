@@ -253,10 +253,13 @@ tap.
   saver: on some machines it may in every profile. A failure or a note from before is gone
   when the sheet opens again.
 - **How long a choice lasts.** Until the power source changes (the charger is plugged in or
-  unplugged) or the machine restarts. Omarchy keeps a separate power profile for plugged in
-  and for battery and may keep the choice for next time, but Gaming Home cannot always tell
-  whether it did, so the sheet says only what Omarchy does in general, and only on a machine
-  with a battery.
+  unplugged) or the machine restarts. When Omarchy's `omarchy-powerprofiles-set` is
+  installed, Gaming Home has it keep the choice for the power source in use, so that Omarchy
+  can bring it back the next time the device runs on that source, but Gaming Home cannot
+  always tell whether it did, so the sheet never says that a choice was kept. Its line that
+  Omarchy keeps a separate power profile for plugged in and for battery appears whenever the
+  header shows a battery and there are profiles to choose from, whether or not that command
+  is installed.
 - **Other programs.** Omarchy's bar on plug and unplug, asusd, and game launchers that use
   GameMode change the profile too. Gaming Home shows the profile that is in force, says so
   when another program changes it after your choice while Gaming Home is shown, and does not
