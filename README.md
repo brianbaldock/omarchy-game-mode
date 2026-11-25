@@ -280,15 +280,16 @@ How far this has been checked:
 - **Automated tests:** what the button and the sheet show for each profile, a switch on its
   way, each failure, the notes, programs asking for a profile, performance held back and the
   firmware or the processor disagreeing, in the seven languages; where the focus goes after
-  a change; and, against a scripted stand-in that answers as the real one does (late answers
-  included), that B, Escape, Close, Menu, another sheet, rebuilding the window and hiding it
-  each leave the sheet, that a click arriving after the sheet has closed switches nothing,
-  that moving over a profile chooses nothing, that the focus stays on the profile asked for
-  until the answer, and that a failure does not greet the next visit. The sheet was rendered
-  headless with GTK Broadway in English, German, Japanese and Arabic, at 1280x720, 1920x1080
-  and 1280x600, by a script that checks that the window shows every part and every word the
-  sheet should show, and what pressing its controls does, and fails when one of those checks
-  does not hold or the window raises an error.
+  a change; and, against a scripted stand-in that copies the real one's habits where the
+  window could be fooled (late answers included, though it has no clock of its own), that B,
+  Escape, Close, Menu, another sheet, rebuilding the window and hiding it each leave the
+  sheet, that a click arriving after the sheet has closed switches nothing, that moving over
+  a profile chooses nothing, that the focus stays on the profile asked for until the answer,
+  and that a failure does not greet the next visit. The sheet was rendered headless with GTK
+  Broadway in English, German, Japanese and Arabic, at 1280x720, 1920x1080 and 1280x600, by
+  a script that checks that the window shows every part and every word the sheet should
+  show, and what pressing its controls does, and fails when one of those checks does not
+  hold or the window raises an error.
 - **Not yet tested on real devices:** the button and the sheet have not run on a handheld
   yet: how the D-pad and touch feel, whether the system allows a switch from Gaming Home as
   it is started at login, other programs switching the profile while the sheet is open, and

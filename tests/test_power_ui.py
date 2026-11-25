@@ -152,12 +152,43 @@ class FakePowerTest(unittest.TestCase):
         source.flush()
         self.assertEqual(told, [BALANCED])
         source.finish()                                               # what the service does is reported at once
-        self.assertEqual(told, [BALANCED, ""])
+        self.assertEqual(told[-1], "")
         eager = FakePower(lambda: told.append(eager.snapshot.pending), answers="later", reentrant=True)
         eager.start()
         told.clear()
         eager.set_profile(SAVER)
         self.assertEqual(told, [SAVER])
+
+    def test_the_service_announces_the_new_profile_before_it_answers_the_request(self):
+        # As power-profiles-daemon does: for a moment the profile asked for is active and still pending.
+        told = []
+        source = FakePower(lambda: told.append((source.snapshot.active, source.snapshot.pending)), active=BALANCED,
+                           answers="later")
+        source.start()
+        source.set_profile(SAVER)
+        source.flush()
+        source.finish()
+        self.assertEqual(told, [(BALANCED, SAVER), (SAVER, SAVER), (SAVER, "")])
+        self.assertEqual(source.remembered, [SAVER])
+
+    def test_start_reads_what_the_kernel_was_told_before_the_service_answers(self):
+        source = started(active=BALANCED, evidence=Evidence("balanced", "on"))
+        source.stop()
+        source.read_at_start = False
+        source.change(active=SAVER, evidence=Evidence("quiet", "on"))     # while hidden: nobody reads it
+        source.start()
+        self.assertEqual((source.snapshot.active, source.snapshot.evidence), (BALANCED, Evidence("quiet", "on")))
+        source.read()
+        self.assertEqual(source.snapshot.active, SAVER)
+
+    def test_the_service_going_away_takes_what_was_said_about_its_profile_with_it(self):
+        source = started(active=BALANCED)
+        source.set_profile(PERFORMANCE)
+        source.finish()
+        source.change(active=SAVER)
+        self.assertEqual(source.snapshot.note, CHANGED_ELSEWHERE)
+        source.change(state=ABSENT)
+        self.assertEqual((source.snapshot.state, source.snapshot.note), (ABSENT, ""))
 
     def test_a_deferred_report_comes_once_for_a_burst_and_never_after_stop(self):
         later, told = [], []

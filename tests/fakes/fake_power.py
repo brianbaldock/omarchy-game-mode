@@ -5,10 +5,12 @@ nothing of the machine: no bus, no timer, no process, no file. The test says wha
 keyword arguments, ``change``) and how a request ends (``finish``, ``fail``). That world outlives the source, as the
 service outlives the client.
 
-Where a window could be fooled, it does what the client does:
+Where a window could be fooled, it keeps to the client's habits:
 
 * the snapshot is ``UNKNOWN`` until the first ``start()``; what was last read stays across ``stop()`` and the next
   ``start()``, so the header does not blink, while ``pending``, ``failure`` and ``note`` go at ``stop()``;
+* ``start()`` reads what the kernel was told (``evidence``) at once: until this visit's first reading of the service
+  it stands next to the last visit's profile;
 * ``stop()`` forgets the request on its way: the service may still carry it out (``finish`` then changes the world,
   and the next reading shows it), but nothing is reported about it, and nothing at all is reported after ``stop()``;
 * ``set_profile`` is ignored while stopped and while a request is on its way. It ends at once as ``UNAVAILABLE``
@@ -16,9 +18,11 @@ Where a window could be fooled, it does what the client does:
   ``read()``; until then the last visit's reading is shown), and as ``UNSUPPORTED`` for a profile that is not
   offered. For the active profile it asks the service nothing (``sent`` stays as it is) and only tells Omarchy
   (``remembered``). Otherwise the service is asked: with ``answers="now"`` it answers at once, with
-  ``answers="later"`` when the test calls ``finish()`` or ``fail(code)``;
+  ``answers="later"`` when the test calls ``finish()`` or ``fail(code)``. The service announces the new profile
+  before it answers, so for a moment the profile asked for is both active and pending;
 * another program's change after a request of this visit succeeded is noted (``CHANGED_ELSEWHERE``), and so is
-  Omarchy's command failing (``not_remembered``); a new request and ``dismiss`` clear the failure and the note;
+  Omarchy's command failing (``not_remembered``); a new request and ``dismiss`` clear the failure and the note, and
+  the service going away clears the note and ends the request on its way (``UNAVAILABLE``);
 * a request whose answer never came (``fail(TIMEOUT)``, or on its way at ``stop()``) may still be carried out
   (``finish``). Its profile showing up in time counts as the answer: the time-out goes and Omarchy is told.
   ``expire()`` lets that time pass (about ten seconds for the client): afterwards the profile is only the active
@@ -29,6 +33,13 @@ When it reports: ``on_change`` only between ``start()`` and ``stop()``, and a bu
 ``reentrant=True``, so that a window cannot rely on it by accident. Otherwise a change made inside one of those calls
 goes through ``defer`` when one is given (the harness hands it the main loop), or waits for ``flush()``. A change the
 test scripts is reported at once, or through ``defer``. Every call of the protocol, ignored or not, is in ``calls``.
+
+What it leaves out: it has no clock (``expire()`` stands for the ten seconds after which a late answer no longer
+counts), it reads the service inside ``start()`` unless ``read_at_start=False`` (the client always waits for the
+answer), it runs no command (``remembered`` and ``not_remembered()`` stand for Omarchy's), it knows no bus names (a
+service that restarts goes and comes back with ``change``), the changes reported through ``defer`` come in one report
+where the client reports after each answer or signal of the service that changed something, and an exception raised
+by ``on_change`` reaches the caller, which the client never lets happen.
 """
 
 from __future__ import annotations
@@ -82,8 +93,9 @@ class FakePower:
             return
         self.running, self._live = True, False
         self._epoch += 1
-        if self.read_at_start:
-            with self._inside_call():
+        with self._inside_call():
+            self._update(evidence=self.world["evidence"])     # the kernel's files are read before the service answers
+            if self.read_at_start:
                 self._read()
 
     def stop(self):
@@ -146,9 +158,11 @@ class FakePower:
         if not (self.running and self._live):
             return
         if self._snapshot.pending == profile:
+            # The service announces the new profile before it answers: for a moment it is active and still pending.
+            self._update(active=profile, evidence=self.world["evidence"])
             self._armed = True
             self.remembered.append(profile)
-            self._update(active=profile, pending="")
+            self._update(pending="", evidence=self.world["evidence"])
         else:
             self._read()                          # the service says what it did
 
@@ -204,6 +218,7 @@ class FakePower:
         late = self._live and bool(self._late) and reading["active"] == self._late
         if world["state"] == ABSENT:
             self._armed, self._asked = False, ""    # the service went, and the request on its way with it
+            changes["note"] = ""                    # what was said about its profile no longer applies
             if snapshot.pending:
                 changes.update(pending="", failure=Failure(UNAVAILABLE, snapshot.pending))
         elif late:                                  # the answer that never came, in time: the request is done
