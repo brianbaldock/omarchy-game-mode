@@ -932,7 +932,7 @@ class FakeRuntime(application.Runtime):
         return False
 
     def mapping_tools(self):
-        return dict.fromkeys(("test", "edit", "ally"))
+        return dict.fromkeys(("test", "edit", "browser", "ally"))
 
     def open_mapping_tool(self, tool):
         self.last_mapping_tool = tool

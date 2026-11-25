@@ -867,6 +867,21 @@ class ApplicationTest(unittest.TestCase):
         rt.window.set_visible.assert_not_called()
         self.assertEqual(rt.model.message[1], "mapping.unavailable")
 
+    def test_browser_pad_check_uses_the_cloud_browser_and_only_a_bundled_page(self):
+        from types import SimpleNamespace
+        from urllib.parse import parse_qs, urlsplit
+        from unittest.mock import patch
+        from gaminghome.application import Runtime
+        t = Translator(DATA / "locales", "ar")
+        rt = SimpleNamespace(t=t, translator=t)
+        with patch("shutil.which", side_effect={"omarchy-launch-webapp": "/bin/omarchy-launch-webapp"}.get):
+            browser, page = Runtime.mapping_tools(rt)["browser"]
+        self.assertEqual(browser, "/bin/omarchy-launch-webapp")
+        parts = urlsplit(page)
+        self.assertEqual((parts.scheme, parts.netloc, Path(parts.path)), ("file", "", DATA / "gamepad-test.html"))
+        self.assertEqual(parse_qs(parts.fragment)["dir"], ["rtl"])
+        self.assertEqual(parse_qs(parts.fragment)["raw"], [t("padweb.raw")])
+
     def test_show_claims_hyprland_focus_once_when_home_maps_unfocused(self):
         # Live regression: autostarted Home mapped with no focused window, so
         # active_window stayed null and the mapper was never requested.

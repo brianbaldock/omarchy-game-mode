@@ -8,6 +8,7 @@ import shutil
 import signal
 import sys
 from pathlib import Path
+from urllib.parse import urlencode
 
 import gi
 
@@ -419,6 +420,11 @@ class Runtime:
     def mapping_tools(self):
         """Commands for this install. Nothing is started by opening Settings."""
         tools = {}
+        webapp = shutil.which("omarchy-launch-webapp")
+        if webapp:
+            labels = {k: self.t("padweb." + k) for k in ("title", "wait", "standard", "raw", "blocked", "refresh")}
+            labels.update(lang=self.translator.language, dir="rtl" if self.translator.rtl else "ltr")
+            tools["browser"] = [webapp, (DATA_DIR / "gamepad-test.html").as_uri() + "#" + urlencode(labels)]
         editor = shutil.which("antimicrox")
         if editor:
             tools["edit"] = [editor, "--show"]
