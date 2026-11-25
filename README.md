@@ -46,13 +46,16 @@ This is an independent preview, not an official Omarchy component.
 - **Bluetooth**: a header button shows whether Bluetooth is off, on or connected, and its
   sheet turns Bluetooth on or off, connects the devices this computer remembers and adds
   new ones, with the controller, a mouse or touch. See [Bluetooth](#bluetooth).
+- **Power profile**: a header button shows whether the machine runs in power saver, balanced
+  or performance, and its sheet switches between them with the controller, a mouse or
+  touch. See [Power profile](#power-profile).
 - **Theme**: uses your current Omarchy theme colors when they can be read, with a dark
   fallback. There are no background images. Nothing redraws by itself while Gaming Home is
   hidden. While it is shown and at rest, only the clock (once a minute), the battery
-  (when its level or state changes) and Bluetooth (when a device or Bluetooth itself
-  changes) change by themselves. The launcher itself makes no
-  network requests. Only the `doctor` command, when you run it, sends the diagnostic
-  probes listed under [Doctor](#doctor).
+  (when its level or state changes), Bluetooth (when a device or Bluetooth itself
+  changes) and the power profile (when it is switched) change by themselves. The launcher
+  itself makes no network requests. Only the `doctor` command, when you run it, sends the
+  diagnostic probes listed under [Doctor](#doctor).
 
 ## Clock and battery
 
@@ -214,10 +217,111 @@ How far this has been checked:
   a cancel and report one that came after the device had paired, and it forgets
   everything when stopped. Its timing and its errors are scripted. The sheet was rendered
   headless with GTK Broadway in English, German, Japanese and Arabic, at 1280x720,
-  1920x1080 and 1280x600, by a script that fails when the sheet does the wrong thing.
+  1920x1080 and 1280x600, by a script that checks what the sheet shows and what pressing
+  its controls does, and fails when one of those checks does not hold or the window raises
+  an error.
 - **Not yet tested on real devices:** none of this has run against real Bluetooth hardware
   yet: connecting, pairing with each kind of question, the switch, a device that goes away,
   and how the D-pad and touch feel on a handheld.
+
+## Power profile
+
+The header has a power profile button next to the Bluetooth button, so that a demanding game
+can get more speed, or the battery more time, without leaving Gaming Home. The button is
+there only when the machine offers a real choice of at least two profiles, or when the power
+profile could not be read. Like the rest of Home, it is selected with the D-pad, a click or a
+tap.
+
+- **Button.** Its icon is a gauge whose needle shows the active profile: low for power saver,
+  up for balanced, high for performance. The warning color means that the power profile could
+  not be read. The tooltip names the profile.
+- **Sheet.** A, Enter, a click or a tap on the button opens it, with the focus on the active
+  profile. It lists the profiles this machine can really apply, each with a line on what it
+  does, and the active one is checked. A, a click or a tap on another profile switches to it
+  at once, without asking first; moving the focus or the pointer over a profile changes
+  nothing. While a switch is on its way, that profile reads "Switching…" and the others are
+  dimmed and do nothing; the focus stays where it is.
+- **Notes.** Below the profiles the sheet says, only when it applies: why a switch failed,
+  with Dismiss (once that profile is active after all, the failure goes, and it does not
+  come back when the profile changes again); that another program changed the profile after
+  you did; that Omarchy could not be told to keep the choice; that performance is held back
+  right now (the device is too hot, on a lap, or the system limits it); which programs are
+  asking for a profile, because changing the profile ends their requests, even a change to
+  the profile one of them asks for; and that the firmware was told something that does not
+  go with the active profile, or that the processor may not boost while balanced or
+  performance is active. That the processor may boost is never a note, not even in power
+  saver: on some machines it may in every profile. A failure or a note from before is gone
+  when the sheet opens again.
+- **How long a choice lasts.** Until the power source changes (the charger is plugged in or
+  unplugged) or the machine restarts. When Omarchy's `omarchy-powerprofiles-set` is
+  installed, Gaming Home has it keep the choice for the power source in use, so that Omarchy
+  can bring it back the next time the device runs on that source, but Gaming Home cannot
+  always tell whether it did, so the sheet never says that a choice was kept. Its line that
+  Omarchy keeps a separate power profile for plugged in and for battery appears whenever the
+  header shows a battery and there are profiles to choose from, whether or not that command
+  is installed.
+- **Other programs.** Omarchy's bar on plug and unplug, asusd, and game launchers that use
+  GameMode change the profile too. Gaming Home shows the profile that is in force, says so
+  when another program changes it after your choice while Gaming Home is shown, and does not
+  switch it back. The one exception is Omarchy's command that keeps a choice: it sets the
+  profile once more as it records it, so a change that another program makes just after
+  Gaming Home is hidden, while that command still runs (usually a fraction of a second, up to
+  ten seconds under load), can be undone.
+- **Controller, keyboard, mouse and touch.** The D-pad moves between the profiles and the
+  buttons, and A presses one. B, Escape, Menu and Close close the sheet; a switch on its way
+  goes on.
+- **When it runs.** Gaming Home looks at the power profile only while it is shown (Omarchy's
+  command that keeps a choice may still finish just after it is hidden). It never starts the
+  power service (power-profiles-daemon) itself, so without it there is no button, though the
+  tools that Omarchy's command uses can start it or UPower. It never needs a password: when
+  the system does not allow the switch, the sheet says so in one line and asks for nothing.
+  The sheet holds no timer of its own and nothing in it moves while nothing changes:
+  "Switching…" is a static line.
+
+How far this has been checked:
+
+- **Automated tests:** what the button and the sheet show for each profile, a switch on its
+  way, each failure, the notes, programs asking for a profile, performance held back and the
+  firmware or the processor disagreeing, in the seven languages; where the focus goes after
+  a change; and, against a scripted stand-in that copies the real one's habits where the
+  window could be fooled (late answers included, though it has no clock of its own), that B,
+  Escape, Close, Menu, another sheet, rebuilding the window and hiding it each leave the
+  sheet, that a click arriving after the sheet has closed switches nothing, that moving over
+  a profile chooses nothing, that the focus stays on the profile asked for until the answer,
+  and that a failure does not greet the next visit. The sheet was rendered headless with GTK
+  Broadway in English, German, Japanese and Arabic, at 1280x720, 1920x1080 and 1280x600, by
+  a script that checks that the window shows every part and every word the sheet should
+  show, and what pressing its controls does, and fails when one of those checks does not
+  hold or the window raises an error.
+- **Not yet tested on real devices:** the button and the sheet have not run on a handheld
+  yet: how the D-pad and touch feel, whether the system allows a switch from Gaming Home as
+  it is started at login, other programs switching the profile while the sheet is open, and
+  how the glyphs look at the device's scale.
+
+### What the profiles do on a ROG Xbox Ally
+
+Measured on one ROG Xbox Ally (RC73YA), on AC power, with a synthetic game-like load: three
+busy CPU threads plus a 4K GPU job for six minutes per profile, each started from the same
+temperature. The figures are the steady state after the first minute; the chip bursts a
+little higher for a short time at the start (about 22.6 W in Performance and 16.8 W in
+Balanced).
+
+| Profile | Chip power | CPU clock | GPU work | CPU work | Temperature |
+| --- | --- | --- | --- | --- | --- |
+| Power saver | 6 W | 1.5 GHz | 34 % | 44 % | 46-48 °C |
+| Balanced | 15 W | 2.9 GHz | 88 % | 87 % | about 72 °C |
+| Performance | 20 W | 3.4 GHz | 100 % | 100 % | 83-85 °C |
+
+The work columns are relative to Performance. Performance over Balanced is therefore a
+modest gain: about 13 % in this mixed load (about 6 % in a GPU-only test and 14 % in a
+CPU-only one), for about 5 W more power and about 12 °C more heat. Power saver gives up most
+of the speed for 30 % of the power.
+
+What this does not show: battery power, real games, long sessions in a warm room, other
+models (the Xbox Ally X has a different chip), or noise (the fan hardly differed between
+Power saver and Balanced). The wattage cannot be set on this model, because the kernel has
+no power limits for the RC73YA; Gaming Home offers the three profiles the firmware provides
+and nothing more.
 
 ## Controls
 
@@ -227,7 +331,7 @@ How far this has been checked:
 | B | Back, or go to the Desktop from Home |
 | D-pad / left stick | Move selection (repeats only while held) |
 | LB / RB | Switch Home / Discover |
-| Menu (Start) | Settings, or close Settings or the Bluetooth sheet |
+| Menu (Start) | Settings, or close Settings, the Bluetooth sheet or the power profile sheet |
 | B in the Bluetooth sheet | Take back the Forget question or give up a pairing that has not reached "Connecting to …", then close the sheet |
 | **Hold View + Menu for 0.8 s** | Show Game Mode from anywhere |
 
@@ -659,15 +763,16 @@ power-profiles-daemon; `cycle` goes from power-saver to balanced to performance 
 through the profiles offered, and does nothing from a profile that is not one of them.
 Choosing a different profile ends every hold other programs have on one, as
 power-profiles-daemon does for any change. When Omarchy's `omarchy-powerprofiles-set` is
-installed, Omarchy keeps the choice for the power source in use once that command has
-finished (usually within a second, up to ten seconds under load). Another program changing
+installed, the command also runs it, so that Omarchy keeps the choice for the power source
+in use, and waits for it to finish (usually within a second; it is stopped after ten seconds,
+and the command says so when Omarchy could not keep the choice). Another program changing
 the profile right then (Omarchy itself does on plug and unplug) can keep the choice from
 being recorded: Gaming Home cannot always tell whether Omarchy recorded the choice when
 another program changed the profile at the same moment. The command needs no running Game
-Mode, waits for a change still running from an earlier press, and exits 1 with a one-line
-reason when a change fails (for example `denied` from an ssh session, which polkit
-refuses) and 2 on bad usage, so a key can run it. For an F14 key (`KEY_F14` is 184, so 192;
-see the touch keyboard's binding above):
+Mode, waits up to two seconds for a change still running from an earlier press, and exits 1
+with a one-line reason when a change fails (for example `denied` from an ssh session, which
+polkit refuses) and 2 on bad usage, so a key can run it. For an F14 key (`KEY_F14` is 184,
+so 192; see the touch keyboard's binding above):
 
 ```lua
 o.bind("code:192", "Cycle the power profile", "omarchy-game-mode power cycle")

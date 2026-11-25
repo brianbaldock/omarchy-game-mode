@@ -28,6 +28,19 @@ step; see [Changelog and releases](CONTRIBUTING.md#changelog-and-releases).
   a key bind. It asks power-profiles-daemon, which applies the profile before it answers, never starts the daemon
   and never asks for a password; a session the system does not allow is refused. It also tells Omarchy to keep the
   choice for the current power source.
+- **Power profile in the Gaming Home header** (#24). A gauge button opens a sheet to switch between the power
+  profiles the machine can really apply (power saver, balanced, performance), with the D-pad, mouse or touch. A
+  switch happens at once. Notes say why a switch failed, that another program changed the profile or is asking for
+  one, and that the firmware or the processor does not fit the active profile. It never asks for a password, and
+  nothing in it runs while Gaming Home is hidden. The README now says what the profiles measured on a ROG Xbox
+  Ally. Not yet tested on the device.
+
+### Fixed
+
+- A click that reaches a header button late no longer opens a sheet on a hidden Gaming Home or replaces Settings
+  (#24). GTK clicks a button about 250 ms after A or Enter, so pressing B or Menu right after A could leave the
+  Settings, Bluetooth or power sheet open on the hidden window, or open it over Settings. Library cards and Discover
+  tiles are not covered yet.
 
 ## [0.2.1] - 2026-11-24
 

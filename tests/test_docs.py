@@ -138,12 +138,32 @@ class DocsTest(unittest.TestCase):
         self.assertIn("reading the bar's `shell.json`", CONTRIBUTING)
 
     def test_the_bluetooth_text_says_what_the_switch_does_and_that_no_real_device_was_tried(self):
-        section = README[README.index("## Bluetooth"):README.index("## Controls")]
+        section = README[README.index("## Bluetooth"):README.index("## Power profile")]
         for fact in ("for the whole computer", "stays after a restart", "reconnect by itself",
                      "Only while Gaming Home is shown", "PINs with letters", "announce no name",
                      "starts on the other device", "**Not yet tested on real devices:**", "an address is never shown"):
             self.assertIn(fact, section)
         self.assertIsNone(re.search(r"bluez|rfkill|d-?bus", section, re.I))
+
+    def test_the_power_profile_text_says_what_a_choice_does_what_it_never_does_and_what_was_not_tried(self):
+        measured = README.index("### What the profiles do on a ROG Xbox Ally")
+        section = " ".join(README[README.index("## Power profile"):measured].split())
+        for fact in ("Until the power source changes", "cannot always tell whether it did", "does not switch it back",
+                     "The one exception is Omarchy's command", "never starts the power service",
+                     "never needs a password", "without asking first", "**Not yet tested on real devices:**"):
+            self.assertIn(fact, section)
+        self.assertNotIn("never switches it back", section)      # Omarchy's command may, just after Home is hidden
+        # How the service works inside is not described, and numbers are only in what the device measured, which
+        # keeps its limits next to them.
+        self.assertIsNone(re.search(r"\d+(\.\d+)? ?W\b|d-?bus|polkit|HoldProfile|ActiveProfile|placeholder", section,
+                                    re.I))
+        measured = " ".join(README[measured:README.index("## Controls")].split())
+        for fact in ("Measured on one ROG Xbox Ally (RC73YA), on AC power, with a synthetic game-like load",
+                     "| Power saver | 6 W | 1.5 GHz | 34 % | 44 % | 46-48 °C |",
+                     "| Performance | 20 W | 3.4 GHz | 100 % | 100 % | 83-85 °C |",
+                     "What this does not show: battery power, real games, long sessions in a warm room, other models"):
+            self.assertIn(fact, measured)
+        self.assertNotIn("<!-- measured", README)
 
     @needs_site
     def test_website_says_the_clock_ticks_only_while_home_is_shown(self):

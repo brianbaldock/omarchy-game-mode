@@ -13,6 +13,7 @@ from string import Template
 from gi.repository import Gdk, GLib, Gtk, Pango
 
 from . import APP_ID
+from . import powersheet as pw
 from .battery import CHARGING, describe
 from .bluetoothsheet import (CANCEL, CLOSE, PAD, PAD_KEYS, Actions, BluetoothSheet, Pad, Power, Problem, Question,
                              Row, Text, button_view, choose_focus, control_states, opening_focus)
@@ -27,6 +28,8 @@ BATTERY_FILL_PX = 20   # the fill of a full battery: the width of the glyph's bo
 BT_TEXT_CSS = {"title": "gh-sheet-title", "section": "gh-sheet-label", "body": "gh-sheet-body",
                "muted": "gh-option-body"}
 BT_WRAP_CHARS = 30     # the natural width of a wrapping text in the Bluetooth sheet, so that none widens the sheet
+PW_TEXT_CSS = {"title": "gh-sheet-title", "body": "gh-sheet-body", "muted": "gh-option-body"}
+PW_WRAP_CHARS = 30     # the same for the power profile sheet
 
 CSS = Template("""
 @define-color gh_bg $background;
@@ -280,6 +283,27 @@ window.gh-window {
 .gh-bt-sheet .gh-pill.dimmed.selected, .gh-bt-sheet .gh-pad-key.dimmed.selected { border-color: @gh_accent; }
 .gh-compact .gh-bt-panel { padding: 14px 18px; }
 .gh-compact .gh-bt-digit { font-size: 36px; }
+
+/* Power profile: the header button and its sheet. Only the focus ring outlines an option in the accent color; the
+   active profile has a filled mark and an accent glyph instead, so the two never look alike. A dimmed option dims
+   its content and not its ring. */
+.gh-pw-sheet .gh-pw-option { min-height: 72px; padding: 10px 18px; }
+.gh-pw-glyph { color: @gh_muted; }
+.gh-pw-option.current .gh-pw-glyph { color: @gh_accent; }
+.gh-pw-option.dimmed > box { opacity: 0.45; }
+.gh-pw-status { font-size: 14px; font-weight: 700; color: @gh_accent; }
+.gh-pw-mark { min-width: 26px; min-height: 26px; border-radius: 15px; border: 2px solid alpha(@gh_fg, 0.35); color: @gh_bg; }
+.gh-pw-option.current .gh-pw-mark { background-color: @gh_accent; border-color: @gh_accent; }
+.gh-pw-option.pending .gh-pw-mark { border-color: @gh_accent; border-style: dashed; }
+.gh-pw-notice {
+  padding: 12px 16px; border-radius: 20px;
+  background-color: alpha(@gh_fg, 0.05); border: 2px solid transparent;
+}
+.gh-pw-notice.warn { background-color: alpha(@gh_warning, 0.10); border-color: alpha(@gh_warning, 0.5); }
+.gh-pw-notice > image { color: @gh_warning; }
+.gh-pw-notice-text { font-size: 15px; }
+.gh-pw-notice.warn .gh-pw-notice-text { font-weight: 700; }
+.gh-compact .gh-pw-sheet .gh-pw-option { min-height: 64px; padding: 8px 16px; }
 """)
 
 
@@ -366,6 +390,12 @@ class HomeWindow(Gtk.ApplicationWindow):
         self._bt_content = None
         self._bt_buttons = {}
         self._bt_focus = None
+        # So does the power profile. A choice applies only when pressed, and goes on if the sheet closes meanwhile.
+        self._power = pw.PowerSheet(runtime.power(self._on_power))
+        self._pw_content = None
+        self._pw_buttons = {}
+        self._pw_focus = None
+        self._battery = None    # what the battery chip shows, for the power sheet's line about plugged in and battery
         self.connect("map", self._on_map)
         self.connect("unmap", self._on_unmap)
         self.connect("destroy", self._on_unmap)
@@ -391,6 +421,9 @@ class HomeWindow(Gtk.ApplicationWindow):
         # Rebuilding drops whatever sheet was open; a language change even clears ``sheet`` before it calls this.
         self._leave_bluetooth()
         if self.sheet == "bluetooth":
+            self.sheet = None
+        self._leave_power()
+        if self.sheet == "power":
             self.sheet = None
         self._library_ids = []
         self._library_cards = {}
@@ -418,6 +451,7 @@ class HomeWindow(Gtk.ApplicationWindow):
         self.refresh()
         self._status.repaint()
         self._paint_bluetooth_button()
+        self._paint_power_button()
 
     def _build_header(self):
         header = hbox(16, valign=Gtk.Align.CENTER)
@@ -484,9 +518,20 @@ class HomeWindow(Gtk.ApplicationWindow):
         self.bluetooth_icon = Gtk.Image(icon_name=icon_name(self.icons, "bluetooth"), pixel_size=24)
         self.bluetooth_button.set_child(self.bluetooth_icon)
         self.bluetooth_button.update_property([Gtk.AccessibleProperty.LABEL], [self.t("bluetooth.title")])
-        self.bluetooth_button.connect("clicked", lambda *_: self.open_bluetooth())
+        self.bluetooth_button.connect("clicked", lambda *_: self._from_header(self.open_bluetooth))
         self._hover_selects(self.bluetooth_button)
         header.append(self.bluetooth_button)
+
+        # Hidden until the source has read a choice of profiles, or a power service it could not read. Icon only:
+        # the tooltip and the accessible name say the profile.
+        self.power_button = Gtk.Button(css_classes=["gh-icon-button", "gh-nav"], valign=Gtk.Align.CENTER,
+                                       visible=False)
+        self.power_button.set_name(pw.BUTTON)
+        self.power_icon = Gtk.Image(icon_name=icon_name(self.icons, "power"), pixel_size=24)
+        self.power_button.set_child(self.power_icon)
+        self.power_button.connect("clicked", lambda *_: self._from_header(self.open_power))
+        self._hover_selects(self.power_button)
+        header.append(self.power_button)
 
         self.settings_button = Gtk.Button(css_classes=["gh-icon-button", "gh-nav"], valign=Gtk.Align.CENTER)
         self.settings_button.set_name("settings")
@@ -494,10 +539,17 @@ class HomeWindow(Gtk.ApplicationWindow):
         gear.set_pixel_size(24)
         self.settings_button.set_child(gear)
         self.settings_button.set_tooltip_text(self.t("nav.settings"))
-        self.settings_button.connect("clicked", lambda *_: self.open_settings())
+        self.settings_button.connect("clicked", lambda *_: self._from_header(self.open_settings))
         self._hover_selects(self.settings_button)
         header.append(self.settings_button)
         return header
+
+    def _from_header(self, open_sheet):
+        """Open a sheet from its header button. GTK clicks a button 250 ms after A or Enter, and by then B may have
+        hidden the window (a hidden window is unmapped, not unrealized, so the click still comes) or Menu may have
+        opened Settings: such a click opens nothing."""
+        if self.sheet is None and self.get_mapped():
+            open_sheet()
 
     def _nav_button(self, text, css, name, callback):
         button = Gtk.Button(label=text, css_classes=css.split() + ["gh-nav"])
@@ -832,25 +884,29 @@ class HomeWindow(Gtk.ApplicationWindow):
             return t("status.inLibrary"), "accent"
         return t("status.installed"), "ok"
 
-    # ---- clock, battery and Bluetooth --------------------------------------
+    # ---- clock, battery, Bluetooth and power profile -------------------------
     def _on_map(self, *_):
         self._status.start()
         self._bluetooth.start()
+        self._power.start()
 
     def _on_unmap(self, *_):
         self._status.stop()
-        if self.sheet == "bluetooth":
+        if self.sheet in ("bluetooth", "power"):
             # The sheet goes with the window, so no prompt or search of it greets the user after a game, and the focus
             # goes back to the button that opened it, as when the sheet is closed. It goes there before the sheet's
             # widgets do: GTK moves a focus left in removed widgets on to the next control at the first frame after
             # the window is shown again, and a window already hidden cannot call that off by taking the focus.
+            button = self.bluetooth_button if self.sheet == "bluetooth" else self.power_button
             self.sheet = None
             self.root.set_sensitive(True)
-            if not (self.bluetooth_button.get_visible() and self.bluetooth_button.grab_focus()):
+            if not (button.get_visible() and button.grab_focus()):
                 self._focus_default()
             self.scrim.set_visible(False)
         self._leave_bluetooth()
+        self._leave_power()
         self._bluetooth.stop()
+        self._power.stop()
 
     def _on_active_changed(self, *_):
         if self.is_active() and self.get_mapped():
@@ -860,6 +916,8 @@ class HomeWindow(Gtk.ApplicationWindow):
         self._status.stop()
         self._leave_bluetooth()
         self._bluetooth.stop()
+        self._leave_power()
+        self._power.stop()
 
     def _update_clock(self, text, date):
         """Show the time and, as its tooltip, the date. Only the clock label is touched, never the rest of the window."""
@@ -870,8 +928,12 @@ class HomeWindow(Gtk.ApplicationWindow):
         """Show the battery in its chip, or hide the chip when there is none.
 
         Each setter does nothing when it is given what the widget already has, so UPower's reports every half
-        minute (mostly a new time estimate) change a tooltip and redraw nothing.
+        minute (mostly a new time estimate) change a tooltip and redraw nothing. The power sheet is brought up to date
+        only when a battery appears or goes, because only that changes what it says.
         """
+        had, self._battery = self._battery is not None, battery
+        if self.sheet == "power" and had != (battery is not None):
+            self._render_power()
         self.battery_chip.set_visible(battery is not None)
         if battery is None:
             return
@@ -906,6 +968,7 @@ class HomeWindow(Gtk.ApplicationWindow):
     def open_bluetooth(self):
         if self.sheet == "bluetooth":
             return
+        self._leave_power()
         self.sheet = "bluetooth"
         self._bluetooth.enter()
         content = box(spacing=8, css="gh-sheet gh-bt-sheet", width_request=780)
@@ -1209,6 +1272,226 @@ class HomeWindow(Gtk.ApplicationWindow):
                 self._bt_apply(buttons[control.name], control)
         return part, update, buttons
 
+    # ---- power profile -----------------------------------------------------
+    def _on_power(self):
+        """The source reports a change: repaint the button and, when it is open, the sheet, never the whole window.
+        Each setter below does nothing when it is given what its widget already shows."""
+        self._power.sync()
+        self._paint_power_button()
+        if self.sheet == "power":
+            self._render_power()
+
+    def _paint_power_button(self):
+        view = pw.button_view(self._power.snapshot, self.t)
+        button = self.power_button
+        if not view.visible and self.get_focus() is button:
+            self.settings_button.grab_focus()
+        button.set_visible(view.visible)
+        name = icon_name(self.icons, view.icon)
+        if self.power_icon.get_icon_name() != name:
+            self.power_icon.set_from_icon_name(name)
+        if button.has_css_class("warn") != (view.tone == "warn"):
+            (button.add_css_class if view.tone == "warn" else button.remove_css_class)("warn")
+        if (button.get_tooltip_text() or "") != view.tooltip:
+            button.set_tooltip_text(view.tooltip or None)
+            button.update_property([Gtk.AccessibleProperty.LABEL], [view.tooltip])
+
+    def open_power(self):
+        if self.sheet == "power":
+            return
+        self._leave_bluetooth()
+        self.sheet = "power"
+        self._power.enter()
+        content = box(spacing=10, css="gh-sheet gh-pw-sheet", width_request=760)
+        content.nav_rows = []
+        self._pw_content, self._pw_buttons, self._pw_focus = content, {}, None
+        self._set_sheet(content)
+        holder = self.scrim.get_first_child()
+        holder.set_margin_top(16)
+        holder.set_margin_bottom(16)
+        self._render_power(opening=True)
+        self.runtime.on_ui_changed()
+
+    def _leave_power(self):
+        """Every way the power sheet goes away ends here: B, Close, Escape and Menu, another sheet taking its place,
+        the window being built again, hidden or destroyed, and the app quitting. A choice already asked for goes on.
+        A hidden window does not open the sheet again: a click on the power button that comes late opens nothing
+        (``_from_header``).
+
+        Its widgets go as well: GTK clicks a button a moment after A or Enter and calls that off only when the button
+        is unrealized, so a sheet that is gone could otherwise still choose a profile.
+        """
+        content, self._pw_content, self._pw_buttons, self._pw_focus = self._pw_content, None, {}, None
+        holder = content.get_ancestor(Gtk.ScrolledWindow.__gtype__) if content is not None else None
+        if holder is not None and holder.get_parent() is not None:
+            holder.get_parent().remove(holder)
+        self._power.leave()
+
+    def _render_power(self, focus=None, opening=False):
+        """Bring the open sheet up to date in place. A part that still has the same controls keeps its widgets and
+        is only updated, so the focus, its ring and the scroll position stay where they were; the sheet's
+        ScrolledWindow is never replaced. When the control that had the focus is gone, the focus goes to one that
+        changes nothing: the active profile, Try again or Close."""
+        content = self._pw_content
+        if content is None:
+            return
+        blocks = self._power.blocks(self.t, self._battery)
+        old = {part.pw_key: part for part in self._iter_children(content)}
+        previous, buttons, rows = None, {}, []
+        for block in blocks:
+            part = old.pop(block.key, None)
+            if part is not None and part.pw_shape != block.shape:
+                content.remove(part)
+                part = None
+            if part is None:
+                part = self._pw_part(block)
+                content.insert_child_after(part, previous)
+            else:
+                part.pw_update(block)
+                if part.get_prev_sibling() is not previous:
+                    content.reorder_child_after(part, previous)
+            previous = part
+            buttons.update(part.pw_buttons)
+            if block.controls:
+                rows.append([part.pw_buttons[control.name] for control in block.controls])
+        for part in old.values():
+            content.remove(part)
+        content.nav_rows, self._pw_buttons = rows, buttons
+        names, current = pw.control_names(blocks), pw.current_option(self._power.snapshot, blocks)
+        focused = self.get_focus()
+        if opening:
+            target = pw.opening_focus(names, current)
+        else:
+            name = focused.get_name() if focused is not None else None
+            target = pw.choose_focus(focus or (name if name in buttons else self._pw_focus), names, current)
+        if target is not None and focused is not buttons[target]:
+            buttons[target].grab_focus()
+
+    def _pw_part(self, block):
+        build = {pw.Text: self._pw_text, pw.Option: self._pw_option, pw.Notice: self._pw_notice,
+                 pw.Actions: self._pw_actions}[type(block)]
+        part, update, buttons = build(block)
+        part.pw_key, part.pw_shape, part.pw_update, part.pw_buttons = block.key, block.shape, update, buttons
+        update(block)
+        return part
+
+    def _on_pw_clicked(self, button):
+        name = button.get_name()
+        if self.sheet != "power" or self._pw_buttons.get(name) is not button:
+            return                      # a click that GTK delivers after the sheet changed or went away
+        if name == pw.CLOSE:
+            self.close_sheet()
+            return
+        focus = self._power.press(name)
+        self._paint_power_button()
+        self._render_power(focus)
+
+    def _pw_button(self, control):
+        button = Gtk.Button(css_classes=["gh-pill", "gh-nav"], valign=Gtk.Align.CENTER)
+        button.set_name(control.name)
+        button.connect("clicked", self._on_pw_clicked)
+        self._hover_selects(button)
+        return button
+
+    @staticmethod
+    def _pw_apply(button, control):
+        if button.get_label() != control.text:
+            button.set_label(control.text)
+        if button.has_css_class("primary") != (control.style == "primary"):
+            (button.add_css_class if control.style == "primary" else button.remove_css_class)("primary")
+
+    @staticmethod
+    def _pw_dim(button, dimmed):
+        """An option that would do nothing now (another profile is on its way) is dimmed and announced as disabled,
+        but stays sensitive: GTK takes the focus away from an insensitive widget, and it must stay where it was."""
+        if button.has_css_class("dimmed") != dimmed:
+            (button.add_css_class if dimmed else button.remove_css_class)("dimmed")
+            button.update_state([Gtk.AccessibleState.DISABLED], [dimmed])
+
+    def _pw_text(self, block):
+        text = label("", PW_TEXT_CSS[block.tone], wrap=True, max_chars=PW_WRAP_CHARS, hexpand=True)
+        return text, lambda b: text.set_text(b.text), {}
+
+    def _pw_option(self, block):
+        """One profile: its glyph, its name and what it does, "Switching…" while it is asked for, and a mark that is
+        filled for the active profile. The button is a radio button for assistive technologies."""
+        button = Gtk.Button(css_classes=["gh-option", "gh-pw-option", "gh-nav"],
+                            accessible_role=Gtk.AccessibleRole.RADIO)
+        button.set_name(block.controls[0].name)
+        content = hbox(16)
+        glyph = Gtk.Image(icon_name=icon_name(self.icons, block.icon), pixel_size=28, valign=Gtk.Align.CENTER,
+                          css_classes=["gh-pw-glyph"])
+        texts = box(spacing=2, hexpand=True, valign=Gtk.Align.CENTER)
+        title = label("", "gh-option-title", wrap=True, max_chars=PW_WRAP_CHARS)
+        body = label("", "gh-option-body", wrap=True, max_chars=PW_WRAP_CHARS)
+        texts.append(title)
+        texts.append(body)
+        status = label("", "gh-pw-status", valign=Gtk.Align.CENTER)
+        mark = box(css="gh-pw-mark", valign=Gtk.Align.CENTER, hexpand=False, vexpand=False)
+        check = Gtk.Image(icon_name=icon_name(self.icons, "check"), pixel_size=16, hexpand=True, vexpand=True)
+        mark.append(check)
+        for child in (glyph, texts, status, mark):
+            content.append(child)
+        button.set_child(content)
+        button.connect("clicked", self._on_pw_clicked)
+        self._hover_selects(button)
+
+        def update(b):
+            title.set_text(b.title)
+            body.set_text(b.body)
+            status.set_text(b.status)
+            status.set_visible(bool(b.status))
+            check.set_visible(b.current)
+            for style, on in (("current", b.current), ("pending", b.pending)):
+                if button.has_css_class(style) != on:
+                    (button.add_css_class if on else button.remove_css_class)(style)
+            self._pw_dim(button, b.dimmed)
+            told = (b.current, b.title, " ".join(text for text in (b.status, b.body) if text))
+            if getattr(button, "pw_told", None) != told:
+                button.pw_told = told
+                checked = Gtk.AccessibleTristate.TRUE if b.current else Gtk.AccessibleTristate.FALSE
+                button.update_state([Gtk.AccessibleState.CHECKED], [int(checked)])
+                button.update_property([Gtk.AccessibleProperty.LABEL, Gtk.AccessibleProperty.DESCRIPTION],
+                                       list(told[1:]))
+        return button, update, {button.get_name(): button}
+
+    def _pw_notice(self, block):
+        part = hbox(14, "gh-pw-notice")
+        icon = Gtk.Image(icon_name=icon_name(self.icons, "warning"), pixel_size=22, valign=Gtk.Align.CENTER)
+        text = label("", "gh-pw-notice-text", wrap=True, max_chars=PW_WRAP_CHARS, hexpand=True,
+                     valign=Gtk.Align.CENTER)
+        part.append(icon)
+        part.append(text)
+        buttons = {}
+        for control in block.controls:
+            buttons[control.name] = button = self._pw_button(control)
+            part.append(button)
+
+        def update(b):
+            text.set_text(b.text)
+            icon.set_visible(b.tone == "warn")
+            if part.has_css_class("warn") != (b.tone == "warn"):
+                (part.add_css_class if b.tone == "warn" else part.remove_css_class)("warn")
+            for control in b.controls:
+                self._pw_apply(buttons[control.name], control)
+        return part, update, buttons
+
+    def _pw_actions(self, block):
+        part = hbox(16, halign=Gtk.Align.END if block.end else Gtk.Align.FILL)
+        text = label("", "gh-sheet-body", wrap=True, max_chars=PW_WRAP_CHARS, hexpand=True, valign=Gtk.Align.CENTER)
+        part.append(text)
+        buttons = {}
+        for control in block.controls:
+            buttons[control.name] = button = self._pw_button(control)
+            part.append(button)
+
+        def update(b):
+            text.set_text(b.text)
+            text.set_visible(bool(b.text))
+            for control in b.controls:
+                self._pw_apply(buttons[control.name], control)
+        return part, update, buttons
+
     # ---- message / toast -----------------------------------------------
     def _refresh_message(self):
         message = self.runtime.message()
@@ -1254,6 +1537,7 @@ class HomeWindow(Gtk.ApplicationWindow):
 
     def open_settings(self, focus=None):
         self._leave_bluetooth()
+        self._leave_power()
         self.sheet = "settings"
         self._set_sheet(self._build_settings_sheet())
         target = {"mode": f"mode:{self.runtime.mode_choice()}", "language": f"lang:{self.runtime.settings.language}"}.get(focus)
@@ -1263,6 +1547,7 @@ class HomeWindow(Gtk.ApplicationWindow):
 
     def open_app(self, app_id):
         self._leave_bluetooth()
+        self._leave_power()
         self.sheet = ("app", app_id)
         self._render_app_sheet(app_id)
         self._focus_first_in_sheet()
@@ -1272,9 +1557,10 @@ class HomeWindow(Gtk.ApplicationWindow):
         previous = self.sheet
         self.sheet = None
         self._leave_bluetooth()
+        self._leave_power()
         self.scrim.set_visible(False)
         self.root.set_sensitive(True)
-        name = {"settings": "settings", "bluetooth": "bluetooth"}.get(previous) if isinstance(previous, str) else f"tile:{previous[1]}" if previous else None
+        name = {"settings": "settings", "bluetooth": "bluetooth", "power": pw.BUTTON}.get(previous) if isinstance(previous, str) else f"tile:{previous[1]}" if previous else None
         if self.page == "home" and isinstance(previous, tuple):
             name = f"app:{previous[1]}"
         if not (name and self._focus_by_name(name)):
@@ -1515,7 +1801,7 @@ class HomeWindow(Gtk.ApplicationWindow):
             sheet = self._sheet_root()
             rows = getattr(sheet, "nav_rows", []) if sheet else []
             return [r for r in (usable(row) for row in rows) if r]
-        header = [self.tab_home, self.tab_discover, self.bluetooth_button, self.settings_button]
+        header = [self.tab_home, self.tab_discover, self.bluetooth_button, self.power_button, self.settings_button]
         if self.page == "home":
             library = [c for c in self._iter_children(self.library_row)]
             rows = [header, [self.hero], library, [self.desktop_button, self.controls_button]]
@@ -1595,6 +1881,8 @@ class HomeWindow(Gtk.ApplicationWindow):
             self._selected.add_css_class("selected")
             if self.sheet == "bluetooth" and focus.get_name() in self._bt_buttons:
                 self._bt_focus = focus.get_name()
+            elif self.sheet == "power" and self._pw_buttons.get(focus.get_name()) is focus:
+                self._pw_focus = focus.get_name()
 
     def selected_name(self):
         """The name of the selected control, as the status command reports it. Any key of the digit pad is only
@@ -1617,7 +1905,7 @@ class HomeWindow(Gtk.ApplicationWindow):
         elif action == BACK:
             self.back()
         elif action == MENU:
-            self.close_sheet() if self.sheet in ("settings", "bluetooth") else self.open_settings()
+            self.close_sheet() if self.sheet in ("settings", "bluetooth", "power") else self.open_settings()
         elif action in (PREV_TAB, NEXT_TAB) and not self.sheet:
             self.show_page("discover" if self.page == "home" else "home")
 

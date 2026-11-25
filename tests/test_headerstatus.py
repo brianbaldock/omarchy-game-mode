@@ -602,7 +602,8 @@ class WindowHandlersTest(unittest.TestCase):
 
     def stand_in(self, active=True, mapped=True):
         return SimpleNamespace(_status=mock.Mock(), is_active=lambda: active, get_mapped=lambda: mapped,
-                               _bluetooth=mock.Mock(), _leave_bluetooth=mock.Mock(), sheet=None)
+                               _bluetooth=mock.Mock(), _leave_bluetooth=mock.Mock(), _power=mock.Mock(),
+                               _leave_power=mock.Mock(), sheet=None)
 
     def test_mapping_starts_the_status_and_unmapping_or_destroying_stops_it(self):
         window = self.stand_in()
@@ -681,7 +682,8 @@ class WindowWiringTest(unittest.TestCase):
         for word in ("Button", "_nav_button", "_hover_selects", "gh-nav", "focusable", "set_sensitive"):
             self.assertNotIn(word, chips)
         rows = ast.get_source_segment(self.source, self.methods["nav_rows"])
-        self.assertIn("header = [self.tab_home, self.tab_discover, self.bluetooth_button, self.settings_button]", rows)
+        self.assertIn("header = [self.tab_home, self.tab_discover, self.bluetooth_button, self.power_button, "
+                      "self.settings_button]", rows)
         for word in ("battery", "clock"):
             self.assertNotIn(word, rows)
 
