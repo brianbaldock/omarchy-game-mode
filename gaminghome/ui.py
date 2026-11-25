@@ -518,7 +518,7 @@ class HomeWindow(Gtk.ApplicationWindow):
         self.bluetooth_icon = Gtk.Image(icon_name=icon_name(self.icons, "bluetooth"), pixel_size=24)
         self.bluetooth_button.set_child(self.bluetooth_icon)
         self.bluetooth_button.update_property([Gtk.AccessibleProperty.LABEL], [self.t("bluetooth.title")])
-        self.bluetooth_button.connect("clicked", lambda *_: self.open_bluetooth())
+        self.bluetooth_button.connect("clicked", lambda *_: self._from_header(self.open_bluetooth))
         self._hover_selects(self.bluetooth_button)
         header.append(self.bluetooth_button)
 
@@ -529,7 +529,7 @@ class HomeWindow(Gtk.ApplicationWindow):
         self.power_button.set_name(pw.BUTTON)
         self.power_icon = Gtk.Image(icon_name=icon_name(self.icons, "power"), pixel_size=24)
         self.power_button.set_child(self.power_icon)
-        self.power_button.connect("clicked", lambda *_: self.open_power())
+        self.power_button.connect("clicked", lambda *_: self._from_header(self.open_power))
         self._hover_selects(self.power_button)
         header.append(self.power_button)
 
@@ -539,10 +539,17 @@ class HomeWindow(Gtk.ApplicationWindow):
         gear.set_pixel_size(24)
         self.settings_button.set_child(gear)
         self.settings_button.set_tooltip_text(self.t("nav.settings"))
-        self.settings_button.connect("clicked", lambda *_: self.open_settings())
+        self.settings_button.connect("clicked", lambda *_: self._from_header(self.open_settings))
         self._hover_selects(self.settings_button)
         header.append(self.settings_button)
         return header
+
+    def _from_header(self, open_sheet):
+        """Open a sheet from its header button. GTK clicks a button 250 ms after A or Enter, and by then B may have
+        hidden the window (a hidden window is unmapped, not unrealized, so the click still comes) or Menu may have
+        opened Settings: such a click opens nothing."""
+        if self.sheet is None and self.get_mapped():
+            open_sheet()
 
     def _nav_button(self, text, css, name, callback):
         button = Gtk.Button(label=text, css_classes=css.split() + ["gh-nav"])

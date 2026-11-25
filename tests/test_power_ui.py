@@ -778,6 +778,24 @@ class WindowTest(unittest.TestCase):
                 self.assert_left(window, source)
                 window._build_settings_sheet.assert_not_called()      # Menu closes the sheet, it opens nothing
 
+    def test_a_header_button_opens_its_sheet_only_on_a_shown_window_with_no_sheet_open(self):
+        # GTK clicks a button 250 ms after A or Enter: by then B may have hidden the window, which is unmapped and not
+        # unrealized, so the click still comes, or Menu may have opened Settings.
+        header = ast.get_source_segment(self.source_text, self.methods["_build_header"])
+        openings = {"bluetooth_button": "open_bluetooth", "power_button": "open_power",
+                    "settings_button": "open_settings"}
+        for button, opening in openings.items():
+            self.assertIn(f'self.{button}.connect("clicked", lambda *_: self._from_header(self.{opening}))', header)
+        for mapped, sheet, opens in ((False, None, False), (True, "settings", False), (True, "bluetooth", False),
+                                     (True, "power", False), (True, ("app", "steam"), False), (True, None, True)):
+            for opening in openings.values():
+                with self.subTest(mapped=mapped, sheet=sheet, opening=opening):
+                    window = mock.MagicMock()
+                    window.sheet = sheet
+                    window.get_mapped.return_value = mapped
+                    self.window._from_header(window, getattr(window, opening))
+                    self.assertEqual(getattr(window, opening).called, opens)
+
     def test_another_sheet_taking_its_place_leaves_it(self):
         for opening in (lambda window: window.open_settings(), lambda window: window.open_app("steam")):
             source = started(active=BALANCED)

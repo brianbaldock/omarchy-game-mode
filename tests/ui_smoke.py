@@ -50,8 +50,9 @@ says so. A ``pw`` word (use one ``bt`` or ``pw`` word at a time) renders Home an
 
 Every ``pw`` word but ``pwnone`` checks where the focus starts and that the status command names it neutrally, that
 each way out of the sheet (B, Escape, Menu, Close, Settings or Bluetooth taking its place, the window built again or
-hidden) leaves it and takes its widgets out of the window, and that a click GTK delivers after the sheet has closed
-chooses nothing (A then B, A then Menu, Enter then Escape on another profile). ``pwpending`` checks that the focus
+hidden) leaves it and takes its widgets out of the window, that a click GTK delivers after the sheet has closed
+chooses nothing (A then B, A then Menu, Enter then Escape on another profile), and that a click on the power button
+opens nothing once B has hidden the window or Menu has opened Settings. ``pwpending`` checks that the focus
 stays on the option asked for, which stays sensitive, until the answer and after it; ``pwfail`` that a failure is
 not there at the next visit, also one that arrives after the sheet closed; ``pwerror`` that Try again reads the
 service; ``pw`` that moving over the profiles with the pointer or the D-pad chooses none, and that a profile vanishing
@@ -813,7 +814,9 @@ def check_power_exits(window, source):
 
 def check_power_late_clicks(window, source):
     """GTK clicks a button 250 ms after A or Enter. A click on its way when the sheet goes must choose nothing: A then
-    B, A then Menu, Enter then Escape, each on a profile that is not the active one. Then A alone, which chooses."""
+    B, A then Menu, Enter then Escape, each on a profile that is not the active one. Then A alone, which chooses.
+    The power button in the header has the same delay: A on it then B, which hides the window from Home, must not
+    open the sheet on the hidden window, and A on it then Menu must leave Settings open."""
     def target():
         snapshot = source.snapshot
         return next(profile for profile in snapshot.available if profile != snapshot.active)
@@ -846,6 +849,22 @@ def check_power_late_clicks(window, source):
           "A on another profile did not ask for it")
     source.finish()
     settle()
+    window.close_sheet()
+    check(window.page == "home" and window._focus_by_name(pw.BUTTON), "the power button cannot be selected on Home")
+    window.handle_action(core.ACTIVATE)
+    window.handle_action(core.BACK)                                 # B on Home hides the window
+    settle(400)
+    check(not window.get_mapped() and window.sheet is None and not window._power.visiting,
+          f"A then B on the power button left the hidden window with {window.sheet!r} open")
+    frame(window, lambda: window.set_visible(True))
+    settle()
+    check(window._focus_by_name(pw.BUTTON), "the power button cannot be selected once the window is shown again")
+    window.handle_action(core.ACTIVATE)
+    window.handle_action(core.MENU)
+    check(window.sheet == "settings", f"Menu opened {window.sheet!r}, not Settings")
+    settle(400)
+    check(window.sheet == "settings" and not window._power.visiting,
+          f"A then Menu on the power button left {window.sheet!r} open, not Settings")
     window.close_sheet()
 
 
