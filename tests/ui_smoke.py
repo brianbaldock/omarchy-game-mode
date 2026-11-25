@@ -10,9 +10,13 @@ owns the controller: Game Mode reads its virtual gamepad and Settings says so. `
 always reads 9:41 PM on a 12-hour clock, whatever the machine's locale; the battery and the clock are fixed
 fakes, so nothing reads UPower, sysfs or the time.
 
+A run exits with 1 and prints the first error when one of the checks below does not hold, when a step raises, or
+when the window raises in a callback (a signal handler, a timeout or an idle source), which PyGObject would otherwise
+only print. It finds what these checks look for and nothing else.
+
 Bluetooth is a scripted ``FakeBluetooth`` too, and never the machine's. Without a ``bt`` word it is on, with three
 remembered devices and the controller connected. A ``bt`` word renders Home and then the Bluetooth sheet in one of
-these states, and checks what the sheet does, so a wrong behaviour stops the run with an error:
+these states, and checks what the sheet does:
 
   bt         on, three remembered devices, the controller connected at 80 %
   btoff      off                            bterror    the service could not be read
@@ -48,7 +52,8 @@ says so. A ``pw`` word (use one ``bt`` or ``pw`` word at a time) renders Home an
   pwdegraded  performance held back because of heat        pwelsewhere  another program changed it afterwards
   pwnotremembered  Omarchy could not keep the choice       pwmismatch   the firmware says quiet, not performance
 
-Every ``pw`` word but ``pwnone`` checks where the focus starts and that the status command names it neutrally, that
+Every ``pw`` word but ``pwnone`` checks that the window shows what the sheet's model says (the same parts in the
+same order, and every word of them drawn), where the focus starts and that the status command names it neutrally, that
 each way out of the sheet (B, Escape, Menu, Close, Settings or Bluetooth taking its place, the window built again or
 hidden) leaves it and takes its widgets out of the window, that a click GTK delivers after the sheet has closed
 chooses nothing (A then B, A then Menu, Enter then Escape on another profile), and that a click on the power button
@@ -64,6 +69,7 @@ import datetime
 import os
 import sys
 import time
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -260,12 +266,12 @@ def check_ring(window, *names):
               f"the focus ring on {name} is {seen}, not the accent {wanted} it has on a plain control")
 
 
-def texts_in(widget):
-    """Every text that the labels under this widget hold, shown or not."""
-    found = [widget.get_text()] if isinstance(widget, Gtk.Label) else []
+def texts_in(widget, drawn=False):
+    """Every text that the labels under this widget hold, shown or not; with ``drawn`` only those the window draws."""
+    found = [widget.get_text()] if isinstance(widget, Gtk.Label) and (widget.get_mapped() or not drawn) else []
     child = widget.get_first_child()
     while child is not None:
-        found.extend(texts_in(child))
+        found.extend(texts_in(child, drawn))
         child = child.get_next_sibling()
     return found
 
@@ -614,10 +620,6 @@ def play_power(word, window, source):
     settle()
 
 
-def keys(window):
-    return [block.key for block in window._power.blocks(window.runtime.t, window._battery)]
-
-
 def named(widget, prefix):
     """Whether this widget or one under it has a name that starts with ``prefix``."""
     if (widget.get_name() or "").startswith(prefix):
@@ -631,9 +633,19 @@ def named(widget, prefix):
 
 
 def check_power_shown(word, window, source):
-    """What the sheet must look like before its picture is taken."""
+    """What the sheet must look like before its picture is taken. The window shows what the sheet's model says:
+    the same parts in the same order, and every word of them drawn."""
     t = window.runtime.t
     check(window.sheet == "power", f"the power sheet is not open: {window.sheet!r}")
+    blocks = window._power.blocks(t, window._battery)
+    shown = [part.pw_key for part in window._iter_children(window._pw_content)]
+    check(shown == [block.key for block in blocks],
+          f"the window shows the parts {shown}, not {[block.key for block in blocks]}")
+    drawn = texts_in(window._pw_content, drawn=True)
+    words = [getattr(block, name, "") for block in blocks for name in ("text", "title", "body", "status")]
+    words += [control.text for block in blocks for control in block.controls]
+    missing = [text for text in words if text and text not in drawn]
+    check(not missing, f"the window does not show {missing}")
     focus = window.get_focus()
     name = focus.get_name() if focus is not None else None
     check(window._pw_buttons.get(name) is focus, f"the focus is outside the sheet: {name!r}")
@@ -642,7 +654,6 @@ def check_power_shown(word, window, source):
     check(name == wanted, f"the focus is on {name}, not on {wanted}")
     told = window.runtime.status()["selected"]
     check(told == name and told in pw.NAMES, f"the status command names the focus {told!r}")
-    shown = keys(window)
     if source.snapshot.usable:
         current = window._pw_buttons[pw.option_name(source.snapshot.active)]
         check(current.has_css_class("current") and sum(button.has_css_class("current") for button in
@@ -929,6 +940,13 @@ def main():
                           flags=Gio.ApplicationFlags.NON_UNIQUE)
     failures = []
 
+    def unexpected(kind, value, trace):
+        """PyGObject prints an exception raised in a callback (a signal handler, a timeout, an idle source) and goes
+        on, so the run would pass: it is a failure of the run like any other."""
+        failures.append("".join(traceback.format_exception(kind, value, trace)))
+
+    sys.excepthook = unexpected
+
     def shoot(window, name):
         paintable = Gtk.WidgetPaintable.new(window)
         snapshot = Gtk.Snapshot()
@@ -983,7 +1001,6 @@ def main():
             ]
 
         def fail():
-            import traceback
             failures.append(traceback.format_exc())
             app.quit()
             return False
@@ -1034,7 +1051,6 @@ def main():
         try:
             activate(app)
         except Exception:
-            import traceback
             failures.append(traceback.format_exc())
             app.quit()
 
@@ -1042,6 +1058,8 @@ def main():
     app.run([])
     if failures:
         print(failures[0], file=sys.stderr)
+        if len(failures) > 1:
+            print(f"and {len(failures) - 1} more", file=sys.stderr)
         sys.exit(1)
 
 

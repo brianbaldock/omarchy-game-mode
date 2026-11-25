@@ -217,7 +217,9 @@ How far this has been checked:
   a cancel and report one that came after the device had paired, and it forgets
   everything when stopped. Its timing and its errors are scripted. The sheet was rendered
   headless with GTK Broadway in English, German, Japanese and Arabic, at 1280x720,
-  1920x1080 and 1280x600, by a script that fails when the sheet does the wrong thing.
+  1920x1080 and 1280x600, by a script that checks what the sheet shows and what pressing
+  its controls does, and fails when one of those checks does not hold or the window raises
+  an error.
 - **Not yet tested on real devices:** none of this has run against real Bluetooth hardware
   yet: connecting, pairing with each kind of question, the switch, a device that goes away,
   and how the D-pad and touch feel on a handheld.
@@ -283,7 +285,9 @@ How far this has been checked:
   that moving over a profile chooses nothing, that the focus stays on the profile asked for
   until the answer, and that a failure does not greet the next visit. The sheet was rendered
   headless with GTK Broadway in English, German, Japanese and Arabic, at 1280x720, 1920x1080
-  and 1280x600, by a script that fails when the sheet does the wrong thing.
+  and 1280x600, by a script that checks that the window shows every part and every word the
+  sheet should show, and what pressing its controls does, and fails when one of those checks
+  does not hold or the window raises an error.
 - **Not yet tested on real devices:** the button and the sheet have not run on a handheld
   yet: how the D-pad and touch feel, whether the system allows a switch from Gaming Home as
   it is started at login, other programs switching the profile while the sheet is open, and
